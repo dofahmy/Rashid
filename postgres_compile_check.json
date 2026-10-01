@@ -1,0 +1,5 @@
+{
+  "tables_compiled": 5,
+  "dialect": "postgresql",
+  "upsert_compiled": "INSERT INTO market_candles_15m (symbol, ts, o, h, l, c, v) VALUES (%(symbol)s::VARCHAR, %(ts)s::BIGINT, %(o)s, %(h)s, %(l)s, %(c)s, %(v)s) ON CONFLICT (symbol, ts) DO UPDATE SET o = excluded.o, h = excluded.h, l = excluded.l, c = excluded.c, v = excluded.v"
+}

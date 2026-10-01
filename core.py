@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from sqlalchemy import create_engine, Column, Integer, BigInteger, String, Text, select, UniqueConstraint
 from sqlalchemy.orm import declarative_base, sessionmaker
 
-BRAND = os.getenv('BRAND_NAME', 'راشد | رؤية الأسواق')
+BRAND = os.getenv('BRAND_NAME', 'راجح | رؤية الأسواق').replace('\u0631\u0627\u0634\u062f', 'راجح')
 WELCOME = f'''أهلًا بك في {BRAND} 📈
 
 يسعدنا اهتمامك بتجربة توصيات الأسهم.
@@ -70,7 +70,13 @@ class Processed(Base):
     id=Column(BigInteger,primary_key=True)
 
 def database(url=None):
-    url=url or os.getenv('DATABASE_URL','sqlite:///leads.db')
+    from monitor import models, customer  # Additive tables; existing leads remain intact.
+    url=url or os.getenv('DATABASE_URL','')
+    if not url and os.getenv('RAILWAY_PROJECT_ID'):
+        raise RuntimeError('DATABASE_URL is required on Railway. Add a reference to the PostgreSQL service.')
+    url=url or 'sqlite:///leads.db'
+    if os.getenv('RAILWAY_PROJECT_ID') and url.startswith('sqlite'):
+        raise RuntimeError('Use PostgreSQL DATABASE_URL for shared Railway services.')
     if url.startswith('postgres://'): url=url.replace('postgres://','postgresql+psycopg://',1)
     elif url.startswith('postgresql://'): url=url.replace('postgresql://','postgresql+psycopg://',1)
     engine=create_engine(url,pool_pre_ping=True,connect_args={'check_same_thread':False,'timeout':30} if url.startswith('sqlite') else {})
@@ -93,7 +99,9 @@ def queue(s,key,chat,text,markup=None):
     s.add(Outbox(key=key,chat_id=chat,payload=json.dumps(payload,ensure_ascii=False)))
 def choices():
     return {'inline_keyboard':[[{'text':v,'callback_data':'market:'+k}] for k,v in MARKETS.items()]}
-def menu(): return {'inline_keyboard':[[{'text':'تعديل بياناتي','callback_data':'edit'}]]}
+def menu():
+    from monitor.customer import buttons
+    kb=buttons();kb['inline_keyboard'].append([{'text':'تعديل بياناتي','callback_data':'edit'}]);return kb
 def summary(l):
     return f'راجع بياناتك قبل تأكيد التسجيل:\n\nالاسم: {l.draft_name}\nرقم واتساب: {l.draft_phone}\nالسوق: {MARKETS[l.draft_market]}\n\n{CONSENT}'
 
@@ -106,6 +114,19 @@ def handle_update(s,u):
     who=(cb or {}).get('from') or m.get('from',{})
     if who.get('is_bot'): s.add(Processed(id=uid)); return
     tid=who['id']; text=m.get('text','').strip() if not cb else ''; data=cb.get('data','') if cb else ''
+    if text=='/monitor':
+        ids={v.strip() for v in os.getenv('ADMIN_TELEGRAM_IDS','').split(',') if v.strip()}
+        if str(tid) in ids:
+            from monitor.models import Plan, OPEN, LABELS
+            rows=s.scalars(select(Plan).where(Plan.state.in_(OPEN)).order_by(Plan.score.desc()).limit(10)).all()
+            lines=['راجح | متابعة الاستراتيجية التجريبية', 'بيانات شموع مكتملة قد تتأخر؛ لا يوجد تنفيذ شراء.']
+            for p in rows:
+                lines.append(f'{p.symbol} | {LABELS[p.state]} | {p.score:g}/100\nدخول {p.entry:g} · هدف {p.target:g} · وقف {p.stop:g}')
+            if not rows: lines.append('لا توجد خطط مفتوحة حاليًا. راجع صفحة /stocks في الباك إند وحالة عامل الفحص.')
+            queue(s,f'monitor-command:{uid}',tid,'\n\n'.join(lines))
+        else:
+            queue(s,f'monitor-command:{uid}',tid,'خدمة متابعة الأسهم قيد التجهيز. سيتواصل معك فريق خدمة العملاء عند إتاحتها.')
+        s.add(Processed(id=uid)); return
     if text=='/id':
         queue(s,f'id:{uid}',tid,f'Telegram ID: {tid}')
         s.add(Processed(id=uid)); return
@@ -120,7 +141,22 @@ def handle_update(s,u):
         counter+=1; queue(s,f'update:{uid}:{counter}',tid,t,markup)
     if cb:
         s.add(Outbox(key=f'ack:{uid}',chat_id=tid,method='answerCallbackQuery',payload=json.dumps({'callback_query_id':cb['id']})))
-    if text.startswith('/start') or data=='edit':
+    if text in ('/stop_us','/resume_us'):
+        from monitor.customer import Preference
+        pref=s.get(Preference,tid)
+        if not pref:pref=Preference(telegram_id=tid);s.add(pref)
+        pref.paused=int(text=='/stop_us')
+        send('تم إيقاف تنبيهات الأمريكي.' if pref.paused else 'تم استئناف تنبيهات الأمريكي إذا كانت التجربة أو الاشتراك مفعّلة.',menu())
+    elif data.startswith('us:') or text.split('@')[0] in ('/current','/results','/menu'):
+        from monitor.customer import view
+        command=text.split('@')[0]
+        if command=='/menu':send('قائمة راجح:',menu())
+        else:
+            parts=data.split(':');kind=parts[1] if len(parts)>1 else ('current' if command=='/current' else 'results')
+            page=min(100000,int(parts[2])) if len(parts)>2 and parts[2].isdigit() else 0
+            body,kb=view(s,l,kind if kind in ('current','results') else 'current',page)
+            send(body,kb)
+    elif text.startswith('/start') or data=='edit':
         parts=text.split(maxsplit=1)
         if not l.completed_at and l.source=='direct' and len(parts)==2 and re.fullmatch(r'[A-Za-z0-9_-]{1,64}',parts[1]): l.source=parts[1]
         if data=='edit' or not l.completed_at:

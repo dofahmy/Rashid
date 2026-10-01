@@ -37,7 +37,7 @@ def create_app(db=None,test_config=None):
     @app.get('/health')
     def health():
         with DB() as s: s.execute(select(1))
-        return {'ok':True}
+        return {'ok':True,'version':'rajih-us-m15-v5'}
     @app.route('/login',methods=['GET','POST'])
     def login():
         if request.method=='POST':
@@ -104,7 +104,12 @@ def create_app(db=None,test_config=None):
                 if l.status!=status: changes.append(f'الحالة: {STATUSES[l.status]} ← {STATUSES[status]}')
                 if l.owner!=owner: changes.append(f'المسؤول: {owner or "بدون"}')
                 if l.follow_up!=follow: changes.append(f'المتابعة: {follow or "بدون موعد"}')
+                previous_status=l.status
                 l.status=status; l.owner=owner; l.follow_up=follow; l.updated_at=now()
+                if previous_status not in ('trial','subscribed') and status in ('trial','subscribed'):
+                    from monitor.customer import eligible, buttons
+                    if eligible(s,l):queue(s,'us-enabled:'+secrets.token_hex(16),l.telegram_id,
+                        'تم تفعيل خدمة توصيات الأسهم الأمريكية على فريم 15 دقيقة ✅\nستصلك التوصيات الجديدة عند اكتمال شروطها. تابع المراكز المفتوحة ونتائج الشهر من الأزرار. لإيقاف التنبيهات: /stop_us',buttons())
                 note=request.form.get('note','').strip()[:4000]
                 if note: record(s,l,'note',note)
                 if changes: record(s,l,'admin',' | '.join(changes))
@@ -136,4 +141,54 @@ def create_app(db=None,test_config=None):
             return "'"+v if v.lstrip().startswith(('=','+','-','@','\t','\r')) else v
         for l in rows: writer.writerow([safe(v) for v in [l.id,l.telegram_id,l.username,l.name,l.phone,MARKETS.get(l.market,''),STATUSES[l.status],l.owner,l.follow_up,l.source,l.completed_at,l.consent_at,l.created_at]])
         return Response('\ufeff'+stream.getvalue(),mimetype='text/csv; charset=utf-8',headers={'Content-Disposition':'attachment; filename=stock-leads.csv'})
+    @app.get('/stocks')
+    @auth
+    def stocks():
+        from monitor.models import Stock, Plan, Scan, LABELS
+        from monitor.strategy import local
+        conditions=[]
+        market=request.args.get('market','')
+        state=request.args.get('state','')
+        if market in ('SA','US'): conditions.append(Plan.market==market)
+        if state in LABELS: conditions.append(Plan.state==state)
+        symbol=request.args.get('symbol','').strip().upper()[:40]
+        if symbol: conditions.append(Plan.symbol==symbol)
+        try: page=max(1,int(request.args.get('page','1')))
+        except ValueError: page=1
+        with DB() as s:
+            total=s.scalar(select(func.count()).select_from(Plan).where(*conditions))
+            pages=max(1,math.ceil(total/50));page=min(page,pages)
+            rows=s.scalars(select(Plan).where(*conditions).order_by(Plan.score.desc(),Plan.id.desc()).offset((page-1)*50).limit(50)).all()
+            counts=dict(s.execute(select(Plan.state,func.count()).group_by(Plan.state)).all())
+            universe=dict(s.execute(select(Stock.market,func.count()).group_by(Stock.market)).all())
+            errors=s.scalar(select(func.count()).select_from(Stock).where(Stock.error!=''))
+            scans=s.scalars(select(Scan).order_by(Scan.id.desc()).limit(10)).all()
+            stocks_by_symbol={r.symbol:r for r in s.scalars(select(Stock).where(Stock.symbol.in_([p.symbol for p in rows])))}
+        def link(**kw): return url_for('stocks',**{**request.args.to_dict(),**kw})
+        return render_template('stocks.html',rows=rows,counts=counts,universe=universe,errors=errors,scans=scans,
+            labels=LABELS,stock_map=stocks_by_symbol,total=total,page=page,pages=pages,link=link,local=local)
+
+    @app.get('/stocks/<int:plan_id>')
+    @auth
+    def stock_plan(plan_id):
+        import json
+        from monitor.models import Plan, Event, Stock, LABELS
+        from monitor.strategy import local
+        with DB() as s:
+            p=s.get(Plan,plan_id)
+            if not p: abort(404)
+            stock=s.get(Stock,p.symbol)
+            events=s.scalars(select(Event).where(Event.plan_id==p.id).order_by(Event.id)).all()
+        return render_template('stock_plan.html',p=p,stock=stock,events=events,labels=LABELS,local=local,
+            context=json.loads(p.context_json),rules=json.loads(p.policy_json))
+
+    @app.get('/stocks/feed')
+    @auth
+    def stock_feed():
+        from monitor.models import Stock
+        market=request.args.get('market','');conditions=[Stock.error!='']
+        if market in ('SA','US'): conditions.append(Stock.market==market)
+        with DB() as s:
+            rows=s.scalars(select(Stock).where(*conditions).order_by(Stock.market,Stock.symbol).limit(250)).all()
+        return render_template('stock_feed.html',rows=rows)
     return app

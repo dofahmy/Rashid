@@ -1,6 +1,7 @@
 .env
 *.db
-*.db-*
+*.sqlite3
+*.monitor.lock
 __pycache__/
-.venv/
 *.pyc
+.venv/

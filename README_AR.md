@@ -1,6 +1,8 @@
-# راشد | رؤية الأسواق — بوت تسجيل المهتمين ولوحة العملاء
+تعليمات هذه النسخة وتفعيل الإرسال: README_US_BOT_AR.md
 
-النسخة الثانية من الكود باسم راشد | رؤية الأسواق، جاهزة للإعداد والتشغيل. لم تُربط ببوت حقيقي أو تُنشر على Railway؛ يلزم إنشاء البوت وإضافة المتغيرات أدناه.
+# راجح | رؤية الأسواق — بوت تسجيل المهتمين ولوحة العملاء
+
+النسخة الثانية من الكود باسم راجح | رؤية الأسواق، جاهزة للإعداد والتشغيل. لم تُربط ببوت حقيقي أو تُنشر على Railway؛ يلزم إنشاء البوت وإضافة المتغيرات أدناه.
 
 ## تجربة العميل
 
@@ -34,7 +36,7 @@
 
 من @BotFather على تليجرام: /newbot، ثم اختاري الاسم وUsername ينتهي بـ bot. احفظي التوكن في متغير BOT_TOKEN فقط. لا تضعي التوكن أو قاعدة العملاء في GitHub. هذه النسخة لا تحتاج API_ID أو API_HASH أو ملف session.
 
-لإعداد الاسم والوصف والصور اتبعي ملف BOTFATHER_AR.md المرفق. رسالة الترحيب بعد /start داخل core.py والصورة المرسلة من assets/rashid_welcome.png.
+لإعداد الاسم والوصف والصور اتبعي ملف BOTFATHER_AR.md المرفق. رسالة الترحيب بعد /start داخل core.py والصورة المرسلة من assets/rajih_welcome.png.
 
 ### 2. رفع الكود
 
@@ -55,7 +57,7 @@ python -m gunicorn --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 60 wsg
 | المتغير | القيمة |
 | --- | --- |
 | DATABASE_URL | Reference إلى DATABASE_URL لخدمة PostgreSQL نفسها |
-| BRAND_NAME | راشد | رؤية الأسواق |
+| BRAND_NAME | راجح | رؤية الأسواق |
 | SECRET_KEY | قيمة عشوائية تنتج من setup_admin.py |
 | ADMIN_PASSWORD_HASH | الهاش الناتج من setup_admin.py |
 | COOKIE_SECURE | 1 |
@@ -83,7 +85,7 @@ python bot.py
 | --- | --- |
 | BOT_TOKEN | توكن البوت الجديد من BotFather |
 | DATABASE_URL | نفس مرجع قاعدة PostgreSQL المستخدمة في stock-admin |
-| BRAND_NAME | راشد | رؤية الأسواق |
+| BRAND_NAME | راجح | رؤية الأسواق |
 | ADMIN_TELEGRAM_IDS | اختياري: رقم حسابك على تليجرام، أو أرقام مفصولة بفواصل |
 
 خدمة البوت لا تحتاج Public Domain أو Healthcheck HTTP. شغلي نسخة واحدة فقط، وعطّلي Serverless/النوم إن كان مفعّلًا كي يستمر استقبال التحديثات. أثناء تغيير النشر، أوقفي النسخة القديمة قبل تشغيل الجديدة لتجنب عمل اثنتين معًا.
@@ -122,7 +124,7 @@ https://t.me/YOUR_BOT_USERNAME?start=us_ad_01
 
 ```powershell
 $env:DATABASE_URL="sqlite:///leads.db"
-$env:BRAND_NAME="راشد | رؤية الأسواق"
+$env:BRAND_NAME="راجح | رؤية الأسواق"
 $env:COOKIE_SECURE="0"
 $env:SECRET_KEY="القيمة الناتجة من setup_admin.py"
 $env:ADMIN_PASSWORD_HASH="الهاش الناتج من setup_admin.py"
@@ -162,4 +164,4 @@ py -m unittest discover -s tests -v
 
 ## تحديث نسخة قديمة
 
-ارفعي ملفات النسخة الجديدة، وحدّثي BRAND_NAME في الخدمتين إلى «راشد | رؤية الأسواق» إذا كان مضبوطًا على الاسم القديم. احتفظي بنفس DATABASE_URL للحفاظ على العملاء. لا يوجد تغيير في مخطط قاعدة البيانات في هذا التحديث. ملف الشعار assets/rashid_logo.png وصورة الترحيب assets/rashid_welcome.png.
+ارفعي ملفات النسخة الجديدة، وحدّثي BRAND_NAME في الخدمتين إلى «راجح | رؤية الأسواق» إذا كان مضبوطًا على الاسم القديم. احتفظي بنفس DATABASE_URL للحفاظ على العملاء. لا يوجد تغيير في مخطط قاعدة البيانات في هذا التحديث. ملف الشعار assets/rajih_logo.png وصورة الترحيب assets/rajih_welcome.png.
