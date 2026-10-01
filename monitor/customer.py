@@ -3,7 +3,7 @@ import os, time, math, json
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from sqlalchemy import Column, Integer, BigInteger, String, select, func, or_
-from core import Base, Lead, Outbox, queue, now
+from core import Base, Lead, Outbox, Setting, queue, now
 from .models import Plan, Stock, Event
 
 class Publication(Base):
@@ -27,6 +27,18 @@ NY=ZoneInfo('America/New_York')
 PAGE_SIZE=6
 LABELS={'ACTIVE':'مفتوحة','TARGET':'تحقق الهدف','STOPPED':'وقف خسارة','DATA_GAP':'المتابعة معلقة — بيانات ناقصة'}
 
+MIN_SCORE_KEY='us_recommendation_min_score'
+
+def minimum_score(s):
+    row=s.get(Setting,MIN_SCORE_KEY)
+    if row is None:return 0.0
+    try:value=float(row.value)
+    except (ValueError,TypeError):return 100.0
+    return value if math.isfinite(value) and 0<=value<=100 else 100.0
+
+def score_allowed(s,plan):
+    return plan.score is not None and math.isfinite(plan.score) and plan.score>=minimum_score(s)
+
 def enabled(): return os.getenv('US_RECOMMENDATIONS_ENABLED','1')=='1'
 def eligible(s, lead):
     if not lead or lead.market not in ('us','both') or lead.status not in ('trial','subscribed'):return False
@@ -39,7 +51,7 @@ def buttons():
         [{'text':'📊 نتائج التوصيات','callback_data':'us:results:0'}]]}
 
 def stamp(ts):return datetime.fromtimestamp(ts,NY).strftime('%Y-%m-%d %H:%M')+' نيويورك'
-def price(v):return 'غير متاح' if v is None else f'{v:.4f}'.rstrip('0').rstrip('.')
+def price(v):return 'غير متاح' if v is None else f'{v:.2f}'
 
 def performance(plan, stock):
     mark=plan.exit_price if plan.exit_price is not None else (stock.last_price if stock else None)
@@ -49,11 +61,12 @@ def performance(plan, stock):
 def card(plan,stock):
     pnl=performance(plan,stock)
     closed=plan.state in ('TARGET','STOPPED')
-    lines=[f'#{plan.id} | {plan.symbol} — {LABELS.get(plan.state,plan.state)}',
-           f'دخول التوصية: {price(plan.paper_entry)}$ · الهدف: {price(plan.target)}$ · الوقف: {price(plan.stop)}$',
-           f'التقييم: {plan.score:g}/100']
+    company=' '.join((stock.company or '').split())[:120] if stock else ''
+    heading=f'{plan.symbol} | {company}' if company else plan.symbol
+    lines=[f'{heading} — {LABELS.get(plan.state,plan.state)}',
+           f'دخول التوصية: {price(plan.paper_entry)}$ · الهدف: {price(plan.target)}$ · الوقف: {price(plan.stop)}$']
     if closed:lines.append(f'سعر الخروج المرجعي: {price(plan.exit_price)}$')
-    elif stock:lines.append(f'آخر سعر: {price(stock.last_price)}$ · تحديث {stamp(stock.last_bar+900)}')
+    elif stock:lines.append(f'آخر إغلاق: {price(stock.last_price)}$ · تحديث {stamp(stock.last_bar+900)}')
     if pnl is not None:lines.append(f'{"نتيجة الإغلاق" if closed else "الأداء غير المحقق"}: {pnl:+.2f}%')
     if stock and stock.error and not closed:lines.append('⚠️ تحديث البيانات متأخر؛ السعر المعروض آخر سعر متاح.')
     return '\n'.join(lines)
@@ -64,6 +77,7 @@ def notice(s,plan,kind,ts,clock=None):
     if plan.market!='US' or not enabled():return
     pub=s.get(Publication,plan.id)
     if kind=='ACTIVE':
+        if not score_allowed(s,plan):return
         if pub or plan.paper_entry is None or not 0<=clock-(ts+900)<=900:return
         pub=Publication(plan_id=plan.id,published_ts=clock,activation_end=ts+900);s.add(pub)
         leads=s.scalars(select(Lead).where(Lead.market.in_(('us','both')),Lead.status.in_(('trial','subscribed')))).all()
@@ -73,7 +87,7 @@ def notice(s,plan,kind,ts,clock=None):
             s.add(Recipient(plan_id=plan.id,telegram_id=lead.telegram_id,entry_key=key))
             stock=s.get(Stock,plan.symbol)
             text='📈 راجح | توصية أمريكية جديدة — 15 دقيقة\n\n'+card(plan,stock)
-            text+='\n\nتفعيل الشمعة: '+stamp(ts+900)+'\nالسعر مرجعي وقت الإشارة؛ تحقق من السعر الحالي. الأداء قبل الرسوم، ولا يوجد تنفيذ شراء آلي.'
+            text+='\n\nتفعيل الشمعة: '+stamp(ts+900)
             _queue(s,key,lead.telegram_id,text,plan.id,kind,ts+1800)
     elif pub and kind in ('TARGET','STOPPED','DATA_GAP'):
         for recipient in s.scalars(select(Recipient).where(Recipient.plan_id==plan.id)):
@@ -94,7 +108,7 @@ def delivery_allowed(s,row,payload,clock=None):
     plan=s.get(Plan,payload['_us_plan_id'])
     if not plan or plan.market!='US':return False
     if payload['_us_kind']=='ACTIVE':
-        return plan.state=='ACTIVE' and int(time.time() if clock is None else clock)<=payload['_us_expires']
+        return score_allowed(s,plan) and plan.state=='ACTIVE' and int(time.time() if clock is None else clock)<=payload['_us_expires']
     recipient=s.get(Recipient,(plan.id,row.chat_id))
     entry=s.scalar(select(Outbox).where(Outbox.key==recipient.entry_key)) if recipient else None
     return entry is not None and entry.status in ('sent','uncertain')
