@@ -92,8 +92,9 @@ def create_app(db=None,test_config=None):
     @auth
     def detail(lead_id):
         with DB.begin() as s:
-            l=s.get(Lead,lead_id)
+            l=s.scalar(select(Lead).where(Lead.id==lead_id).with_for_update())
             if not l: abort(404)
+            from monitor.limits import limits,save_limits,occupied,LIMIT_FIELDS
             if request.method=='POST':
                 status=request.form.get('status'); owner=request.form.get('owner','').strip()[:100]; follow=request.form.get('follow_up','')
                 if status not in STATUSES: abort(400)
@@ -101,6 +102,13 @@ def create_app(db=None,test_config=None):
                     try: datetime.strptime(follow,'%Y-%m-%d')
                     except ValueError: abort(400)
                 changes=[]
+                if any('limit_'+k in request.form for k in LIMIT_FIELDS):
+                    try:
+                        cap={k:int(request.form.get('limit_'+k,'')) for k in LIMIT_FIELDS}
+                        save_limits(s,l.telegram_id,cap)
+                    except (ValueError,TypeError):
+                        abort(400,description='الحدود أعداد صحيحة من 0 إلى 10000، ومجموع الفئات يجب أن يساوي الإجمالي.')
+                    changes.append('حدود التوصيات: '+str(cap))
                 if l.status!=status: changes.append(f'الحالة: {STATUSES[l.status]} ← {STATUSES[status]}')
                 if l.owner!=owner: changes.append(f'المسؤول: {owner or "بدون"}')
                 if l.follow_up!=follow: changes.append(f'المتابعة: {follow or "بدون موعد"}')
@@ -117,7 +125,7 @@ def create_app(db=None,test_config=None):
             history=s.scalars(select(Activity).where(Activity.lead_id==lead_id).order_by(Activity.id.desc())).all()
             duplicate=s.scalar(select(func.count()).select_from(Lead).where(Lead.phone==l.phone,Lead.id!=l.id)) if l.phone else 0
             outbox=s.scalars(select(Outbox).where(Outbox.chat_id==l.telegram_id,Outbox.method.in_(['sendMessage','sendPhoto'])).order_by(Outbox.id.desc()).limit(10)).all()
-            return render_template('detail.html',l=l,history=history,duplicate=duplicate,outbox=outbox,telegram='https://t.me/'+l.username if l.username else f'tg://user?id={l.telegram_id}',whatsapp='https://wa.me/'+l.phone.lstrip('+') if l.phone else '')
+            return render_template('detail.html',limits=limits(s,l.telegram_id),usage=occupied(s,l.telegram_id),l=l,history=history,duplicate=duplicate,outbox=outbox,telegram='https://t.me/'+l.username if l.username else f'tg://user?id={l.telegram_id}',whatsapp='https://wa.me/'+l.phone.lstrip('+') if l.phone else '')
     @app.post('/leads/<int:lead_id>/message')
     @auth
     def message(lead_id):
@@ -149,17 +157,45 @@ def create_app(db=None,test_config=None):
             lead=authorized_lead(s,token)
             if lead is None:
                 return render_template('customer_current.html',expired=True,rows=[],price=price),403
-            rows=current_rows(s)
+            rows=current_rows(s,lead)
         return render_template('customer_current.html',expired=False,rows=rows,price=price)
+
+    @app.post('/stocks/reset')
+    @auth
+    def reset_stock_history():
+        from monitor.worker import exclusive,LOCK_KEY
+        from monitor.reset import reset_recommendations
+        # The bot holds its lock for its whole lifetime. Refuse rather than
+        # delete while a Telegram request or scanner transaction is in flight.
+        with exclusive(DB,72617368696416) as bot_free:
+            if not bot_free:
+                flash('أوقفي خدمة البوت مؤقتًا ثم اضغطي تصفير سجل التطوير.');return redirect(url_for('stocks'))
+            with exclusive(DB,LOCK_KEY) as monitor_free:
+                if not monitor_free:
+                    flash('الفحص يعمل الآن. أوقفي خدمة Monitor مؤقتًا ثم أعيدي المحاولة.');return redirect(url_for('stocks'))
+                with DB.begin() as s:reset_recommendations(s)
+        flash('تم مسح التوصيات والنتائج القديمة وطابور تنبيهاتها. العملاء وإعداداتهم محفوظون. شغلي البوت وMonitor لبدء السجل الجديد.')
+        return redirect(url_for('stocks'))
 
     @app.post('/stocks/settings')
     @auth
     def stock_settings():
         from monitor.customer import MIN_SCORE_KEY
+        from monitor.limits import HOLD_DAYS_KEY,HOLD_PROFIT_KEY,holding_settings
         try:threshold=float(request.form.get('minimum_score',''))
         except (ValueError,TypeError):abort(400)
         if not math.isfinite(threshold) or not 0<=threshold<=100:abort(400)
         with DB.begin() as s:
+            if 'hold_days' in request.form or 'hold_min_profit' in request.form:
+                try:
+                    days=int(request.form.get('hold_days',''))
+                    profit=float(request.form.get('hold_min_profit',''))
+                except (ValueError,TypeError):abort(400)
+                if not 1<=days<=365 or not math.isfinite(profit) or not 0<=profit<=100:abort(400)
+                for key,value in ((HOLD_DAYS_KEY,days),(HOLD_PROFIT_KEY,profit)):
+                    setting=s.get(Setting,key)
+                    if setting is None:setting=Setting(key=key);s.add(setting)
+                    setting.value=str(value)
             row=s.get(Setting,MIN_SCORE_KEY)
             if row is None:row=Setting(key=MIN_SCORE_KEY);s.add(row)
             row.value=str(threshold)
@@ -182,18 +218,21 @@ def create_app(db=None,test_config=None):
         try: page=max(1,int(request.args.get('page','1')))
         except ValueError: page=1
         with DB() as s:
+            from monitor.limits import holding_settings
+            hold_days,hold_min_profit=holding_settings(s)
             send_minimum_score=minimum_score(s)
+            conditions.extend([Plan.market=='US',Plan.score>=send_minimum_score])
             total=s.scalar(select(func.count()).select_from(Plan).where(*conditions))
             pages=max(1,math.ceil(total/50));page=min(page,pages)
             rows=s.scalars(select(Plan).where(*conditions).order_by(Plan.score.desc(),Plan.id.desc()).offset((page-1)*50).limit(50)).all()
-            counts=dict(s.execute(select(Plan.state,func.count()).group_by(Plan.state)).all())
+            counts=dict(s.execute(select(Plan.state,func.count()).where(Plan.market=='US',Plan.score>=send_minimum_score).group_by(Plan.state)).all())
             universe=dict(s.execute(select(Stock.market,func.count()).group_by(Stock.market)).all())
             errors=s.scalar(select(func.count()).select_from(Stock).where(Stock.error!=''))
             scans=s.scalars(select(Scan).order_by(Scan.id.desc()).limit(10)).all()
             stocks_by_symbol={r.symbol:r for r in s.scalars(select(Stock).where(Stock.symbol.in_([p.symbol for p in rows])))}
         def link(**kw): return url_for('stocks',**{**request.args.to_dict(),**kw})
         return render_template('stocks.html',rows=rows,counts=counts,universe=universe,errors=errors,scans=scans,
-            send_minimum_score=send_minimum_score,labels=LABELS,stock_map=stocks_by_symbol,total=total,page=page,pages=pages,link=link,local=local)
+            hold_days=hold_days,hold_min_profit=hold_min_profit,send_minimum_score=send_minimum_score,labels=LABELS,stock_map=stocks_by_symbol,total=total,page=page,pages=pages,link=link,local=local)
 
     @app.get('/stocks/<int:plan_id>')
     @auth
