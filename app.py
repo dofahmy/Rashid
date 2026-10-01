@@ -230,18 +230,33 @@ def create_app(db=None,test_config=None):
             waiting_errors=s.scalar(
                 select(func.count()).select_from(Stock).where(Stock.error=='awaiting_expected_closed_bar')
             ) or 0
-            data_errors=s.scalar(
+            no_complete_bars=s.scalar(
+                select(func.count()).select_from(Stock).where(Stock.error=='no_complete_bars')
+            ) or 0
+            provider_errors=s.scalar(
                 select(func.count()).select_from(Stock).where(
                     Stock.error!='',
                     Stock.error!='awaiting_expected_closed_bar',
+                    Stock.error!='no_complete_bars',
                 )
             ) or 0
-            errors=waiting_errors+data_errors
+            errors=waiting_errors+no_complete_bars+provider_errors
             scans=s.scalars(select(Scan).order_by(Scan.id.desc()).limit(10)).all()
+            # Split each historical scan using the diagnostic error_summary saved by the monitor.
+            import json as _json
+            for scan in scans:
+                try:
+                    _summary=_json.loads(scan.summary_json or '{}')
+                    _errs=_summary.get('error_summary') or {}
+                except Exception:
+                    _errs={}
+                scan.waiting_errors=int(_errs.get('awaiting_expected_closed_bar',0) or 0)
+                scan.no_complete_bars=int(_errs.get('no_complete_bars',0) or 0)
+                scan.provider_errors=max(0,int(scan.errors or 0)-scan.waiting_errors-scan.no_complete_bars)
             stocks_by_symbol={r.symbol:r for r in s.scalars(select(Stock).where(Stock.symbol.in_([p.symbol for p in rows])))}
         def link(**kw): return url_for('stocks',**{**request.args.to_dict(),**kw})
         return render_template('stocks.html',rows=rows,counts=counts,universe=universe,errors=errors,
-            waiting_errors=waiting_errors,data_errors=data_errors,scans=scans,
+            waiting_errors=waiting_errors,no_complete_bars=no_complete_bars,provider_errors=provider_errors,scans=scans,
             hold_days=hold_days,hold_min_profit=hold_min_profit,send_minimum_score=send_minimum_score,labels=LABELS,stock_map=stocks_by_symbol,total=total,page=page,pages=pages,link=link,local=local)
 
     @app.get('/stocks/<int:plan_id>')
