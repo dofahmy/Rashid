@@ -116,7 +116,7 @@ def volume_ratio(bars,ts,market,dates):
     if len(same)!=20 or sum(same)<=0 or current is None:return None
     return current/(sum(same)/20)
 
-def apply_stock(DB,symbol,raw,expected,reference_bars,settings,clock):
+def apply_stock(DB,symbol,raw,expected,reference_bars,settings,clock,strategy_diag=None):
     """One symbol, one transaction: bars, watermark, plans and events commit together."""
     with DB.begin() as s:
         stock=s.get(Stock,symbol);meta=validate(raw,stock)
@@ -151,6 +151,25 @@ def apply_stock(DB,symbol,raw,expected,reference_bars,settings,clock):
             result['blockers'].append('known_corporate_event_manual_exclusion')
         stock.evaluation_json=json.dumps(result,ensure_ascii=False)
         stock.error=''
+        if strategy_diag is not None:
+            strategy_diag['evaluated'] += 1
+            strategy_diag['eligible'] += int(bool(result.get('eligible')))
+            strategy_diag['conditional_plan'] += int(bool(result.get('conditional_plan')))
+            blockers=result.get('blockers') or []
+            if blockers:
+                strategy_diag['blocked_symbols'] += 1
+                for reason in blockers:
+                    strategy_diag['blocker_counts'][reason] += 1
+                    examples=strategy_diag['blocker_examples'][reason]
+                    if len(examples) < 5:
+                        examples.append(symbol)
+            elif not result.get('conditional_plan'):
+                reason='conditional_plan_false_without_blocker'
+                strategy_diag['blocked_symbols'] += 1
+                strategy_diag['blocker_counts'][reason] += 1
+                examples=strategy_diag['blocker_examples'][reason]
+                if len(examples) < 5:
+                    examples.append(symbol)
         # Existing WAITING/RETEST/ACTIVE levels stay pinned. A later closed bar may create a fresh plan.
         if not old or latest>old:
             created=int(new_plan(s,stock,result,latest,settings) is not None)
@@ -177,6 +196,14 @@ async def scan_market(DB,provider,m,clock,settings):
         counts={'total':len(stocks),'ok':0,'errors':0,'new_plans':0,'transitions':0}
         error_counts=Counter()
         error_examples=defaultdict(list)
+        strategy_diag={
+            'evaluated':0,
+            'eligible':0,
+            'conditional_plan':0,
+            'blocked_symbols':0,
+            'blocker_counts':Counter(),
+            'blocker_examples':defaultdict(list),
+        }
 
         def remember_error(reason,symbol):
             reason=reason or 'unknown_error'
@@ -196,7 +223,7 @@ async def scan_market(DB,provider,m,clock,settings):
                 counts['errors']+=1;continue
             try:
                 # Freeze as-of time at scan start; a long scan cannot include the next quarter's unfinished data.
-                created,changed,ok=apply_stock(DB,symbol,raw,expected,reference_bars,settings,clock)
+                created,changed,ok=apply_stock(DB,symbol,raw,expected,reference_bars,settings,clock,strategy_diag)
                 counts['new_plans']+=created;counts['transitions']+=changed;counts['ok']+=int(ok);counts['errors']+=int(not ok)
                 if not ok:
                     with DB() as s:
@@ -217,8 +244,25 @@ async def scan_market(DB,provider,m,clock,settings):
             scan.status='partial' if counts['errors'] else 'complete';scan.finished_at=now()
             summary=dict(counts)
             summary['error_summary']=dict(error_counts)
+            summary['strategy_summary']={
+                'evaluated':strategy_diag['evaluated'],
+                'eligible':strategy_diag['eligible'],
+                'conditional_plan':strategy_diag['conditional_plan'],
+                'blocked_symbols':strategy_diag['blocked_symbols'],
+            }
+            summary['blocker_summary']=dict(strategy_diag['blocker_counts'])
             scan.summary_json=json.dumps(summary)
         log.info('%s scan %s',m,counts)
+        log.info('%s strategy summary %s',m,{
+            'evaluated':strategy_diag['evaluated'],
+            'eligible':strategy_diag['eligible'],
+            'conditional_plan':strategy_diag['conditional_plan'],
+            'blocked_symbols':strategy_diag['blocked_symbols'],
+        })
+        if strategy_diag['blocker_counts']:
+            log.warning('%s blocker summary %s',m,dict(strategy_diag['blocker_counts']))
+            for reason,count in strategy_diag['blocker_counts'].most_common():
+                log.warning('%s blocker %s: count=%s examples=%s',m,reason,count,','.join(strategy_diag['blocker_examples'][reason]))
         if error_counts:
             log.warning('%s error summary %s',m,dict(error_counts))
             for reason,count in error_counts.most_common():
