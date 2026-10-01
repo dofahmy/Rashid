@@ -5,7 +5,7 @@ from urllib.parse import quote
 from flask import Flask, render_template, request, session, redirect, url_for, abort, Response, flash
 from sqlalchemy import select, func, or_, case
 from werkzeug.security import check_password_hash
-from core import database, Lead, Activity, Outbox, MARKETS, STATUSES, BRAND, record, queue, now
+from core import database, Lead, Activity, Outbox, Setting, MARKETS, STATUSES, BRAND, record, queue, now
 
 def create_app(db=None,test_config=None):
     app=Flask(__name__)
@@ -141,11 +141,26 @@ def create_app(db=None,test_config=None):
             return "'"+v if v.lstrip().startswith(('=','+','-','@','\t','\r')) else v
         for l in rows: writer.writerow([safe(v) for v in [l.id,l.telegram_id,l.username,l.name,l.phone,MARKETS.get(l.market,''),STATUSES[l.status],l.owner,l.follow_up,l.source,l.completed_at,l.consent_at,l.created_at]])
         return Response('\ufeff'+stream.getvalue(),mimetype='text/csv; charset=utf-8',headers={'Content-Disposition':'attachment; filename=stock-leads.csv'})
+    @app.post('/stocks/settings')
+    @auth
+    def stock_settings():
+        from monitor.customer import MIN_SCORE_KEY
+        try:threshold=float(request.form.get('minimum_score',''))
+        except (ValueError,TypeError):abort(400)
+        if not math.isfinite(threshold) or not 0<=threshold<=100:abort(400)
+        with DB.begin() as s:
+            row=s.get(Setting,MIN_SCORE_KEY)
+            if row is None:row=Setting(key=MIN_SCORE_KEY);s.add(row)
+            row.value=str(threshold)
+        flash(f'تم حفظ الحد الأدنى لإرسال توصيات الأمريكي: {threshold:g}/100')
+        return redirect(url_for('stocks'))
+
     @app.get('/stocks')
     @auth
     def stocks():
         from monitor.models import Stock, Plan, Scan, LABELS
         from monitor.strategy import local
+        from monitor.customer import minimum_score
         conditions=[]
         market=request.args.get('market','')
         state=request.args.get('state','')
@@ -156,6 +171,7 @@ def create_app(db=None,test_config=None):
         try: page=max(1,int(request.args.get('page','1')))
         except ValueError: page=1
         with DB() as s:
+            send_minimum_score=minimum_score(s)
             total=s.scalar(select(func.count()).select_from(Plan).where(*conditions))
             pages=max(1,math.ceil(total/50));page=min(page,pages)
             rows=s.scalars(select(Plan).where(*conditions).order_by(Plan.score.desc(),Plan.id.desc()).offset((page-1)*50).limit(50)).all()
@@ -166,7 +182,7 @@ def create_app(db=None,test_config=None):
             stocks_by_symbol={r.symbol:r for r in s.scalars(select(Stock).where(Stock.symbol.in_([p.symbol for p in rows])))}
         def link(**kw): return url_for('stocks',**{**request.args.to_dict(),**kw})
         return render_template('stocks.html',rows=rows,counts=counts,universe=universe,errors=errors,scans=scans,
-            labels=LABELS,stock_map=stocks_by_symbol,total=total,page=page,pages=pages,link=link,local=local)
+            send_minimum_score=send_minimum_score,labels=LABELS,stock_map=stocks_by_symbol,total=total,page=page,pages=pages,link=link,local=local)
 
     @app.get('/stocks/<int:plan_id>')
     @auth
