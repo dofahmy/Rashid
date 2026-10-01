@@ -236,9 +236,29 @@ async def run(DB,once=False):
     if ids and any(not v.strip().lstrip('-').isdigit() for v in ids.split(',')):
         raise RuntimeError('Invalid MONITOR_ADMIN_ALERT_IDS')
     last_attempt=None
+    # Development convenience: after every worker restart, run one immediate US scan
+    # even when the normal market window is closed. scan_market() still freezes to
+    # the latest completed regular-session 15m bar, so no unfinished after-hours
+    # candle can create a plan. Set MONITOR_FORCE_STARTUP_SCAN=0 to disable later.
+    force_startup=os.getenv('MONITOR_FORCE_STARTUP_SCAN','1').strip().lower() not in {'0','false','no','off'}
+    startup_done=False
     async with YahooProvider(concurrency) as provider:
         while True:
             clock=time.time();boundary=int(clock)//900*900;offset=int(clock)-boundary
+            # One forced scan immediately after startup for development/diagnostics.
+            if force_startup and not startup_done:
+                with exclusive(DB) as locked:
+                    if locked:
+                        log.info('Startup diagnostic scan forced outside normal market-window rules')
+                        for m in ('US',):
+                            await scan_market(DB,provider,m,clock,settings)
+                startup_done=True
+                if once:return
+                # Mark the current retry key so we do not immediately duplicate this scan.
+                attempt=min(3,max(0,(offset-delay)//150))
+                last_attempt=(boundary,attempt)
+                await asyncio.sleep(10)
+                continue
             # Four bounded retries each quarter, fetching only stocks whose watermark is behind.
             attempt=min(3,max(0,(offset-delay)//150))
             key=(boundary,attempt)
