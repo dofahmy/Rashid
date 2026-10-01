@@ -227,11 +227,21 @@ def create_app(db=None,test_config=None):
             rows=s.scalars(select(Plan).where(*conditions).order_by(Plan.score.desc(),Plan.id.desc()).offset((page-1)*50).limit(50)).all()
             counts=dict(s.execute(select(Plan.state,func.count()).where(Plan.market=='US',Plan.score>=send_minimum_score).group_by(Plan.state)).all())
             universe=dict(s.execute(select(Stock.market,func.count()).group_by(Stock.market)).all())
-            errors=s.scalar(select(func.count()).select_from(Stock).where(Stock.error!=''))
+            waiting_errors=s.scalar(
+                select(func.count()).select_from(Stock).where(Stock.error=='awaiting_expected_closed_bar')
+            ) or 0
+            data_errors=s.scalar(
+                select(func.count()).select_from(Stock).where(
+                    Stock.error!='',
+                    Stock.error!='awaiting_expected_closed_bar',
+                )
+            ) or 0
+            errors=waiting_errors+data_errors
             scans=s.scalars(select(Scan).order_by(Scan.id.desc()).limit(10)).all()
             stocks_by_symbol={r.symbol:r for r in s.scalars(select(Stock).where(Stock.symbol.in_([p.symbol for p in rows])))}
         def link(**kw): return url_for('stocks',**{**request.args.to_dict(),**kw})
-        return render_template('stocks.html',rows=rows,counts=counts,universe=universe,errors=errors,scans=scans,
+        return render_template('stocks.html',rows=rows,counts=counts,universe=universe,errors=errors,
+            waiting_errors=waiting_errors,data_errors=data_errors,scans=scans,
             hold_days=hold_days,hold_min_profit=hold_min_profit,send_minimum_score=send_minimum_score,labels=LABELS,stock_map=stocks_by_symbol,total=total,page=page,pages=pages,link=link,local=local)
 
     @app.get('/stocks/<int:plan_id>')
