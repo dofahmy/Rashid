@@ -70,7 +70,7 @@ class Processed(Base):
     id=Column(BigInteger,primary_key=True)
 
 def database(url=None):
-    from monitor import models, customer  # Additive tables; existing leads remain intact.
+    from monitor import models, customer, customer_table  # Additive tables; existing leads remain intact.
     url=url or os.getenv('DATABASE_URL','')
     if not url and os.getenv('RAILWAY_PROJECT_ID'):
         raise RuntimeError('DATABASE_URL is required on Railway. Add a reference to the PostgreSQL service.')
@@ -154,7 +154,10 @@ def handle_update(s,u):
         else:
             parts=data.split(':');kind=parts[1] if len(parts)>1 else ('current' if command=='/current' else 'results')
             page=min(100000,int(parts[2])) if len(parts)>2 and parts[2].isdigit() else 0
-            body,kb=view(s,l,kind if kind in ('current','results') else 'current',page)
+            if kind=='results':body,kb=view(s,l,'results',page)
+            else:
+                from monitor.customer_table import table_entry
+                body,kb=table_entry(s,l)
             send(body,kb)
     elif text.startswith('/start') or data=='edit':
         parts=text.split(maxsplit=1)

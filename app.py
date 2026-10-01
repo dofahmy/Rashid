@@ -141,6 +141,17 @@ def create_app(db=None,test_config=None):
             return "'"+v if v.lstrip().startswith(('=','+','-','@','\t','\r')) else v
         for l in rows: writer.writerow([safe(v) for v in [l.id,l.telegram_id,l.username,l.name,l.phone,MARKETS.get(l.market,''),STATUSES[l.status],l.owner,l.follow_up,l.source,l.completed_at,l.consent_at,l.created_at]])
         return Response('\ufeff'+stream.getvalue(),mimetype='text/csv; charset=utf-8',headers={'Content-Disposition':'attachment; filename=stock-leads.csv'})
+    @app.get('/recommendations/current/<token>')
+    def customer_current_table(token):
+        from monitor.customer_table import authorized_lead,current_rows
+        from monitor.customer import price
+        with DB() as s:
+            lead=authorized_lead(s,token)
+            if lead is None:
+                return render_template('customer_current.html',expired=True,rows=[],price=price),403
+            rows=current_rows(s)
+        return render_template('customer_current.html',expired=False,rows=rows,price=price)
+
     @app.post('/stocks/settings')
     @auth
     def stock_settings():
