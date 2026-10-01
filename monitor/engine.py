@@ -43,9 +43,11 @@ def event(s,p,kind,ts,details=None):
 
 def new_plan(s,stock,result,ts,settings):
     if stock.market!='US' or not result.get('conditional_plan'): return None
-    from .reset import RESET_KEY
-    reset=s.get(Setting,RESET_KEY)
-    if reset and int(ts)+900<=int(reset.value):return None
+    # Development reset clears old plans and stock watermarks.  The worker then
+    # re-evaluates the latest complete candle.  Do not reject that candle merely
+    # because it closed before the reset button was pressed (for example, a
+    # startup diagnostic scan after market close).  Duplicate/open-plan guards
+    # below still prevent creating the same signal more than once.
     if s.scalar(select(Plan.id).where(Plan.symbol==stock.symbol,or_(Plan.state.in_(OPEN),(Plan.state=='DATA_GAP') & (Plan.paper_entry.is_not(None))))): return None
     if s.scalar(select(Plan.id).where(Plan.symbol==stock.symbol,Plan.strategy_version==VERSION,Plan.signal_ts==int(ts))): return None
     p=Plan(symbol=stock.symbol,market=stock.market,strategy_version=VERSION,signal_ts=int(ts),last_bar=int(ts),
