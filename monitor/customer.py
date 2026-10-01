@@ -121,7 +121,7 @@ def view(s,lead,kind,page=0,clock=None):
     end=datetime(dt.year+int(dt.month==12),1 if dt.month==12 else dt.month+1,1,tzinfo=NY).timestamp()
     query=select(Plan).join(Publication,Publication.plan_id==Plan.id).where(Plan.market=='US')
     if kind=='current':
-        query=query.where(Plan.state.in_(('ACTIVE','DATA_GAP')))
+        query=query.where(Plan.state.in_(('ACTIVE','DATA_GAP')),Plan.score>=minimum_score(s))
         title='📈 التوصيات الحالية | الأمريكي — 15 دقيقة'
     else:
         closed_in_month=select(Event.plan_id).where(Event.kind.in_(('TARGET','STOPPED')),Event.bar_ts+900>=start,Event.bar_ts+900<end)
