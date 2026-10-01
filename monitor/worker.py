@@ -1,5 +1,6 @@
 """Railway worker: python -m monitor.worker [--init-only|--once]."""
 import argparse, asyncio, contextlib, json, logging, os, time
+from collections import Counter, defaultdict
 from pathlib import Path
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -174,6 +175,14 @@ async def scan_market(DB,provider,m,clock,settings):
                   .order_by(Stock.symbol)).all()
         stocks.sort(key=lambda r:(r.symbol not in priority,r.symbol))
         counts={'total':len(stocks),'ok':0,'errors':0,'new_plans':0,'transitions':0}
+        error_counts=Counter()
+        error_examples=defaultdict(list)
+
+        def remember_error(reason,symbol):
+            reason=reason or 'unknown_error'
+            error_counts[reason]+=1
+            if len(error_examples[reason])<5:
+                error_examples[reason].append(symbol)
         async def fetch_stock(stock):
             try:return stock.symbol,await provider.fetch(stock.feed_symbol,not stock.last_bar),None
             except FeedError as error:return stock.symbol,None,str(error)
@@ -183,14 +192,22 @@ async def scan_market(DB,provider,m,clock,settings):
             if error:
                 with DB.begin() as s:
                     stock=s.get(Stock,symbol);stock.error=error;stock.checked_at=now()
+                remember_error(error,symbol)
                 counts['errors']+=1;continue
             try:
                 # Freeze as-of time at scan start; a long scan cannot include the next quarter's unfinished data.
                 created,changed,ok=apply_stock(DB,symbol,raw,expected,reference_bars,settings,clock)
                 counts['new_plans']+=created;counts['transitions']+=changed;counts['ok']+=int(ok);counts['errors']+=int(not ok)
+                if not ok:
+                    with DB() as s:
+                        stock=s.get(Stock,symbol)
+                        remember_error(stock.error if stock else 'stock_missing_after_apply',symbol)
             except Exception as exc:
+                reason='processing_'+type(exc).__name__
                 with DB.begin() as s:
-                    stock=s.get(Stock,symbol);stock.error='processing_'+type(exc).__name__;stock.checked_at=now()
+                    stock=s.get(Stock,symbol);stock.error=reason;stock.checked_at=now()
+                remember_error(reason,symbol)
+                log.exception('%s processing error for %s',m,symbol)
                 counts['errors']+=1
             processed=counts['ok']+counts['errors']
             if processed%250==0:log.info('%s progress %s/%s',m,processed,len(stocks))
@@ -198,8 +215,14 @@ async def scan_market(DB,provider,m,clock,settings):
             scan=s.get(Scan,scan_id)
             for key,value in counts.items():setattr(scan,key,value)
             scan.status='partial' if counts['errors'] else 'complete';scan.finished_at=now()
-            scan.summary_json=json.dumps(counts)
+            summary=dict(counts)
+            summary['error_summary']=dict(error_counts)
+            scan.summary_json=json.dumps(summary)
         log.info('%s scan %s',m,counts)
+        if error_counts:
+            log.warning('%s error summary %s',m,dict(error_counts))
+            for reason,count in error_counts.most_common():
+                log.warning('%s error %s: count=%s examples=%s',m,reason,count,','.join(error_examples[reason]))
     except Exception as error:
         with DB.begin() as s:
             scan=s.get(Scan,scan_id);scan.status='waiting_feed';scan.finished_at=now()
