@@ -32,10 +32,11 @@ def authorized_lead(s,token,clock=None):
     lead=s.scalar(select(Lead).where(Lead.telegram_id==access.telegram_id))
     return lead if eligible(s,lead) else None
 
-def current_rows(s):
+def current_rows(s,lead):
+    from .limits import delivered_ids
     query=(select(Plan,Stock).join(Publication,Publication.plan_id==Plan.id)
         .outerjoin(Stock,Stock.symbol==Plan.symbol).where(Plan.market=='US',
-        Plan.state.in_(('ACTIVE','DATA_GAP')),Plan.score>=minimum_score(s))
+        Plan.state.in_(('ACTIVE','DATA_GAP')),Plan.score>=minimum_score(s),Plan.id.in_(delivered_ids(lead.telegram_id)))
         .order_by(Publication.activation_end.desc(),Plan.id.desc()))
     rows=[]
     for p,stock in s.execute(query):
