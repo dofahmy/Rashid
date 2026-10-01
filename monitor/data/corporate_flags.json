@@ -1,0 +1,34 @@
+{
+  "AES": {
+    "reason": "cash_acquisition_agreement",
+    "source": "https://www.aes.com/energy-insights/consortium-led-global-infrastructure-partners-and-eqt-agrees-acquire-aes",
+    "consideration": 15
+  },
+  "WBD": {
+    "reason": "cash_merger_and_pending_delisting",
+    "source": "https://ir.wbd.com/news-and-events/financial-news/financial-news-details/2026/Paramount-Skydance-and-Warner-Bros--Discovery-Announce-Anticipated-Closing-Date-of-Paramount-Merger/default.aspx",
+    "consideration": 31
+  },
+  "SLAB": {
+    "reason": "cash_acquisition_agreement",
+    "source": "https://www.ti.com/about-ti/newsroom/news-releases/2026/2026-02-04-texas-instruments-to-acquire-silicon-labs.html",
+    "consideration": 231
+  },
+  "ACA": {
+    "reason": "acquisition_agreement",
+    "source": "https://ir.arcosa.com/news-events/press-releases/news-details/2026/Arcosa-Stockholders-Approve-Acquisition-by-CRH/default.aspx"
+  },
+  "LFCR": {
+    "reason": "cash_acquisition_plus_CVR",
+    "source": "https://www.sec.gov/Archives/edgar/data/1005286/000114036126037767/ef20082009_ex99-1.htm",
+    "consideration": 6.28
+  },
+  "VECO": {
+    "reason": "stock_merger_agreement",
+    "source": "https://ir.veeco.com/news-and-events/news-details/2026/Veeco-Stockholders-Approve-Merger-with-Axcelis/default.aspx"
+  },
+  "ELME": {
+    "reason": "liquidation_and_planned_delisting",
+    "source": "https://www.sec.gov/Archives/edgar/data/104894/000010489426000117/elme-pressreleaseseptember.htm"
+  }
+}
