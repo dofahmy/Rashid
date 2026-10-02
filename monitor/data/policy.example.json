@@ -3,5 +3,6 @@
   "retest_max_bars": 3,
   "retest_atr_band": 0.25,
   "waiting_max_bars": 20,
-  "minimum_rr": 1.5
+  "minimum_rr": 1.5,
+  "market_entry_max_gap_pct": 0.5
 }

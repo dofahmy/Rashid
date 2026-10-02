@@ -78,7 +78,7 @@ class Scan(Base):
     finished_at = Column(String(40), default='')
     summary_json = Column(Text, default='{}')
 
-LABELS = {'WAITING':'انتظار التفعيل','RETEST':'انتظار إعادة الاختبار','ACTIVE':'متفعّل افتراضيًا',
+LABELS = {'WAITING':'أمر شراء معلّق','RETEST':'أمر قديم بانتظار التحويل','ACTIVE':'متفعّل افتراضيًا',
           'TIME_EXIT':'خروج بعد مدة الانتظار','TARGET':'وصل للهدف','STOPPED':'وقف خسارة','CANCELLED':'أُلغيت الخطة',
           'EXPIRED':'انتهت مهلة الخطة','MISSED':'تجاوز الهدف قبل الدخول','DATA_GAP':'فجوة بيانات — يحتاج مراجعة'}
 OPEN = ('WAITING','RETEST','ACTIVE')

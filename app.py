@@ -268,10 +268,22 @@ def create_app(db=None,test_config=None):
                 scan.no_complete_bars=int(_errs.get('no_complete_bars',0) or 0)
                 scan.provider_errors=max(0,int(scan.errors or 0)-scan.waiting_errors-scan.no_complete_bars)
             stocks_by_symbol={r.symbol:r for r in s.scalars(select(Stock).where(Stock.symbol.in_([p.symbol for p in rows])))}
+            import json as _order_json
+            order_map={}
+            for _p in rows:
+                try:
+                    _ctx=_order_json.loads(_p.context_json or '{}');_kind=_ctx.get('order_type','')
+                    if _kind not in ('MARKET','LIMIT','STOP'):
+                        _ref=_ctx.get('signal_bar_close') or _ctx.get('feed_last_price')
+                        if _ref and float(_ref)>0:
+                            _gap=100*(float(_p.entry)/float(_ref)-1)
+                            _kind='MARKET' if abs(_gap)<=.5 else ('LIMIT' if _p.entry<float(_ref) else 'STOP')
+                except Exception:_kind=''
+                order_map[_p.id]={'MARKET':'سوق','LIMIT':'Limit شراء','STOP':'Stop شراء'}.get(_kind,'أمر شراء')
         def link(**kw): return url_for('stocks',**{**request.args.to_dict(),**kw})
         return render_template('stocks.html',rows=rows,counts=counts,universe=universe,errors=errors,
             waiting_errors=waiting_errors,no_complete_bars=no_complete_bars,provider_errors=provider_errors,scans=scans,
-            hold_days=hold_days,hold_min_profit=hold_min_profit,send_minimum_score=send_minimum_score,labels=LABELS,stock_map=stocks_by_symbol,total=total,page=page,pages=pages,link=link,local=local)
+            hold_days=hold_days,hold_min_profit=hold_min_profit,send_minimum_score=send_minimum_score,labels=LABELS,stock_map=stocks_by_symbol,order_map=order_map,total=total,page=page,pages=pages,link=link,local=local)
 
     @app.get('/stocks/<int:plan_id>')
     @auth

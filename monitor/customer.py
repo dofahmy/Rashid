@@ -80,6 +80,18 @@ def gold_buttons():return commodity_buttons('XA')
 def stamp(ts):return datetime.fromtimestamp(ts,NY).strftime('%Y-%m-%d %H:%M')+' نيويورك'
 def price(v):return 'غير متاح' if v is None else f'{v:.2f}'
 
+
+def order_label(plan):
+    try:
+        ctx=json.loads(plan.context_json or '{}');kind=ctx.get('order_type','')
+        if kind not in ('MARKET','LIMIT','STOP'):
+            ref=ctx.get('signal_bar_close') or ctx.get('feed_last_price')
+            if ref and float(ref)>0:
+                gap=100*(float(plan.entry)/float(ref)-1)
+                kind='MARKET' if abs(gap)<=.5 else ('LIMIT' if plan.entry<float(ref) else 'STOP')
+    except Exception:kind=''
+    return {'MARKET':'سوق','LIMIT':'Limit شراء','STOP':'Stop شراء'}.get(kind,'أمر شراء')
+
 def performance(plan, stock):
     mark=plan.exit_price if plan.exit_price is not None else (stock.last_price if stock else None)
     if plan.paper_entry is None or not mark:return None
@@ -91,7 +103,7 @@ def card(plan,stock):
     company=' '.join((stock.company or '').split())[:120] if stock else ''
     heading=f'{plan.symbol} | {company}' if company else plan.symbol
     lines=[f'{heading} — {LABELS.get(plan.state,plan.state)}',
-           f'دخول التوصية: {price(plan.paper_entry)}$ · الهدف: {price(plan.target)}$ · الوقف: {price(plan.stop)}$']
+           f'نوع الأمر: {order_label(plan)} · دخول التوصية: {price(plan.paper_entry)}$ · الهدف: {price(plan.target)}$ · الوقف: {price(plan.stop)}$']
     if closed:lines.append(f'سعر الخروج المرجعي: {price(plan.exit_price)}$')
     elif stock:lines.append(f'آخر إغلاق: {price(stock.last_price)}$ · تحديث {stamp(stock.last_bar+900)}')
     if pnl is not None:lines.append(f'{"نتيجة الإغلاق" if closed else "الأداء غير المحقق"}: {pnl:+.2f}%')
