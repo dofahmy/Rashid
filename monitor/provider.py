@@ -13,6 +13,32 @@ class YahooProvider:
     def __init__(self,concurrency=12):
         self.limit=asyncio.Semaphore(concurrency)
         self.session=None
+
+    @staticmethod
+    def _load_api_key():
+        """Load and sanitize the Twelve Data key from Railway env.
+
+        Accepts the canonical TWELVE_DATA_API_KEY plus two compatibility names,
+        and tolerates an accidentally pasted `NAME=value` string or surrounding
+        quotes.  The secret itself is never logged.
+        """
+        raw=(os.getenv('TWELVE_DATA_API_KEY') or os.getenv('TWELVEDATA_API_KEY') or os.getenv('TWELVE_API_KEY') or '')
+        raw=str(raw).strip()
+        for prefix in ('TWELVE_DATA_API_KEY=', 'TWELVEDATA_API_KEY=', 'TWELVE_API_KEY='):
+            if raw.startswith(prefix):
+                raw=raw[len(prefix):].strip()
+                break
+        if len(raw)>=2 and raw[0]==raw[-1] and raw[0] in ("'", '"'):
+            raw=raw[1:-1].strip()
+        return raw
+
+    def _refresh_api_key(self):
+        # Railway injects env vars before process start, but refreshing here keeps
+        # all commodity requests on the same canonical key and avoids stale values
+        # in long-lived provider instances/tests.
+        self.api_key=self._load_api_key()
+        return self.api_key
+
     async def __aenter__(self):
         self.session=aiohttp.ClientSession(trust_env=True,timeout=aiohttp.ClientTimeout(total=35),
             headers={'User-Agent':'Mozilla/5.0'},connector=aiohttp.TCPConnector(limit=24))
@@ -54,7 +80,7 @@ class TwelveDataCommodityProvider:
 
     def __init__(self):
         self.session=None
-        self.api_key=(os.getenv('TWELVE_DATA_API_KEY') or '').strip()
+        self.api_key=self._load_api_key()
         # Per-symbol cooldown prevents repeated paid/plan/auth failures from hammering
         # Twelve Data every worker loop. The first real failure is logged with the
         # upstream HTTP status/code/message; later retries wait for the cooldown.
@@ -63,6 +89,8 @@ class TwelveDataCommodityProvider:
         self._cooldown_reason={}
 
     async def __aenter__(self):
+        self._refresh_api_key()
+        log.info('TwelveData provider ready api_key_loaded=%s',bool(self.api_key))
         self.session=aiohttp.ClientSession(trust_env=True,timeout=aiohttp.ClientTimeout(total=40),
             headers={'User-Agent':'Rajih-Monitor/1.0','Accept':'application/json'})
         return self
@@ -140,7 +168,9 @@ class TwelveDataCommodityProvider:
         return {'chart':{'result':[{'meta':{'symbol':symbol,'dataGranularity':'15m','currency':'USD','instrumentType':'CURRENCY','regularMarketPrice':rows[-1][4],'upstreamSymbol':meta.get('symbol') or upstream_symbol,'upstreamInterval':meta.get('interval') or '15min','upstreamType':meta.get('type')},'timestamp':[r[0] for r in rows],'indicators':{'quote':[{k:[r[i+1] for r in rows] for i,k in enumerate(names)}]}}]},'_retrieval':{'retrieved_utc':time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()),'provider':self.name,'url':self.API_URL,'upstream_symbol':meta.get('symbol') or upstream_symbol,'bars':len(rows),'volume_available':any(r[5]>0 for r in rows)}}
 
     async def fetch(self,symbol='XAUUSD',bootstrap=False):
-        if not self.api_key:raise FeedError('twelve_api_key_missing')
+        # Re-read the same Railway variable for XA/XS/XO so all commodities use
+        # one key path.  Sanitize common paste mistakes before every request.
+        if not self._refresh_api_key():raise FeedError('twelve_api_key_missing')
         upstream_symbol=self.upstream(symbol)
         until=self._cooldown_until.get(symbol,0)
         if until>time.time():
