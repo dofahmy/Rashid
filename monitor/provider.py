@@ -14,31 +14,6 @@ class YahooProvider:
         self.limit=asyncio.Semaphore(concurrency)
         self.session=None
 
-    @staticmethod
-    def _load_api_key():
-        """Load and sanitize the Twelve Data key from Railway env.
-
-        Accepts the canonical TWELVE_DATA_API_KEY plus two compatibility names,
-        and tolerates an accidentally pasted `NAME=value` string or surrounding
-        quotes.  The secret itself is never logged.
-        """
-        raw=(os.getenv('TWELVE_DATA_API_KEY') or os.getenv('TWELVEDATA_API_KEY') or os.getenv('TWELVE_API_KEY') or '')
-        raw=str(raw).strip()
-        for prefix in ('TWELVE_DATA_API_KEY=', 'TWELVEDATA_API_KEY=', 'TWELVE_API_KEY='):
-            if raw.startswith(prefix):
-                raw=raw[len(prefix):].strip()
-                break
-        if len(raw)>=2 and raw[0]==raw[-1] and raw[0] in ("'", '"'):
-            raw=raw[1:-1].strip()
-        return raw
-
-    def _refresh_api_key(self):
-        # Railway injects env vars before process start, but refreshing here keeps
-        # all commodity requests on the same canonical key and avoids stale values
-        # in long-lived provider instances/tests.
-        self.api_key=self._load_api_key()
-        return self.api_key
-
     async def __aenter__(self):
         self.session=aiohttp.ClientSession(trust_env=True,timeout=aiohttp.ClientTimeout(total=35),
             headers={'User-Agent':'Mozilla/5.0'},connector=aiohttp.TCPConnector(limit=24))
@@ -77,6 +52,23 @@ class TwelveDataCommodityProvider:
         'XAGUSD':('TWELVE_DATA_XAGUSD_SYMBOL','XAG/USD'),
         'WTIUSD':('TWELVE_DATA_WTIUSD_SYMBOL','WTI/USD'),
     }
+
+    @staticmethod
+    def _load_api_key():
+        """Load and sanitize the Twelve Data key from Railway env."""
+        raw=(os.getenv('TWELVE_DATA_API_KEY') or os.getenv('TWELVEDATA_API_KEY') or os.getenv('TWELVE_API_KEY') or '')
+        raw=str(raw).strip()
+        for prefix in ('TWELVE_DATA_API_KEY=', 'TWELVEDATA_API_KEY=', 'TWELVE_API_KEY='):
+            if raw.startswith(prefix):
+                raw=raw[len(prefix):].strip()
+                break
+        if len(raw)>=2 and raw[0]==raw[-1] and raw[0] in ("'", '"'):
+            raw=raw[1:-1].strip()
+        return raw
+
+    def _refresh_api_key(self):
+        self.api_key=self._load_api_key()
+        return self.api_key
 
     def __init__(self):
         self.session=None
