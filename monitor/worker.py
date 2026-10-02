@@ -9,7 +9,7 @@ from core import database, now
 from .models import Stock, Candle, Plan, Scan, OPEN
 from .engine import new_plan, advance, policy
 from .strategy import clean, local, CONFIG, evaluate
-from .provider import YahooProvider, InvestingGoldProvider, FeedError
+from .provider import YahooProvider, TwelveDataGoldProvider, FeedError
 
 log=logging.getLogger('rajih.monitor')
 DATA=Path(__file__).parent/'data'
@@ -198,16 +198,16 @@ async def scan_market(DB,provider,m,clock,settings):
             raise FeedError('invalid_reference')
         reference_bars=clean(reference_raw,m,clock)
         if m=='XA':
-            # Gold trades across a near-24h FX session with provider maintenance
-            # gaps.  Use Investing.com's latest actually closed M15 candle rather
-            # than demanding a candle for the wall-clock quarter.
+            # Gold is sourced from Twelve Data. Use the latest actually closed M15
+            # candle returned by the official API rather than demanding a wall-clock
+            # quarter that may fall inside a provider/session maintenance gap.
             if not reference_bars:
-                raise FeedError('investing_no_complete_15m_bar')
+                raise FeedError('twelve_no_complete_15m_bar')
             expected=int(reference_bars[-1][0])
             retrieval=reference_raw.get('_retrieval',{})
-            log.info('XA Investing reference pair_id=%s source=%s bars=%s latest=%s',
-                     retrieval.get('pair_id'),retrieval.get('pair_id_source'),
-                     retrieval.get('bars',len(reference_bars)),expected)
+            log.info('XA TwelveData reference symbol=%s bars=%s latest=%s volume_available=%s',
+                     retrieval.get('upstream_symbol'),retrieval.get('bars',len(reference_bars)),
+                     expected,retrieval.get('volume_available'))
         elif not reference_bars or reference_bars[-1][0]!=expected:
             raise FeedError('reference_awaiting_closed_bar_or_market_holiday')
         if expected is None:return
@@ -313,7 +313,7 @@ async def run(DB,once=False):
     # candle can create a plan. Set MONITOR_FORCE_STARTUP_SCAN=0 to disable later.
     force_startup=os.getenv('MONITOR_FORCE_STARTUP_SCAN','1').strip().lower() not in {'0','false','no','off'}
     startup_done=False
-    async with YahooProvider(concurrency) as us_provider, InvestingGoldProvider() as gold_provider:
+    async with YahooProvider(concurrency) as us_provider, TwelveDataGoldProvider() as gold_provider:
         while True:
             clock=time.time();boundary=int(clock)//900*900;offset=int(clock)-boundary
             # One forced scan immediately after startup for development/diagnostics.

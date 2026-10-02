@@ -39,6 +39,139 @@ class YahooProvider:
                     await asyncio.sleep(2**attempt)
         raise FeedError('provider_retry_exhausted')
 
+
+class TwelveDataGoldProvider:
+    """Official Twelve Data adapter for XAU/USD 15-minute candles.
+
+    The provider normalizes Twelve Data's /time_series response into the same
+    Yahoo-chart-shaped payload consumed by the existing strategy.  The customer
+    symbol remains XAUUSD while the upstream symbol defaults to XAU/USD.
+    """
+    name='Twelve Data XAU/USD official API (15m)'
+    API_URL='https://api.twelvedata.com/time_series'
+
+    def __init__(self):
+        self.session=None
+        self.api_key=(os.getenv('TWELVE_DATA_API_KEY') or '').strip()
+        self.upstream_symbol=(os.getenv('TWELVE_DATA_XAUUSD_SYMBOL') or 'XAU/USD').strip()
+
+    async def __aenter__(self):
+        self.session=aiohttp.ClientSession(
+            trust_env=True,
+            timeout=aiohttp.ClientTimeout(total=40),
+            headers={'User-Agent':'Rajih-Monitor/1.0','Accept':'application/json'},
+        )
+        return self
+
+    async def __aexit__(self,*args):
+        if self.session: await self.session.close()
+
+    @staticmethod
+    def _num(value,default=None):
+        if value is None:return default
+        try:
+            value=float(str(value).replace(',','').strip())
+            return value if math.isfinite(value) else default
+        except (ValueError,TypeError):return default
+
+    @staticmethod
+    def _timestamp(value):
+        text=str(value or '').strip()
+        if not text:return None
+        try:
+            dt=datetime.fromisoformat(text.replace('Z','+00:00'))
+        except ValueError:
+            return None
+        if dt.tzinfo is None:
+            # We explicitly request timezone=UTC below, so naive API datetimes
+            # are interpreted as UTC rather than the host machine timezone.
+            dt=dt.replace(tzinfo=timezone.utc)
+        return int(dt.timestamp())
+
+    def _normalize(self,payload):
+        if not isinstance(payload,dict):raise FeedError('twelve_invalid_json')
+        if payload.get('status')=='error':
+            code=payload.get('code')
+            message=str(payload.get('message') or '').lower()
+            if code in (401,403):raise FeedError('twelve_auth_or_plan_error')
+            if code==429 or 'limit' in message or 'credits' in message:raise FeedError('twelve_rate_or_credit_limit')
+            raise FeedError('twelve_api_error_'+str(code or 'unknown'))
+        values=payload.get('values')
+        if not isinstance(values,list) or not values:raise FeedError('twelve_no_15m_rows')
+        rows=[]
+        for item in values:
+            if not isinstance(item,dict):continue
+            ts=self._timestamp(item.get('datetime'))
+            o=self._num(item.get('open'));h=self._num(item.get('high'))
+            l=self._num(item.get('low'));c=self._num(item.get('close'))
+            # Physical-currency feeds commonly omit centralized volume. Keep 0
+            # rather than inventing volume; the strategy will expose its volume
+            # blocker explicitly if the field is unavailable.
+            v=self._num(item.get('volume'),0.0)
+            if ts is None or None in (o,h,l,c):continue
+            ts=(ts//900)*900
+            if min(o,h,l,c)<=0 or not (l<=o<=h and l<=c<=h):continue
+            rows.append([ts,o,h,l,c,max(0.0,v or 0.0)])
+        rows=sorted({r[0]:r for r in rows}.values())
+        if not rows:raise FeedError('twelve_no_valid_15m_rows')
+        meta=payload.get('meta') if isinstance(payload.get('meta'),dict) else {}
+        names=['open','high','low','close','volume']
+        raw={
+            'chart':{
+                'result':[{
+                    'meta':{
+                        'symbol':'XAUUSD',
+                        'dataGranularity':'15m',
+                        'currency':'USD',
+                        'instrumentType':'CURRENCY',
+                        'regularMarketPrice':rows[-1][4],
+                        'upstreamSymbol':meta.get('symbol') or self.upstream_symbol,
+                        'upstreamInterval':meta.get('interval') or '15min',
+                        'upstreamType':meta.get('type'),
+                    },
+                    'timestamp':[r[0] for r in rows],
+                    'indicators':{'quote':[{k:[r[i+1] for r in rows] for i,k in enumerate(names)}]},
+                }]
+            },
+            '_retrieval':{
+                'retrieved_utc':time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()),
+                'provider':self.name,
+                'url':'https://api.twelvedata.com/time_series',
+                'upstream_symbol':meta.get('symbol') or self.upstream_symbol,
+                'bars':len(rows),
+                'volume_available':any(r[5]>0 for r in rows),
+            }
+        }
+        return raw
+
+    async def fetch(self,symbol='XAUUSD',bootstrap=False):
+        if not self.api_key:raise FeedError('twelve_api_key_missing')
+        params={
+            'symbol':self.upstream_symbol,
+            'interval':'15min',
+            'outputsize':'5000' if bootstrap else '1200',
+            'timezone':'UTC',
+            'order':'ASC',
+            'apikey':self.api_key,
+        }
+        last_error=None
+        for attempt in range(3):
+            try:
+                async with self.session.get(self.API_URL,params=params) as resp:
+                    if resp.status in (429,500,502,503,504):
+                        last_error='twelve_http_'+str(resp.status)
+                        await asyncio.sleep(min(15,2**(attempt+1))+random.random());continue
+                    if resp.status in (401,403):raise FeedError('twelve_auth_or_plan_error')
+                    if resp.status!=200:raise FeedError('twelve_http_'+str(resp.status))
+                    payload=await resp.json(content_type=None)
+                    return self._normalize(payload)
+            except FeedError:
+                raise
+            except (aiohttp.ClientError,asyncio.TimeoutError,ValueError):
+                if attempt==2:raise FeedError('twelve_network_or_json') from None
+                await asyncio.sleep(2**attempt)
+        raise FeedError(last_error or 'twelve_retry_exhausted')
+
 class InvestingGoldProvider:
     """Experimental Investing.com XAU/USD 15-minute feed adapter.
 
