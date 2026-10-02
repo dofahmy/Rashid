@@ -3,7 +3,7 @@ from functools import wraps
 from datetime import timedelta, datetime, timezone
 from urllib.parse import quote
 from flask import Flask, render_template, request, session, redirect, url_for, abort, Response, flash
-from sqlalchemy import select, func, or_, case
+from sqlalchemy import select, func, or_, case, delete, update
 from werkzeug.security import check_password_hash
 from core import database, Lead, Activity, Outbox, Setting, MARKETS, STATUSES, BRAND, record, queue, now
 
@@ -126,6 +126,57 @@ def create_app(db=None,test_config=None):
             duplicate=s.scalar(select(func.count()).select_from(Lead).where(Lead.phone==l.phone,Lead.id!=l.id)) if l.phone else 0
             outbox=s.scalars(select(Outbox).where(Outbox.chat_id==l.telegram_id,Outbox.method.in_(['sendMessage','sendPhoto'])).order_by(Outbox.id.desc()).limit(10)).all()
             return render_template('detail.html',limits=limits(s,l.telegram_id),usage=occupied(s,l.telegram_id),l=l,history=history,duplicate=duplicate,outbox=outbox,telegram='https://t.me/'+l.username if l.username else f'tg://user?id={l.telegram_id}',whatsapp='https://wa.me/'+l.phone.lstrip('+') if l.phone else '')
+    @app.post('/leads/<int:lead_id>/reset-recommendations')
+    @auth
+    def reset_customer_recommendations(lead_id):
+        if request.form.get('confirm_reset')!='1':
+            abort(400,description='يجب تأكيد تصفير توصيات العميل.')
+        with DB.begin() as s:
+            l=s.scalar(select(Lead).where(Lead.id==lead_id).with_for_update())
+            if not l: abort(404)
+
+            from monitor.customer import Recipient
+
+            # Recipient is the customer-specific recommendation ledger for both
+            # US and commodity recommendations.  Removing only this customer's
+            # rows clears their current/results views without changing the
+            # global Plan state for any other customer.
+            recommendation_count=s.scalar(
+                select(func.count()).select_from(Recipient)
+                .where(Recipient.telegram_id==l.telegram_id)
+            ) or 0
+
+            s.execute(
+                delete(Recipient).where(Recipient.telegram_id==l.telegram_id)
+            )
+
+            # Prevent recommendation alerts already queued for this customer
+            # from being sent after the reset.  Sent messages remain as audit
+            # history because Telegram messages cannot be reliably retracted.
+            queued_rows=s.scalars(
+                select(Outbox).where(
+                    Outbox.chat_id==l.telegram_id,
+                    Outbox.status.in_(('pending','sending','uncertain')),
+                    Outbox.payload.contains('"_us_plan_id"'),
+                ).with_for_update()
+            ).all()
+            for row in queued_rows:
+                row.status='cancelled'
+                row.error='Cancelled by admin customer recommendation reset'
+
+            record(
+                s,l,'admin',
+                f'تم تصفير توصيات العميل: أُلغي ارتباط {recommendation_count} توصية '
+                f'وتم إلغاء {len(queued_rows)} رسالة توصيات معلقة. '
+                'لم تتغير حدود التوصيات أو أهلية استقبال توصيات جديدة.'
+            )
+
+        flash(
+            f'تم تصفير توصيات العميل. أزيلت {recommendation_count} توصية '
+            f'وأُلغي {len(queued_rows)} إرسال معلّق. التوصيات الجديدة ستصل طبيعيًا حسب حالة العميل وحدوده.'
+        )
+        return redirect(url_for('detail',lead_id=lead_id))
+
     @app.post('/leads/<int:lead_id>/message')
     @auth
     def message(lead_id):
