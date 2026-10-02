@@ -87,9 +87,9 @@ def advance(s,p,bar,ratio,contiguous=True):
         p.waiting_bars+=1
         if h>=p.target:
             p.state='MISSED';details={'reason':'Target touched before paper entry'}
-        elif c>=p.entry and ratio is not None and ratio>=rules['volume_ratio']:
+        elif c>=p.entry and (p.market=='XA' or (ratio is not None and ratio>=rules['volume_ratio'])):
             p.state='RETEST';p.trigger_ts=int(ts);p.retest_bars=0
-            details={'volume_ratio':ratio}
+            details={'volume_rule':'not_applied_for_XAUUSD'} if p.market=='XA' else {'volume_ratio':ratio}
         elif p.waiting_bars>=rules['waiting_max_bars']:
             p.state='EXPIRED'
     elif p.state=='RETEST':

@@ -38,9 +38,18 @@ def initialize(DB):
             gold=Stock(symbol='XAUUSD',last_bar=0);s.add(gold)
         gold.feed_symbol=gold_feed;gold.market='XA';gold.company='الذهب مقابل الدولار الأمريكي'
         gold.sharia_label='غير مطبق'
-        gold.metadata_json=json.dumps({'symbol':'XAUUSD','feed_symbol':gold_feed,'market_key':'XA',
+        gold_meta={'symbol':'XAUUSD','feed_symbol':gold_feed,'market_key':'XA',
             'name':'Gold / US Dollar','name_ar':'الذهب مقابل الدولار الأمريكي',
-            'sharia_label':'غير مطبق','sharia_code':'NA','reported_price':None},ensure_ascii=False)
+            'sharia_label':'غير مطبق','sharia_code':'NA','reported_price':None,
+            'volume_rule':'disabled_for_spot_xauusd_v1'}
+        try: old_gold_meta=json.loads(gold.metadata_json or '{}')
+        except Exception: old_gold_meta={}
+        if old_gold_meta.get('volume_rule')!='disabled_for_spot_xauusd_v1':
+            # One-time gold-only re-evaluation after changing the strategy.
+            # Do not reset US stock watermarks or customer data.
+            gold.last_bar=0;gold.error='';gold.checked_at=None
+            log.info('XA volume rule disabled; gold watermark reset for one full re-evaluation')
+        gold.metadata_json=json.dumps(gold_meta,ensure_ascii=False)
     CONFIG['XA']['ref']='XAUUSD'
     return {'US':counts['US'],'XA':1}
 
