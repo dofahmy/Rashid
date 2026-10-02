@@ -99,9 +99,26 @@ def second_stop_customer_card(plan,stock,status,price_value=None):
     heading=f'{plan.symbol} | {company}' if company else plan.symbol
     buy=plan.paper_entry if price_value is None else price_value
     if buy is None:buy=plan.entry
+
+    # Before activation the customer receives a NEW pending LIMIT order.
+    if status=='جديدة':
+        return (
+            f'{heading} — جديدة\n'
+            f'نوع الأمر: ليمت شراء — سعر الشراء: {price(buy)}$ · المستهدف: {price(plan.target)}$ · وقف الخساره: {price(plan.stop)}$'
+        )
+
+    # After activation the order type is no longer relevant because the order
+    # has already executed.  Use the compact executed-trade wording.
+    if status=='تم التفعيل':
+        return (
+            f'{heading} — تم التفعيل\n'
+            f'شراء {plan.symbol} — سعر الشراء: {price(buy)}$ · المستهدف: {price(plan.target)}$ · وقف الخساره: {price(plan.stop)}$'
+        )
+
+    # All later updates keep the same executed-trade format.
     return (
         f'{heading} — {status}\n'
-        f'نوع الأمر: ليمت شراء — سعر الشراء: {price(buy)}$ · الهدف: {price(plan.target)}$ · الوقف: {price(plan.stop)}$'
+        f'شراء {plan.symbol} — سعر الشراء: {price(buy)}$ · المستهدف: {price(plan.target)}$ · وقف الخساره: {price(plan.stop)}$'
     )
 
 def _is_second_stop(plan):
@@ -120,7 +137,7 @@ def card(plan,stock):
     company=' '.join((stock.company or '').split())[:120] if stock else ''
     heading=f'{plan.symbol} | {company}' if company else plan.symbol
     lines=[f'{heading} — {LABELS.get(plan.state,plan.state)}',
-           f'نوع الأمر: {order_label(plan)} · دخول التوصية: {price(plan.paper_entry)}$ · الهدف: {price(plan.target)}$ · الوقف: {price(plan.stop)}$']
+           f'نوع الأمر: {order_label(plan)} · دخول التوصية: {price(plan.paper_entry)}$ · المستهدف: {price(plan.target)}$ · وقف الخساره: {price(plan.stop)}$']
     try:
         ctx=json.loads(plan.context_json or '{}')
         if ctx.get('entry_system')=='SECOND_STOP_RECOVERY':
@@ -166,7 +183,7 @@ def notice(s,plan,kind,ts,clock=None):
                 key=f'usrec:{plan.id}:ENTRY_ALERT:{lead.telegram_id}'
                 s.add(Recipient(plan_id=plan.id,telegram_id=lead.telegram_id,entry_key=key))
                 text=second_stop_customer_card(
-                    plan,stock,'مفتوحة',price_value=plan.entry
+                    plan,stock,'جديدة',price_value=plan.entry
                 )
                 _queue(
                     s,key,lead.telegram_id,text,plan.id,'ENTRY_ALERT',
@@ -195,7 +212,7 @@ def notice(s,plan,kind,ts,clock=None):
                     s.add(Recipient(plan_id=plan.id,telegram_id=lead.telegram_id,entry_key=entry_key))
                     # For fallback only, send the order card immediately before activation.
                     order_text=second_stop_customer_card(
-                        plan,stock,'مفتوحة',price_value=plan.entry
+                        plan,stock,'جديدة',price_value=plan.entry
                     )
                     _queue(
                         s,entry_key,lead.telegram_id,order_text,plan.id,'ENTRY_ALERT',
@@ -325,7 +342,7 @@ def commodity_view(s,lead,market,kind,page=0,clock=None):
     lines=[title,f'العدد: {total} · صفحة {page+1}/{pages}']
     if kind!='current':
         counts=dict(s.execute(select(Plan.state,func.count()).where(Plan.id.in_(query.with_only_columns(Plan.id))).group_by(Plan.state)).all())
-        lines.append(f'تحقق الهدف: {counts.get("TARGET",0)} · خروج بعد المدة: {counts.get("TIME_EXIT",0)} · وقف: {counts.get("STOPPED",0)} · مفتوحة: {counts.get("ACTIVE",0)} · بيانات ناقصة: {counts.get("DATA_GAP",0)}')
+        lines.append(f'تحقق المستهدف: {counts.get("TARGET",0)} · خروج بعد المدة: {counts.get("TIME_EXIT",0)} · وقف: {counts.get("STOPPED",0)} · مفتوحة: {counts.get("ACTIVE",0)} · بيانات ناقصة: {counts.get("DATA_GAP",0)}')
     for plan in plans:lines.append(card(plan,s.get(Stock,plan.symbol)))
     if not plans:lines.append(f'لا توجد توصيات {label} مرسلة إلى حسابك في هذه القائمة حاليًا.')
     lines.append(f'{symbol} على فريم 15 دقيقة من Twelve Data. نفس شروط الذهب الحالية، من دون شرط الفوليوم. الأداء مرجعي قبل الرسوم.')
@@ -358,7 +375,7 @@ def view(s,lead,kind,page=0,clock=None):
     lines=[title,f'العدد: {total} · صفحة {page+1}/{pages}']
     if kind!='current':
         counts=dict(s.execute(select(Plan.state,func.count()).where(Plan.id.in_(query.with_only_columns(Plan.id))).group_by(Plan.state)).all())
-        lines.append(f'تحقق الهدف: {counts.get("TARGET",0)} · خروج بعد المدة: {counts.get("TIME_EXIT",0)} · وقف: {counts.get("STOPPED",0)} · مفتوحة: {counts.get("ACTIVE",0)} · بيانات ناقصة: {counts.get("DATA_GAP",0)}')
+        lines.append(f'تحقق المستهدف: {counts.get("TARGET",0)} · خروج بعد المدة: {counts.get("TIME_EXIT",0)} · وقف: {counts.get("STOPPED",0)} · مفتوحة: {counts.get("ACTIVE",0)} · بيانات ناقصة: {counts.get("DATA_GAP",0)}')
     for plan in plans:lines.append(card(plan,s.get(Stock,plan.symbol)))
     if not plans:lines.append('لا توجد توصيات تم تسليمها إلى حسابك في هذه القائمة حاليًا.')
     lines.append('الأداء محسوب من سعر تفعيل التوصية قبل الرسوم؛ ليس عائد محفظة. آخر سعر من شمعة مكتملة وقد تتأخر البيانات.')
