@@ -2,8 +2,8 @@ import json,math,statistics,pathlib,collections,datetime,importlib.util
 from zoneinfo import ZoneInfo
 ROOT=pathlib.Path(__file__).resolve().parent
 spec=importlib.util.spec_from_file_location('prior_score',((ROOT/'rank_stocks.py') if (ROOT/'rank_stocks.py').exists() else ROOT.parent.parent/'output/rajih_rank_100/rank_stocks.py'));MODEL=importlib.util.module_from_spec(spec);spec.loader.exec_module(MODEL)
-CONFIG={'SA':{'tz':'Asia/Riyadh','start':600,'end':900,'currency':'SAR','ref':'2222.SR'},'US':{'tz':'America/New_York','start':570,'end':960,'currency':'USD','ref':'AAPL'},'XA':{'tz':'America/New_York','start':0,'end':1440,'currency':'USD','ref':'XAUUSD'},'XS':{'tz':'America/New_York','start':0,'end':1440,'currency':'USD','ref':'XAGUSD'},'XO':{'tz':'America/New_York','start':0,'end':1440,'currency':'USD','ref':'WTIUSD'}}
-COMMODITY_MARKETS=('XA','XS','XO')
+CONFIG={'SA':{'tz':'Asia/Riyadh','start':600,'end':900,'currency':'SAR','ref':'2222.SR'},'US':{'tz':'America/New_York','start':570,'end':960,'currency':'USD','ref':'AAPL'},'XA':{'tz':'America/New_York','start':0,'end':1440,'currency':'USD','ref':'XAUUSD'}}
+COMMODITY_MARKETS=('XA',)
 def local(t,m):return datetime.datetime.fromtimestamp(t,ZoneInfo(CONFIG[m]['tz']))
 def clean(raw,m,asof=None):
  d=raw['chart']['result'][0];q=d['indicators']['quote'][0];b=[];cfg=CONFIG[m]

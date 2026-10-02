@@ -28,11 +28,16 @@ class GoldPreference(Base):
     telegram_id = Column(BigInteger, primary_key=True)
     paused = Column(Integer, default=0, nullable=False)
 
+
 NY=ZoneInfo('America/New_York')
 PAGE_SIZE=6
 LABELS={'ACTIVE':'مفتوحة','TARGET':'تحقق الهدف','STOPPED':'وقف خسارة','TIME_EXIT':'خروج بعد مدة الانتظار','DATA_GAP':'المتابعة معلقة — بيانات ناقصة'}
 
 MIN_SCORE_KEY='us_recommendation_min_score'
+COMMODITIES={
+    'XA':dict(symbol='XAUUSD',label='الذهب',emoji='🟡',prefix='gold',preference=GoldPreference),
+}
+
 
 def minimum_score(s):
     row=s.get(Setting,MIN_SCORE_KEY)
@@ -51,21 +56,26 @@ def eligible(s, lead):
     pref=s.get(Preference,lead.telegram_id)
     return not pref or not pref.paused
 
-def gold_eligible(s,lead):
+def commodity_eligible(s,lead,market):
     if not lead or lead.status not in ('trial','subscribed'):return False
     if not lead.completed_at or not lead.consent_at or lead.telegram_status=='blocked':return False
-    pref=s.get(GoldPreference,lead.telegram_id)
+    cfg=COMMODITIES[market];pref=s.get(cfg['preference'],lead.telegram_id)
     return not pref or not pref.paused
+
+def gold_eligible(s,lead):return commodity_eligible(s,lead,'XA')
 
 def buttons():
     return {'inline_keyboard':[[{'text':'📈 التوصيات الحالية','callback_data':'us:current:0'}],
         [{'text':'📊 نتائج توصيات الشهر','callback_data':'us:results:0'}],
         [{'text':'🟡 تداول الذهب','callback_data':'gold:menu'}]]}
 
-def gold_buttons():
-    return {'inline_keyboard':[[{'text':'📈 توصيات الذهب الحالية','callback_data':'gold:current:0'}],
-        [{'text':'📊 نتائج الذهب الشهرية','callback_data':'gold:results:0'}],
+def commodity_buttons(market):
+    cfg=COMMODITIES[market];p=cfg['prefix'];label=cfg['label']
+    return {'inline_keyboard':[[{'text':f'📈 توصيات {label} الحالية','callback_data':f'{p}:current:0'}],
+        [{'text':f'📊 نتائج {label} الشهرية','callback_data':f'{p}:results:0'}],
         [{'text':'⬅️ القائمة الرئيسية','callback_data':'main:menu'}]]}
+
+def gold_buttons():return commodity_buttons('XA')
 
 def stamp(ts):return datetime.fromtimestamp(ts,NY).strftime('%Y-%m-%d %H:%M')+' نيويورك'
 def price(v):return 'غير متاح' if v is None else f'{v:.2f}'
@@ -91,7 +101,7 @@ def card(plan,stock):
 def notice(s,plan,kind,ts,clock=None):
     """Called in the same transaction as a state change; no historical bootstrap sends."""
     clock=int(time.time() if clock is None else clock)
-    if plan.market not in ('US','XA') or not enabled():return
+    if plan.market!='US' and plan.market not in COMMODITIES or not enabled():return
     pub=s.get(Publication,plan.id)
     if kind=='ACTIVE':
         if not score_allowed(s,plan):return
@@ -103,19 +113,22 @@ def notice(s,plan,kind,ts,clock=None):
             lead=s.scalar(select(Lead).where(Lead.id==lead.id).with_for_update().execution_options(populate_existing=True))
             if plan.market=='US':
                 if not eligible(s,lead) or not available(s,lead.telegram_id,plan.paper_entry,clock):continue
-            elif not gold_eligible(s,lead):continue
+            elif not commodity_eligible(s,lead,plan.market):continue
             key=f'usrec:{plan.id}:ACTIVE:{lead.telegram_id}'
             s.add(Recipient(plan_id=plan.id,telegram_id=lead.telegram_id,entry_key=key))
             stock=s.get(Stock,plan.symbol)
-            text=('🟡 راجح | توصية ذهب XAUUSD جديدة — 15 دقيقة' if plan.market=='XA' else '📈 راجح | توصية أمريكية جديدة — 15 دقيقة')+'\n\n'+card(plan,stock)
+            if plan.market in COMMODITIES:
+                cfg=COMMODITIES[plan.market];text=f"{cfg['emoji']} راجح | توصية {cfg['label']} {cfg['symbol']} جديدة — 15 دقيقة"+'\n\n'+card(plan,stock)
+            else:text='📈 راجح | توصية أمريكية جديدة — 15 دقيقة'+'\n\n'+card(plan,stock)
             text+='\n\nتفعيل الشمعة: '+stamp(ts+900)
             _queue(s,key,lead.telegram_id,text,plan.id,kind,ts+1800)
     elif pub and kind in ('TARGET','STOPPED','TIME_EXIT','DATA_GAP'):
         for recipient in s.scalars(select(Recipient).where(Recipient.plan_id==plan.id)):
             lead=s.scalar(select(Lead).where(Lead.telegram_id==recipient.telegram_id))
-            ok=gold_eligible(s,lead) if plan.market=='XA' else eligible(s,lead)
+            ok=commodity_eligible(s,lead,plan.market) if plan.market in COMMODITIES else eligible(s,lead)
             if ok:
-                text=('📊 تحديث توصية راجح للذهب' if plan.market=='XA' else '📊 تحديث توصية راجح الأمريكية')+'\n\n'+card(plan,s.get(Stock,plan.symbol))+'\nوقت الحدث: '+stamp(ts+900)+'\nالأداء مرجعي قبل الرسوم.'
+                title=f"📊 تحديث توصية راجح لـ{COMMODITIES[plan.market]['label']}" if plan.market in COMMODITIES else '📊 تحديث توصية راجح الأمريكية'
+                text=title+'\n\n'+card(plan,s.get(Stock,plan.symbol))+'\nوقت الحدث: '+stamp(ts+900)+'\nالأداء مرجعي قبل الرسوم.'
                 _queue(s,f'usrec:{plan.id}:{kind}:{recipient.telegram_id}',recipient.telegram_id,text,plan.id,kind,None)
 
 def _queue(s,key,tid,text,pid,kind,expires):
@@ -128,9 +141,9 @@ def delivery_allowed(s,row,payload,clock=None):
     lead=s.scalar(select(Lead).where(Lead.telegram_id==row.chat_id).with_for_update().execution_options(populate_existing=True))
     if not enabled():return False
     plan=s.get(Plan,payload['_us_plan_id'])
-    if not plan or plan.market not in ('US','XA'):return False
+    if not plan or (plan.market!='US' and plan.market not in COMMODITIES):return False
     if plan.market=='US' and not eligible(s,lead):return False
-    if plan.market=='XA' and not gold_eligible(s,lead):return False
+    if plan.market in COMMODITIES and not commodity_eligible(s,lead,plan.market):return False
     if payload['_us_kind']=='ACTIVE':
         if plan.market=='US':
             from .limits import available
@@ -140,37 +153,36 @@ def delivery_allowed(s,row,payload,clock=None):
     entry=s.scalar(select(Outbox).where(Outbox.key==recipient.entry_key)) if recipient else None
     return entry is not None and entry.status in ('sent','uncertain')
 
-def gold_view(s,lead,kind,page=0,clock=None):
-    if not gold_eligible(s,lead):
-        return 'تداول الذهب متاح للحسابات المفعّلة بعد تفعيل التجربة أو الاشتراك. لإيقاف تنبيهات الذهب أرسل /stop_gold.',gold_buttons()
+def commodity_view(s,lead,market,kind,page=0,clock=None):
+    cfg=COMMODITIES[market];prefix=cfg['prefix'];label=cfg['label'];symbol=cfg['symbol'];emoji=cfg['emoji']
+    if not commodity_eligible(s,lead,market):
+        return f'تداول {label} متاح للحسابات المفعّلة بعد تفعيل التجربة أو الاشتراك.',commodity_buttons(market)
     clock=time.time() if clock is None else clock
     dt=datetime.fromtimestamp(clock,NY);start=datetime(dt.year,dt.month,1,tzinfo=NY).timestamp()
     end=datetime(dt.year+int(dt.month==12),1 if dt.month==12 else dt.month+1,1,tzinfo=NY).timestamp()
     from .limits import delivered_ids
-    query=select(Plan).join(Publication,Publication.plan_id==Plan.id).where(Plan.market=='XA',Plan.id.in_(delivered_ids(lead.telegram_id,'XA')))
+    query=select(Plan).join(Publication,Publication.plan_id==Plan.id).where(Plan.market==market,Plan.id.in_(delivered_ids(lead.telegram_id,market)))
     if kind=='current':
-        query=query.where(Plan.state.in_(('ACTIVE','DATA_GAP')),Plan.score>=minimum_score(s))
-        title='🟡 توصيات الذهب الحالية | XAUUSD — 15 دقيقة'
+        query=query.where(Plan.state.in_(('ACTIVE','DATA_GAP')),Plan.score>=minimum_score(s));title=f'{emoji} توصيات {label} الحالية | {symbol} — 15 دقيقة'
     else:
         closed_in_month=select(Event.plan_id).where(Event.kind.in_(('TARGET','STOPPED','TIME_EXIT')),Event.bar_ts+900>=start,Event.bar_ts+900<end)
-        query=query.where(or_((Publication.activation_end>=start)&(Publication.activation_end<end),Plan.id.in_(closed_in_month)))
-        title=f'🟡 نتائج الذهب | {dt:%Y-%m} — توقيت نيويورك'
-    total=s.scalar(select(func.count()).select_from(query.subquery())) or 0
-    pages=max(1,math.ceil(total/PAGE_SIZE));page=max(0,min(page,pages-1))
+        query=query.where(or_((Publication.activation_end>=start)&(Publication.activation_end<end),Plan.id.in_(closed_in_month)));title=f'{emoji} نتائج {label} | {dt:%Y-%m} — توقيت نيويورك'
+    total=s.scalar(select(func.count()).select_from(query.subquery())) or 0;pages=max(1,math.ceil(total/PAGE_SIZE));page=max(0,min(page,pages-1))
     plans=s.scalars(query.order_by(Publication.activation_end.desc(),Plan.id.desc()).offset(page*PAGE_SIZE).limit(PAGE_SIZE)).all()
     lines=[title,f'العدد: {total} · صفحة {page+1}/{pages}']
     if kind!='current':
         counts=dict(s.execute(select(Plan.state,func.count()).where(Plan.id.in_(query.with_only_columns(Plan.id))).group_by(Plan.state)).all())
         lines.append(f'تحقق الهدف: {counts.get("TARGET",0)} · خروج بعد المدة: {counts.get("TIME_EXIT",0)} · وقف: {counts.get("STOPPED",0)} · مفتوحة: {counts.get("ACTIVE",0)} · بيانات ناقصة: {counts.get("DATA_GAP",0)}')
     for plan in plans:lines.append(card(plan,s.get(Stock,plan.symbol)))
-    if not plans:lines.append('لا توجد توصيات ذهب مرسلة إلى حسابك في هذه القائمة حاليًا.')
-    lines.append('XAUUSD على فريم 15 دقيقة. الأداء مرجعي قبل الرسوم، ويعتمد على شموع مكتملة من مصدر البيانات العام.')
-    kb=gold_buttons();nav=[]
-    if page:nav.append({'text':'السابق','callback_data':f'gold:{kind}:{page-1}'})
-    nav.append({'text':'تحديث','callback_data':f'gold:{kind}:{page}'})
-    if page+1<pages:nav.append({'text':'التالي','callback_data':f'gold:{kind}:{page+1}'})
-    kb['inline_keyboard'].insert(0,nav)
-    return '\n\n'.join(lines),kb
+    if not plans:lines.append(f'لا توجد توصيات {label} مرسلة إلى حسابك في هذه القائمة حاليًا.')
+    lines.append(f'{symbol} على فريم 15 دقيقة من Twelve Data. نفس شروط الذهب الحالية، من دون شرط الفوليوم. الأداء مرجعي قبل الرسوم.')
+    kb=commodity_buttons(market);nav=[]
+    if page:nav.append({'text':'السابق','callback_data':f'{prefix}:{kind}:{page-1}'})
+    nav.append({'text':'تحديث','callback_data':f'{prefix}:{kind}:{page}'})
+    if page+1<pages:nav.append({'text':'التالي','callback_data':f'{prefix}:{kind}:{page+1}'})
+    kb['inline_keyboard'].insert(0,nav);return '\n\n'.join(lines),kb
+
+def gold_view(s,lead,kind,page=0,clock=None):return commodity_view(s,lead,'XA',kind,page,clock)
 
 def view(s,lead,kind,page=0,clock=None):
     if not eligible(s,lead):

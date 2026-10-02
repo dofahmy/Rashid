@@ -222,7 +222,7 @@ def create_app(db=None,test_config=None):
         conditions=[]
         market=request.args.get('market','')
         state=request.args.get('state','')
-        if market in ('US','XA','XS','XO'): conditions.append(Plan.market==market)
+        if market in ('US','XA'): conditions.append(Plan.market==market)
         if state in LABELS: conditions.append(Plan.state==state)
         symbol=request.args.get('symbol','').strip().upper()[:40]
         if symbol: conditions.append(Plan.symbol==symbol)
@@ -232,8 +232,8 @@ def create_app(db=None,test_config=None):
             from monitor.limits import holding_settings
             hold_days,hold_min_profit=holding_settings(s)
             send_minimum_score=minimum_score(s)
-            selected_market=market if market in ('US','XA','XS','XO') else 'US'
-            if market not in ('US','XA','XS','XO'):
+            selected_market=market if market in ('US','XA') else 'US'
+            if market not in ('US','XA'):
                 conditions.append(Plan.market=='US')
             conditions.append(Plan.score>=send_minimum_score)
             total=s.scalar(select(func.count()).select_from(Plan).where(*conditions))
@@ -292,7 +292,7 @@ def create_app(db=None,test_config=None):
     def stock_feed():
         from monitor.models import Stock
         market=request.args.get('market','');conditions=[Stock.error!='']
-        if market in ('SA','US','XA','XS','XO'): conditions.append(Stock.market==market)
+        if market in ('SA','US','XA'): conditions.append(Stock.market==market)
         with DB() as s:
             rows=s.scalars(select(Stock).where(*conditions).order_by(Stock.market,Stock.symbol).limit(250)).all()
         return render_template('stock_feed.html',rows=rows)

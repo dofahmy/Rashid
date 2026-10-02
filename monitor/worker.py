@@ -15,7 +15,7 @@ log=logging.getLogger('rajih.monitor')
 DATA=Path(__file__).parent/'data'
 LOCK_KEY=72617368696415
 
-COMMODITY_NAMES={'XA':'gold/XAUUSD','XS':'silver/XAGUSD','XO':'oil/WTIUSD'}
+COMMODITY_NAMES={'XA':'gold/XAUUSD'}
 
 def initialize(DB):
     universe=json.loads((DATA/'universe.json').read_text(encoding='utf-8'))
@@ -35,8 +35,6 @@ def initialize(DB):
         # Spot commodities are separate single-instrument markets sourced from Twelve Data.
         commodities=[
             ('XAUUSD','XA','الذهب مقابل الدولار الأمريكي','Gold / US Dollar','disabled_for_spot_commodity_v2'),
-            ('XAGUSD','XS','الفضة مقابل الدولار الأمريكي','Silver / US Dollar','disabled_for_spot_commodity_v2'),
-            ('WTIUSD','XO','بترول خام غرب تكساس مقابل الدولار','WTI Crude Oil / US Dollar','disabled_for_spot_commodity_v2'),
         ]
         for symbol,market,name_ar,name,version in commodities:
             row=s.get(Stock,symbol)
@@ -51,8 +49,8 @@ def initialize(DB):
                 row.last_bar=0;row.error='';row.checked_at=None
                 log.info('%s spot commodity volume rule disabled; watermark reset for one full re-evaluation',market)
             row.metadata_json=json.dumps(meta,ensure_ascii=False)
-    CONFIG['XA']['ref']='XAUUSD';CONFIG['XS']['ref']='XAGUSD';CONFIG['XO']['ref']='WTIUSD'
-    return {'US':counts['US'],'XA':1,'XS':1,'XO':1}
+    CONFIG['XA']['ref']='XAUUSD'
+    return {'US':counts['US'],'XA':1}
 
 @contextlib.contextmanager
 def exclusive(DB,lock_key=LOCK_KEY):
@@ -338,7 +336,7 @@ async def run(DB,once=False):
                 with exclusive(DB) as locked:
                     if locked:
                         log.info('Startup diagnostic scan forced outside normal market-window rules')
-                        for m in ('XA','XS','XO','US'):
+                        for m in ('XA','US'):
                             await scan_market(DB,commodity_provider if m in COMMODITY_MARKETS else us_provider,m,clock,settings)
                 startup_done=True
                 if once:return
@@ -353,7 +351,7 @@ async def run(DB,once=False):
             if once or (offset>=delay and key!=last_attempt):
                 with exclusive(DB) as locked:
                     if locked:
-                        for m in ('XA','XS','XO','US'):
+                        for m in ('XA','US'):
                             if due(m,clock):await scan_market(DB,commodity_provider if m in COMMODITY_MARKETS else us_provider,m,clock,settings)
                 last_attempt=key
             if once:return

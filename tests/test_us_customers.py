@@ -20,6 +20,12 @@ class CustomerTests(unittest.TestCase):
    for i,market,status in [(1,'us','trial'),(2,'both','subscribed'),(3,'sa','trial'),(4,'us','new'),(5,'us','subscribed')]:
     s.add(Lead(telegram_id=i,market=market,status=status,completed_at='yes',consent_at='yes',telegram_status='active',step='done'))
    s.add(Preference(telegram_id=5,paused=1))
+   from monitor.limits import save_limits
+   for tid in (1,2,3,4,5):save_limits(s,tid,dict(total=100,under_one=20,one_to_100=40,over_100=40))
+ def sent(self,s):
+  s.flush()
+  for row in s.scalars(select(Outbox).where(Outbox.key.like('usrec:%:ACTIVE:%'))):row.status='sent'
+  s.flush()
  def tearDown(self):self.env.stop();self.tmp.cleanup()
  def plan(self,s,ts=None):
   ts=self.ts if ts is None else ts
@@ -52,7 +58,7 @@ class CustomerTests(unittest.TestCase):
    entry.status='sent';self.assertTrue(delivery_allowed(s,exit,json.loads(exit.payload)))
  def test_views_current_month_pnl_and_access(self):
   with self.DB.begin() as s:
-   p=self.plan(s);notice(s,p,'ACTIVE',self.ts);s.flush();s.get(Stock,'TEST').last_price=102
+   p=self.plan(s);notice(s,p,'ACTIVE',self.ts);self.sent(s);s.get(Stock,'TEST').last_price=102
    l=s.scalar(select(Lead).where(Lead.telegram_id==1));text,kb=view(s,l,'current')
    self.assertIn('TEST',text);self.assertIn('+1.80%',text);self.assertIn('غير المحقق',text)
    p.state='STOPPED';p.exit_price=98
@@ -75,6 +81,7 @@ class CustomerTests(unittest.TestCase):
   with self.DB.begin() as s:
    p=self.plan(s);p.state='TARGET';p.exit_price=104
    s.add(Publication(plan_id=p.id,published_ts=int(clock-86400),activation_end=int(clock-86400)))
+   s.add(Recipient(plan_id=p.id,telegram_id=1,entry_key='prior-entry'));s.add(Outbox(key='prior-entry',chat_id=1,status='sent',payload='{}'))
    s.add(Event(key='octclose',plan_id=p.id,symbol='TEST',kind='TARGET',bar_ts=int(clock-900),details_json='{}'));s.flush()
    l=s.scalar(select(Lead).where(Lead.telegram_id==1));self.assertIn('TEST',view(s,l,'results',clock=clock)[0])
  def test_opt_out(self):
@@ -82,6 +89,95 @@ class CustomerTests(unittest.TestCase):
    l=s.scalar(select(Lead).where(Lead.telegram_id==1))
    handle_update(s,{'update_id':1,'message':{'chat':{'type':'private'},'from':{'id':1},'text':'/stop_us'}});s.flush();self.assertFalse(eligible(s,l))
    handle_update(s,{'update_id':2,'message':{'chat':{'type':'private'},'from':{'id':1},'text':'/resume_us'}});s.flush();self.assertTrue(eligible(s,l))
+ def test_client_format_two_decimals_company_no_internal_metadata(self):
+  from monitor.customer import card,price
+  with self.DB.begin() as s:
+   p=self.plan(s);stock=s.get(Stock,'TEST');stock.company='Test Company';stock.last_price=19.1301
+   text=card(p,stock)
+   self.assertIn('TEST | Test Company',text);self.assertIn('آخر إغلاق: 19.13$',text)
+   self.assertNotIn(f'#{p.id}',text);self.assertNotIn('التقييم',text)
+   self.assertEqual(price(19.1),'19.10');self.assertEqual(price(20),'20.00')
+   notice(s,p,'ACTIVE',self.ts);s.flush()
+   self.assertNotIn('السعر مرجعي وقت الإشارة',json.loads(s.scalar(select(Outbox)).payload)['text'])
+ def test_stop_transition_queues_customer_exit_once(self):
+  with self.DB.begin() as s:
+   p=self.plan(s);notice(s,p,'ACTIVE',self.ts);s.flush()
+   for row in s.scalars(select(Outbox)):row.status='sent'
+   advance(s,p,[self.ts+900,100,101,97,98,1000],1.2)
+   advance(s,p,[self.ts+900,100,101,97,98,1000],1.2)
+   exits=s.scalars(select(Outbox).where(Outbox.key.like('%:STOPPED:%'))).all()
+   self.assertEqual(len(exits),2)
+   for row in exits:
+    payload=json.loads(row.payload);self.assertTrue(delivery_allowed(s,row,payload))
+    self.assertIn('وقف خسارة',payload['text']);self.assertIn('98.00$',payload['text'])
+ def test_threshold_blocks_new_and_pending_but_keeps_exit_alerts(self):
+  from core import Setting
+  from monitor.customer import MIN_SCORE_KEY
+  with self.DB.begin() as s:
+   p=self.plan(s);s.add(Setting(key=MIN_SCORE_KEY,value='71'));s.flush()
+   notice(s,p,'ACTIVE',self.ts);self.assertIsNone(s.get(Publication,p.id))
+   s.get(Setting,MIN_SCORE_KEY).value='70';notice(s,p,'ACTIVE',self.ts);s.flush()
+   entry=s.scalar(select(Outbox).where(Outbox.chat_id==1))
+   self.assertTrue(delivery_allowed(s,entry,json.loads(entry.payload)))
+   s.get(Setting,MIN_SCORE_KEY).value='90';self.assertFalse(delivery_allowed(s,entry,json.loads(entry.payload)))
+   entry.status='sent';p.state='TARGET';p.exit_price=104;notice(s,p,'TARGET',self.ts+900);s.flush()
+   exit=s.scalar(select(Outbox).where(Outbox.key.like('%:TARGET:1')))
+   self.assertTrue(delivery_allowed(s,exit,json.loads(exit.payload)))
+ def test_admin_threshold_validation_csrf_and_persistence(self):
+  from app import create_app
+  from werkzeug.security import generate_password_hash
+  from monitor.customer import minimum_score
+  app=create_app(self.DB,{'TESTING':True,'SECRET_KEY':'test','SESSION_COOKIE_SECURE':False,'ADMIN_PASSWORD_HASH':generate_password_hash('pw')});c=app.test_client()
+  self.assertEqual(c.post('/stocks/settings',data={'minimum_score':'60'}).status_code,403)
+  with c.session_transaction() as ses:ses['admin']=True;ses['csrf']='test'
+  for v in ('-1','101','nan','inf','abc',''):
+   self.assertEqual(c.post('/stocks/settings',data={'csrf':'test','minimum_score':v}).status_code,400)
+  self.assertEqual(c.post('/stocks/settings',data={'csrf':'test','minimum_score':'65.5'}).status_code,302)
+  with database(self.url)() as s:self.assertEqual(minimum_score(s),65.5)
+  self.assertIn('65.5',c.get('/stocks').get_data(as_text=True))
+ def test_current_view_rechecks_threshold_and_keeps_results_history(self):
+  from core import Setting
+  from monitor.customer import MIN_SCORE_KEY
+  with self.DB.begin() as s:
+   p=self.plan(s);notice(s,p,'ACTIVE',self.ts);self.sent(s)
+   l=s.scalar(select(Lead).where(Lead.telegram_id==1))
+   self.assertIn('TEST',view(s,l,'current')[0])
+   setting=Setting(key=MIN_SCORE_KEY,value='71');s.add(setting);s.flush()
+   self.assertNotIn('TEST',view(s,l,'current')[0]);self.assertIn('العدد: 0',view(s,l,'current')[0])
+   self.assertIn('TEST',view(s,l,'results')[0])
+   setting.value='70';s.flush();self.assertIn('TEST',view(s,l,'current')[0])
+ def test_customer_table_private_access_colors_threshold_and_expiry(self):
+  from monitor.customer_table import table_entry,TableAccess,token_hash,current_rows
+  from core import Setting
+  from monitor.customer import MIN_SCORE_KEY
+  from app import create_app
+  from werkzeug.security import generate_password_hash
+  with self.DB.begin() as s:
+   p=self.plan(s);notice(s,p,'ACTIVE',self.ts);self.sent(s)
+   l=s.scalar(select(Lead).where(Lead.telegram_id==1))
+   text,kb=table_entry(s,l);path=kb['inline_keyboard'][0][0]['url'].split('.app',1)[1];token=path.rsplit('/',1)[1]
+   stock=s.get(Stock,'TEST');stock.last_price=101;self.assertEqual(current_rows(s,l)[0]['tone'],'gain')
+   stock.last_price=99;self.assertEqual(current_rows(s,l)[0]['tone'],'loss')
+   stock.last_price=100.200001;self.assertEqual(current_rows(s,l)[0]['tone'],'flat')
+   stock.company='<script>alert(1)</script>'
+  app=create_app(self.DB,{'TESTING':True,'SECRET_KEY':'test','SESSION_COOKIE_SECURE':False,'ADMIN_PASSWORD_HASH':generate_password_hash('pw')});c=app.test_client()
+  response=c.get(path);self.assertEqual(response.status_code,200);body=response.get_data(as_text=True)
+  self.assertIn('<table>',body);self.assertIn('&lt;script&gt;',body);self.assertNotIn('<script>',body)
+  self.assertEqual(response.headers['Cache-Control'],'no-store')
+  self.assertEqual(c.get('/recommendations/current/invalid').status_code,403)
+  with self.DB.begin() as s:s.add(Setting(key=MIN_SCORE_KEY,value='99'))
+  self.assertNotIn('TEST',c.get(path).get_data(as_text=True))
+  with self.DB.begin() as s:s.get(TableAccess,token_hash(token)).expires=1
+  self.assertEqual(c.get(path).status_code,403)
+ def test_table_rechecks_revoked_account_and_no_access_for_unactivated(self):
+  from monitor.customer_table import table_entry
+  from app import create_app
+  from werkzeug.security import generate_password_hash
+  with self.DB.begin() as s:
+   l=s.scalar(select(Lead).where(Lead.telegram_id==1));_,kb=table_entry(s,l);path=kb['inline_keyboard'][0][0]['url'].split('.app',1)[1]
+   l.status='new';_,denied=table_entry(s,l);self.assertNotIn('url',denied['inline_keyboard'][0][0])
+  app=create_app(self.DB,{'TESTING':True,'SECRET_KEY':'test','SESSION_COOKIE_SECURE':False,'ADMIN_PASSWORD_HASH':generate_password_hash('pw')})
+  self.assertEqual(app.test_client().get(path).status_code,403)
  def test_restart_does_not_republish(self):
   with self.DB.begin() as s:p=self.plan(s);pid=p.id;notice(s,p,'ACTIVE',self.ts)
   db=database(self.url)

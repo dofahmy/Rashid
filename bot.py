@@ -80,16 +80,14 @@ def main():
         result=api(method,payload)
         if not result.get('ok'):logging.warning('Profile update failed: %s; use BotFather to update it.',method)
     commands=[{'command':'menu','description':'قائمة راجح'},{'command':'current','description':'التوصيات الحالية'},
-        {'command':'results','description':'نتائج توصيات الشهر'},{'command':'gold','description':'تداول الذهب XAUUSD'},{'command':'silver','description':'تداول الفضة XAGUSD'},{'command':'oil','description':'تداول البترول WTIUSD'},
+        {'command':'results','description':'نتائج توصيات الشهر'},{'command':'gold','description':'تداول الذهب XAUUSD'},
         {'command':'stop_us','description':'إيقاف تنبيهات الأمريكي'},{'command':'resume_us','description':'استئناف تنبيهات الأمريكي'},
-        {'command':'stop_gold','description':'إيقاف تنبيهات الذهب'},{'command':'resume_gold','description':'استئناف تنبيهات الذهب'},
-        {'command':'stop_silver','description':'إيقاف تنبيهات الفضة'},{'command':'resume_silver','description':'استئناف تنبيهات الفضة'},
-        {'command':'stop_oil','description':'إيقاف تنبيهات البترول'},{'command':'resume_oil','description':'استئناف تنبيهات البترول'}]
+        {'command':'stop_gold','description':'إيقاف تنبيهات الذهب'},{'command':'resume_gold','description':'استئناف تنبيهات الذهب'}]
     api('setMyCommands',{'commands':commands})
     with DB.begin() as s:
         for row in s.scalars(select(Outbox).where(Outbox.status=='sending')):
             row.status='uncertain';row.error='Restart during send; review delivery'
-    logging.info('Bot connected. US, XAUUSD, XAGUSD and WTIUSD recommendation menus ready.')
+    logging.info('Bot connected. US and XAUUSD recommendation menus ready.')
     while True:
         try:
             deliver()

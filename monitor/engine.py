@@ -3,7 +3,7 @@ import json, os, math
 from sqlalchemy import select, or_
 from core import queue, now, Setting
 from .models import Plan, Event, OPEN, LABELS
-from .strategy import local, rounded
+from .strategy import local, rounded, COMMODITY_MARKETS
 
 VERSION = 'sahm_m15_monitor_v1'
 DEFAULT_POLICY = dict(volume_ratio=1.1, retest_max_bars=3, retest_atr_band=.25,
@@ -42,7 +42,7 @@ def event(s,p,kind,ts,details=None):
         queue(s,key+f':{chat}',chat,text)
 
 def new_plan(s,stock,result,ts,settings):
-    if stock.market not in ('US','XA') or not result.get('conditional_plan'): return None
+    if stock.market!='US' and stock.market not in COMMODITY_MARKETS or not result.get('conditional_plan'): return None
     # Development reset clears old plans and stock watermarks.  The worker then
     # re-evaluates the latest complete candle.  Do not reject that candle merely
     # because it closed before the reset button was pressed (for example, a
@@ -87,9 +87,9 @@ def advance(s,p,bar,ratio,contiguous=True):
         p.waiting_bars+=1
         if h>=p.target:
             p.state='MISSED';details={'reason':'Target touched before paper entry'}
-        elif c>=p.entry and (p.market=='XA' or (ratio is not None and ratio>=rules['volume_ratio'])):
+        elif c>=p.entry and (p.market in COMMODITY_MARKETS or (ratio is not None and ratio>=rules['volume_ratio'])):
             p.state='RETEST';p.trigger_ts=int(ts);p.retest_bars=0
-            details={'volume_rule':'not_applied_for_XAUUSD'} if p.market=='XA' else {'volume_ratio':ratio}
+            details={'volume_rule':'not_applied_for_spot_commodity'} if p.market in COMMODITY_MARKETS else {'volume_ratio':ratio}
         elif p.waiting_bars>=rules['waiting_max_bars']:
             p.state='EXPIRED'
     elif p.state=='RETEST':

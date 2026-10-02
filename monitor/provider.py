@@ -49,8 +49,6 @@ class TwelveDataCommodityProvider:
     API_URL='https://api.twelvedata.com/time_series'
     SYMBOLS={
         'XAUUSD':('TWELVE_DATA_XAUUSD_SYMBOL','XAU/USD'),
-        'XAGUSD':('TWELVE_DATA_XAGUSD_SYMBOL','XAG/USD'),
-        'WTIUSD':('TWELVE_DATA_WTIUSD_SYMBOL','WTI/USD'),
     }
 
     @staticmethod
@@ -160,8 +158,7 @@ class TwelveDataCommodityProvider:
         return {'chart':{'result':[{'meta':{'symbol':symbol,'dataGranularity':'15m','currency':'USD','instrumentType':'CURRENCY','regularMarketPrice':rows[-1][4],'upstreamSymbol':meta.get('symbol') or upstream_symbol,'upstreamInterval':meta.get('interval') or '15min','upstreamType':meta.get('type')},'timestamp':[r[0] for r in rows],'indicators':{'quote':[{k:[r[i+1] for r in rows] for i,k in enumerate(names)}]}}]},'_retrieval':{'retrieved_utc':time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()),'provider':self.name,'url':self.API_URL,'upstream_symbol':meta.get('symbol') or upstream_symbol,'bars':len(rows),'volume_available':any(r[5]>0 for r in rows)}}
 
     async def fetch(self,symbol='XAUUSD',bootstrap=False):
-        # Re-read the same Railway variable for XA/XS/XO so all commodities use
-        # one key path.  Sanitize common paste mistakes before every request.
+        # Re-read the Railway API key before every XAUUSD request and sanitize common paste mistakes.
         if not self._refresh_api_key():raise FeedError('twelve_api_key_missing')
         upstream_symbol=self.upstream(symbol)
         until=self._cooldown_until.get(symbol,0)
