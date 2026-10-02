@@ -4,5 +4,7 @@
   "retest_atr_band": 0.25,
   "waiting_max_bars": 20,
   "minimum_rr": 1.5,
-  "market_entry_max_gap_pct": 0.5
+  "market_entry_max_gap_pct": 0.5,
+  "second_stop_atr": 1.2,
+  "second_stop_waiting_max_bars": 78
 }

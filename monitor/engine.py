@@ -7,7 +7,8 @@ from .strategy import local, rounded, COMMODITY_MARKETS
 
 VERSION = 'sahm_m15_monitor_v1'
 DEFAULT_POLICY = dict(volume_ratio=1.1, retest_max_bars=3, retest_atr_band=.25,
-                      waiting_max_bars=20, minimum_rr=1.5, market_entry_max_gap_pct=.5)
+                      waiting_max_bars=20, minimum_rr=1.5, market_entry_max_gap_pct=.5,
+                      second_stop_atr=1.2, second_stop_waiting_max_bars=78)
 
 def policy():
     result = dict(DEFAULT_POLICY)
@@ -16,9 +17,9 @@ def policy():
         with open(path,encoding='utf-8') as stream: overrides=json.load(stream)
         if set(overrides)-set(result): raise ValueError('Unknown policy key')
         result.update(overrides)
-    for key in ('retest_max_bars','waiting_max_bars'):
+    for key in ('retest_max_bars','waiting_max_bars','second_stop_waiting_max_bars'):
         if type(result[key]) is not int or result[key]<1: raise ValueError('Invalid bar count')
-    for key in ('volume_ratio','retest_atr_band','minimum_rr','market_entry_max_gap_pct'):
+    for key in ('volume_ratio','retest_atr_band','minimum_rr','market_entry_max_gap_pct','second_stop_atr'):
         if not isinstance(result[key],(int,float)) or not math.isfinite(result[key]) or result[key]<=0:
             raise ValueError('Invalid policy threshold')
     return result
@@ -31,6 +32,10 @@ def _context(p):
 
 def _save_context(p,ctx):
     p.context_json=json.dumps(ctx,ensure_ascii=False)
+
+def _second_stop_system(p):
+    return p.market=='US' and _context(p).get('entry_system')=='SECOND_STOP_RECOVERY'
+
 
 def classify_order(entry,reference_price,settings):
     """Choose a real order style from the planned entry vs latest closed price.
@@ -45,7 +50,12 @@ def classify_order(entry,reference_price,settings):
     return ('LIMIT' if entry<reference_price else 'STOP'),gap_pct
 
 def order_type(p):
-    ctx=_context(p);kind=ctx.get('order_type')
+    ctx=_context(p)
+    if _second_stop_system(p):
+        if ctx.get('order_type')!='LIMIT':
+            ctx['order_type']='LIMIT';_save_context(p,ctx)
+        return 'LIMIT'
+    kind=ctx.get('order_type')
     if kind in ('MARKET','LIMIT','STOP'):return kind
     ref=ctx.get('signal_bar_close') or ctx.get('feed_last_price')
     kind,gap=classify_order(p.entry,ref,json.loads(p.policy_json or '{}'))
@@ -56,7 +66,9 @@ def _activate_fill(s,p,fill,ts,kind,details=None):
     rules=json.loads(p.policy_json);fill,_=rounded(fill,p.market,True)
     if fill<=p.stop or fill>=p.target:return False,'invalid_fill_level'
     rr=(p.target-fill)/(fill-p.stop)
-    if rr+1e-9<rules['minimum_rr']:return False,'rr_below_minimum_after_fill'
+    # US second-stop recovery is intentionally a roughly 1:1 setup.
+    if not _second_stop_system(p) and rr+1e-9<rules['minimum_rr']:
+        return False,'rr_below_minimum_after_fill'
     p.state='ACTIVE';p.paper_entry=fill;p.activation_ts=int(ts)
     info={'paper_entry':fill,'rr_after_fill':rr,'order_type':kind,'execution':'paper_order_simulation'}
     if details:info.update(details)
@@ -91,15 +103,42 @@ def new_plan(s,stock,result,ts,settings):
     if s.scalar(select(Plan.id).where(Plan.symbol==stock.symbol,Plan.strategy_version==VERSION,Plan.signal_ts==int(ts))): return None
     ctx=dict(result)
     ref=float(result.get('signal_bar_close') or stock.last_price or result['entry_reference'])
-    kind,gap=classify_order(result['entry_reference'],ref,settings)
-    ctx.update(order_type=kind,order_gap_pct=gap,order_reference_price=ref,
-               order_rule='MARKET if abs(entry-reference)<=0.5%; LIMIT below reference; STOP above reference')
+    if stock.market=='US':
+        atr=float(result['atr14']);mult=float(settings['second_stop_atr'])
+        original_entry=float(result['entry_reference'])
+        first_stop=float(result['stop_reference'])
+        original_target=float(result['selected_target_price'])
+        second_stop,_=rounded(first_stop-mult*atr,stock.market,False)
+        third_stop,_=rounded(second_stop-mult*atr,stock.market,False)
+        if third_stop<=0 or not (third_stop<second_stop<first_stop):
+            return None
+        kind='LIMIT';gap=100*(second_stop/ref-1) if ref>0 else None
+        ctx.update(
+            entry_system='SECOND_STOP_RECOVERY',
+            original_entry_reference=original_entry,
+            original_first_stop=first_stop,
+            original_selected_target=original_target,
+            second_stop_atr_mult=mult,
+            second_stop_entry=second_stop,
+            third_stop_protective=third_stop,
+            recovery_target_first_stop=first_stop,
+            order_type='LIMIT',
+            order_gap_pct=gap,
+            order_reference_price=ref,
+            order_rule='US recovery: BUY LIMIT at original stop - 1.2 ATR; target=original stop; protective stop=another 1.2 ATR lower',
+        )
+        plan_entry,plan_stop,plan_target=second_stop,third_stop,first_stop
+    else:
+        kind,gap=classify_order(result['entry_reference'],ref,settings)
+        ctx.update(order_type=kind,order_gap_pct=gap,order_reference_price=ref,
+                   order_rule='MARKET if abs(entry-reference)<=0.5%; LIMIT below reference; STOP above reference')
+        plan_entry,plan_stop,plan_target=result['entry_reference'],result['stop_reference'],result['selected_target_price']
     p=Plan(symbol=stock.symbol,market=stock.market,strategy_version=VERSION,signal_ts=int(ts),last_bar=int(ts),
-           state='WAITING',entry=result['entry_reference'],stop=result['stop_reference'],
-           target=result['selected_target_price'],atr=result['atr14'],score=result['technical_score_100'],
+           state='WAITING',entry=plan_entry,stop=plan_stop,
+           target=plan_target,atr=result['atr14'],score=result['technical_score_100'],
            waiting_bars=0,retest_bars=0,context_json=json.dumps(ctx,ensure_ascii=False),
            policy_json=json.dumps(settings,sort_keys=True))
-    s.add(p);s.flush();event(s,p,'WAITING',ts,{'bootstrap_or_new':True,'order_type':kind,'order_gap_pct':gap,'reference_price':ref});return p
+    s.add(p);s.flush();event(s,p,'WAITING',ts,{'bootstrap_or_new':True,'order_type':kind,'order_gap_pct':gap,'reference_price':ref,'entry_system':ctx.get('entry_system')});return p
 
 def advance(s,p,bar,ratio,contiguous=True):
     ts,o,h,l,c,v=bar
@@ -150,7 +189,7 @@ def advance(s,p,bar,ratio,contiguous=True):
                 ok,reason=_activate_fill(s,p,fill,ts,kind,{'limit_price':p.entry,'gap_improvement':fill<p.entry})
                 if ok:return True
                 p.state='CANCELLED';details={'reason':reason,'order_type':kind,'attempted_fill':fill}
-            elif h>=p.target:
+            elif not _second_stop_system(p) and h>=p.target:
                 p.state='MISSED';details={'reason':'Target touched before limit order filled','order_type':kind}
         else: # STOP breakout order
             if l<=p.stop:
@@ -165,8 +204,9 @@ def advance(s,p,bar,ratio,contiguous=True):
                     ok,reason=_activate_fill(s,p,fill,ts,kind,{'stop_price':p.entry,'gap_slippage':fill>p.entry})
                     if ok:return True
                     p.state='CANCELLED';details={'reason':reason,'order_type':kind,'attempted_fill':fill}
-        if p.state=='WAITING' and p.waiting_bars>=rules['waiting_max_bars']:
-            p.state='EXPIRED';details={'reason':'Pending order expired','order_type':kind}
+        wait_limit=rules.get('second_stop_waiting_max_bars',78) if _second_stop_system(p) else rules['waiting_max_bars']
+        if p.state=='WAITING' and p.waiting_bars>=wait_limit:
+            p.state='EXPIRED';details={'reason':'Pending order expired','order_type':kind,'waiting_limit_bars':wait_limit}
     if p.state!=before:
         event(s,p,p.state,ts,details);return True
     return False

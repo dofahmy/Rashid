@@ -83,7 +83,9 @@ def price(v):return 'غير متاح' if v is None else f'{v:.2f}'
 
 def order_label(plan):
     try:
-        ctx=json.loads(plan.context_json or '{}');kind=ctx.get('order_type','')
+        ctx=json.loads(plan.context_json or '{}')
+        if ctx.get('entry_system')=='SECOND_STOP_RECOVERY':return 'Limit شراء — المستوى الثاني'
+        kind=ctx.get('order_type','')
         if kind not in ('MARKET','LIMIT','STOP'):
             ref=ctx.get('signal_bar_close') or ctx.get('feed_last_price')
             if ref and float(ref)>0:
@@ -104,6 +106,12 @@ def card(plan,stock):
     heading=f'{plan.symbol} | {company}' if company else plan.symbol
     lines=[f'{heading} — {LABELS.get(plan.state,plan.state)}',
            f'نوع الأمر: {order_label(plan)} · دخول التوصية: {price(plan.paper_entry)}$ · الهدف: {price(plan.target)}$ · الوقف: {price(plan.stop)}$']
+    try:
+        ctx=json.loads(plan.context_json or '{}')
+        if ctx.get('entry_system')=='SECOND_STOP_RECOVERY':
+            lines.append('طريقة الدخول: تفعيل عند المستوى الثاني؛ الهدف هو مستوى الوقف الأول المحسوب من الإشارة الأصلية.')
+    except Exception:
+        pass
     if closed:lines.append(f'سعر الخروج المرجعي: {price(plan.exit_price)}$')
     elif stock:lines.append(f'آخر إغلاق: {price(stock.last_price)}$ · تحديث {stamp(stock.last_bar+900)}')
     if pnl is not None:lines.append(f'{"نتيجة الإغلاق" if closed else "الأداء غير المحقق"}: {pnl:+.2f}%')
