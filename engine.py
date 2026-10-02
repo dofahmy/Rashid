@@ -1,9 +1,9 @@
 """Closed-bar state transitions. All executions are paper observations."""
 import json, os, math
 from sqlalchemy import select, or_
-from core import queue, now
+from core import queue, now, Setting
 from .models import Plan, Event, OPEN, LABELS
-from .strategy import local, rounded
+from .strategy import local, rounded, COMMODITY_MARKETS
 
 VERSION = 'sahm_m15_monitor_v1'
 DEFAULT_POLICY = dict(volume_ratio=1.1, retest_max_bars=3, retest_atr_band=.25,
@@ -42,7 +42,12 @@ def event(s,p,kind,ts,details=None):
         queue(s,key+f':{chat}',chat,text)
 
 def new_plan(s,stock,result,ts,settings):
-    if stock.market!='US' or not result.get('conditional_plan'): return None
+    if stock.market!='US' and stock.market not in COMMODITY_MARKETS or not result.get('conditional_plan'): return None
+    # Development reset clears old plans and stock watermarks.  The worker then
+    # re-evaluates the latest complete candle.  Do not reject that candle merely
+    # because it closed before the reset button was pressed (for example, a
+    # startup diagnostic scan after market close).  Duplicate/open-plan guards
+    # below still prevent creating the same signal more than once.
     if s.scalar(select(Plan.id).where(Plan.symbol==stock.symbol,or_(Plan.state.in_(OPEN),(Plan.state=='DATA_GAP') & (Plan.paper_entry.is_not(None))))): return None
     if s.scalar(select(Plan.id).where(Plan.symbol==stock.symbol,Plan.strategy_version==VERSION,Plan.signal_ts==int(ts))): return None
     p=Plan(symbol=stock.symbol,market=stock.market,strategy_version=VERSION,signal_ts=int(ts),last_bar=int(ts),
@@ -66,15 +71,25 @@ def advance(s,p,bar,ratio,contiguous=True):
             details={'both_target_and_stop':h>=p.target,'paper_exit':p.exit_price}
         elif h>=p.target:
             p.state='TARGET';p.exit_price=p.target;details={'paper_exit':p.exit_price}
+        else:
+            from .limits import holding_settings
+            days,min_profit=holding_settings(s)
+            # Calendar time from activation close; evaluate only a new complete,
+            # contiguous candle. Stop and target always take precedence.
+            if (p.activation_ts is not None and p.paper_entry and
+                ts-p.activation_ts>=days*86400 and
+                (c/p.paper_entry-1)*100+1e-9>=min_profit):
+                p.state='TIME_EXIT';p.exit_price=c
+                details={'paper_exit':c,'hold_days':days,'min_profit_pct':min_profit}
     elif l<=p.stop:
         p.state='CANCELLED';details={'reason':'Stop breached before activation'}
     elif p.state=='WAITING':
         p.waiting_bars+=1
         if h>=p.target:
             p.state='MISSED';details={'reason':'Target touched before paper entry'}
-        elif c>=p.entry and ratio is not None and ratio>=rules['volume_ratio']:
+        elif c>=p.entry and (p.market in COMMODITY_MARKETS or (ratio is not None and ratio>=rules['volume_ratio'])):
             p.state='RETEST';p.trigger_ts=int(ts);p.retest_bars=0
-            details={'volume_ratio':ratio}
+            details={'volume_rule':'not_applied_for_spot_commodity'} if p.market in COMMODITY_MARKETS else {'volume_ratio':ratio}
         elif p.waiting_bars>=rules['waiting_max_bars']:
             p.state='EXPIRED'
     elif p.state=='RETEST':

@@ -75,18 +75,21 @@ def main():
     if not hook.get('ok') or hook.get('result',{}).get('url'): raise SystemExit('Polling requires an empty webhook. Use a dedicated new bot or remove its webhook first.')
     for method,payload in (
         ('setMyName',{'name':BRAND}),
-        ('setMyDescription',{'description':'مرحبًا بك في '+BRAND+' 📈\nسجّل اهتمامك بالأسهم، وتابع توصيات الأمريكي على فريم 15 دقيقة ونتائجها بعد تفعيل حسابك.'}),
+        ('setMyDescription',{'description':'مرحبًا بك في '+BRAND+' 📈\nسجّل اهتمامك بالأسهم، وتابع توصيات الأمريكي والذهب والفضة والبترول على فريم 15 دقيقة بعد تفعيل حسابك.'}),
         ('setMyShortDescription',{'short_description':'راجح | رؤية الأسواق 📈 توصيات الأسهم ومتابعة الأداء ونتائج الشهر.'})):
         result=api(method,payload)
         if not result.get('ok'):logging.warning('Profile update failed: %s; use BotFather to update it.',method)
     commands=[{'command':'menu','description':'قائمة راجح'},{'command':'current','description':'التوصيات الحالية'},
-        {'command':'results','description':'نتائج توصيات الشهر'},{'command':'stop_us','description':'إيقاف تنبيهات الأمريكي'},
-        {'command':'resume_us','description':'استئناف تنبيهات الأمريكي'}]
+        {'command':'results','description':'نتائج توصيات الشهر'},{'command':'gold','description':'تداول الذهب XAUUSD'},{'command':'silver','description':'تداول الفضة XAGUSD'},{'command':'oil','description':'تداول البترول WTIUSD'},
+        {'command':'stop_us','description':'إيقاف تنبيهات الأمريكي'},{'command':'resume_us','description':'استئناف تنبيهات الأمريكي'},
+        {'command':'stop_gold','description':'إيقاف تنبيهات الذهب'},{'command':'resume_gold','description':'استئناف تنبيهات الذهب'},
+        {'command':'stop_silver','description':'إيقاف تنبيهات الفضة'},{'command':'resume_silver','description':'استئناف تنبيهات الفضة'},
+        {'command':'stop_oil','description':'إيقاف تنبيهات البترول'},{'command':'resume_oil','description':'استئناف تنبيهات البترول'}]
     api('setMyCommands',{'commands':commands})
     with DB.begin() as s:
         for row in s.scalars(select(Outbox).where(Outbox.status=='sending')):
             row.status='uncertain';row.error='Restart during send; review delivery'
-    logging.info('Bot connected. US recommendation menus ready.')
+    logging.info('Bot connected. US, XAUUSD, XAGUSD and WTIUSD recommendation menus ready.')
     while True:
         try:
             deliver()

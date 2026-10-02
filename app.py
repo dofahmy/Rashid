@@ -160,6 +160,17 @@ def create_app(db=None,test_config=None):
             rows=current_rows(s,lead)
         return render_template('customer_current.html',expired=False,rows=rows,price=price)
 
+    @app.get('/recommendations/results/<token>')
+    def customer_results_table(token):
+        from monitor.customer_table import authorized_lead,monthly_rows
+        from monitor.customer import price,LABELS
+        with DB() as s:
+            lead=authorized_lead(s,token)
+            if lead is None:
+                return render_template('customer_results.html',expired=True,rows=[],price=price,labels=LABELS,month=''),403
+            rows,month=monthly_rows(s,lead)
+        return render_template('customer_results.html',expired=False,rows=rows,price=price,labels=LABELS,month=month)
+
     @app.post('/stocks/reset')
     @auth
     def reset_stock_history():
@@ -211,7 +222,7 @@ def create_app(db=None,test_config=None):
         conditions=[]
         market=request.args.get('market','')
         state=request.args.get('state','')
-        if market in ('SA','US'): conditions.append(Plan.market==market)
+        if market in ('US','XA','XS','XO'): conditions.append(Plan.market==market)
         if state in LABELS: conditions.append(Plan.state==state)
         symbol=request.args.get('symbol','').strip().upper()[:40]
         if symbol: conditions.append(Plan.symbol==symbol)
@@ -221,11 +232,14 @@ def create_app(db=None,test_config=None):
             from monitor.limits import holding_settings
             hold_days,hold_min_profit=holding_settings(s)
             send_minimum_score=minimum_score(s)
-            conditions.extend([Plan.market=='US',Plan.score>=send_minimum_score])
+            selected_market=market if market in ('US','XA','XS','XO') else 'US'
+            if market not in ('US','XA','XS','XO'):
+                conditions.append(Plan.market=='US')
+            conditions.append(Plan.score>=send_minimum_score)
             total=s.scalar(select(func.count()).select_from(Plan).where(*conditions))
             pages=max(1,math.ceil(total/50));page=min(page,pages)
             rows=s.scalars(select(Plan).where(*conditions).order_by(Plan.score.desc(),Plan.id.desc()).offset((page-1)*50).limit(50)).all()
-            counts=dict(s.execute(select(Plan.state,func.count()).where(Plan.market=='US',Plan.score>=send_minimum_score).group_by(Plan.state)).all())
+            counts=dict(s.execute(select(Plan.state,func.count()).where(Plan.market==selected_market,Plan.score>=send_minimum_score).group_by(Plan.state)).all())
             universe=dict(s.execute(select(Stock.market,func.count()).group_by(Stock.market)).all())
             waiting_errors=s.scalar(
                 select(func.count()).select_from(Stock).where(Stock.error=='awaiting_expected_closed_bar')
@@ -278,7 +292,7 @@ def create_app(db=None,test_config=None):
     def stock_feed():
         from monitor.models import Stock
         market=request.args.get('market','');conditions=[Stock.error!='']
-        if market in ('SA','US'): conditions.append(Stock.market==market)
+        if market in ('SA','US','XA','XS','XO'): conditions.append(Stock.market==market)
         with DB() as s:
             rows=s.scalars(select(Stock).where(*conditions).order_by(Stock.market,Stock.symbol).limit(250)).all()
         return render_template('stock_feed.html',rows=rows)

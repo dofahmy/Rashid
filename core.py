@@ -141,7 +141,19 @@ def handle_update(s,u):
         counter+=1; queue(s,f'update:{uid}:{counter}',tid,t,markup)
     if cb:
         s.add(Outbox(key=f'ack:{uid}',chat_id=tid,method='answerCallbackQuery',payload=json.dumps({'callback_query_id':cb['id']})))
-    if text in ('/stop_gold','/resume_gold'):
+    if text in ('/stop_silver','/resume_silver'):
+        from monitor.customer import SilverPreference
+        pref=s.get(SilverPreference,tid)
+        if not pref:pref=SilverPreference(telegram_id=tid);s.add(pref)
+        pref.paused=int(text=='/stop_silver')
+        send('تم إيقاف تنبيهات الفضة.' if pref.paused else 'تم استئناف تنبيهات الفضة إذا كان حسابك مفعّلًا.',menu())
+    elif text in ('/stop_oil','/resume_oil'):
+        from monitor.customer import OilPreference
+        pref=s.get(OilPreference,tid)
+        if not pref:pref=OilPreference(telegram_id=tid);s.add(pref)
+        pref.paused=int(text=='/stop_oil')
+        send('تم إيقاف تنبيهات البترول.' if pref.paused else 'تم استئناف تنبيهات البترول إذا كان حسابك مفعّلًا.',menu())
+    elif text in ('/stop_gold','/resume_gold'):
         from monitor.customer import GoldPreference
         pref=s.get(GoldPreference,tid)
         if not pref:pref=GoldPreference(telegram_id=tid);s.add(pref)
@@ -153,18 +165,25 @@ def handle_update(s,u):
         if not pref:pref=Preference(telegram_id=tid);s.add(pref)
         pref.paused=int(text=='/stop_us')
         send('تم إيقاف تنبيهات الأمريكي.' if pref.paused else 'تم استئناف تنبيهات الأمريكي إذا كانت التجربة أو الاشتراك مفعّلة.',menu())
-    elif data.startswith('us:') or data.startswith('gold:') or data=='main:menu' or text.split('@')[0] in ('/current','/results','/gold','/menu'):
+    elif data.startswith(('us:','gold:','silver:','oil:')) or data=='main:menu' or text.split('@')[0] in ('/current','/results','/gold','/silver','/oil','/menu'):
         from monitor.customer import view
         command=text.split('@')[0]
         if command=='/menu' or data=='main:menu':send('قائمة راجح:',menu())
         elif data=='gold:menu' or command=='/gold':
             from monitor.customer import gold_buttons
-            send('🟡 تداول الذهب | XAUUSD — فريم 15 دقيقة\nنفس منطق التوصيات الفنية، مع تطبيق خصائص مصدر الذهب المتاح.',gold_buttons())
-        elif data.startswith('gold:'):
-            from monitor.customer import gold_view
+            send('🟡 تداول الذهب | XAUUSD — فريم 15 دقيقة\nTwelve Data · نفس الاستراتيجية بدون شرط الفوليوم.',gold_buttons())
+        elif data=='silver:menu' or command=='/silver':
+            from monitor.customer import silver_buttons
+            send('⚪ تداول الفضة | XAGUSD — فريم 15 دقيقة\nTwelve Data · نفس شروط الذهب الحالية بدون شرط الفوليوم.',silver_buttons())
+        elif data=='oil:menu' or command=='/oil':
+            from monitor.customer import oil_buttons
+            send('🛢️ تداول البترول | WTIUSD — فريم 15 دقيقة\nTwelve Data · نفس شروط الذهب الحالية بدون شرط الفوليوم.',oil_buttons())
+        elif data.startswith(('gold:','silver:','oil:')):
+            from monitor.customer import gold_view,silver_view,oil_view
             parts=data.split(':');kind=parts[1] if len(parts)>1 else 'current'
             page=min(100000,int(parts[2])) if len(parts)>2 and parts[2].isdigit() else 0
-            body,kb=gold_view(s,l,kind,page);send(body,kb)
+            fn=gold_view if data.startswith('gold:') else silver_view if data.startswith('silver:') else oil_view
+            body,kb=fn(s,l,kind,page);send(body,kb)
         else:
             parts=data.split(':');kind=parts[1] if len(parts)>1 else ('current' if command=='/current' else 'results')
             page=min(100000,int(parts[2])) if len(parts)>2 and parts[2].isdigit() else 0

@@ -2,7 +2,8 @@ import json,math,statistics,pathlib,collections,datetime,importlib.util
 from zoneinfo import ZoneInfo
 ROOT=pathlib.Path(__file__).resolve().parent
 spec=importlib.util.spec_from_file_location('prior_score',((ROOT/'rank_stocks.py') if (ROOT/'rank_stocks.py').exists() else ROOT.parent.parent/'output/rajih_rank_100/rank_stocks.py'));MODEL=importlib.util.module_from_spec(spec);spec.loader.exec_module(MODEL)
-CONFIG={'SA':{'tz':'Asia/Riyadh','start':600,'end':900,'currency':'SAR','ref':'2222.SR'},'US':{'tz':'America/New_York','start':570,'end':960,'currency':'USD','ref':'AAPL'}}
+CONFIG={'SA':{'tz':'Asia/Riyadh','start':600,'end':900,'currency':'SAR','ref':'2222.SR'},'US':{'tz':'America/New_York','start':570,'end':960,'currency':'USD','ref':'AAPL'},'XA':{'tz':'America/New_York','start':0,'end':1440,'currency':'USD','ref':'XAUUSD'},'XS':{'tz':'America/New_York','start':0,'end':1440,'currency':'USD','ref':'XAGUSD'},'XO':{'tz':'America/New_York','start':0,'end':1440,'currency':'USD','ref':'WTIUSD'}}
+COMMODITY_MARKETS=('XA','XS','XO')
 def local(t,m):return datetime.datetime.fromtimestamp(t,ZoneInfo(CONFIG[m]['tz']))
 def clean(raw,m,asof=None):
  d=raw['chart']['result'][0];q=d['indicators']['quote'][0];b=[];cfg=CONFIG[m]
@@ -36,7 +37,7 @@ def pivots(b,col):
   if col==2 and x>=max(left+right) and x>min(left) and x>min(right):out.append(i)
  return out
 def tick(price,m):
- if m=='US':return .0001 if price<1 else .01
+ if m=='US' or m in COMMODITY_MARKETS:return .0001 if price<1 else .01
  return .01 if price<25 else .02 if price<50 else .05 if price<100 else .1 if price<250 else .2 if price<500 else .5
 def rounded(price,m,up):
  t=tick(price,m)
@@ -53,7 +54,8 @@ def evaluate(r,calendar,raw,asof,reference_slots=None):
  except Exception as e:out['blockers']=['parse_'+type(e).__name__];return out
  out.update(bars=len(b),hourly_bars=len(h),source_url=raw.get('_retrieval',{}).get('url','https://query1.finance.yahoo.com/v8/finance/chart/'+sym+'?range=60d&interval=15m&includePrePost=false'),retrieved_utc=raw.get('_retrieval',{}).get('retrieved_utc'),data_granularity=meta.get('dataGranularity'))
  if meta.get('dataGranularity')!='15m':out['blockers'].append('wrong_data_granularity')
- if meta.get('instrumentType')!='EQUITY':out['blockers'].append('feed_not_equity')
+ expected_type='CURRENCY' if m in COMMODITY_MARKETS else 'EQUITY'
+ if meta.get('instrumentType')!=expected_type:out['blockers'].append('feed_not_'+expected_type.lower())
  if meta.get('currency')!=cfg['currency']:out['blockers'].append('currency_mismatch')
  if meta.get('symbol')!=sym:out['blockers'].append('feed_symbol_mismatch')
  if len(b)<200:out['blockers'].append('fewer_than_200_complete_bars')
@@ -61,10 +63,18 @@ def evaluate(r,calendar,raw,asof,reference_slots=None):
  out['eligible']=True;out.update(indicators(b));out.update(bar_start_local=local(b[-1][0],m).isoformat(),bar_end_local=local(b[-1][0]+900,m).isoformat(),signal_bar_close=b[-1][4],feed_last_price=b[-1][4],feed_reported_price=meta.get('regularMarketPrice'),sahm_reported_price=r['reported_price'],last_volume=b[-1][5])
  grid=[datetime.datetime(day.year,day.month,day.day,minute//60,minute%60,tzinfo=ZoneInfo(cfg['tz'])).timestamp() for day in calendar for minute in range(cfg['start'],cfg['end'],15) if day.isoformat()<=local(b[-1][0],m).date().isoformat()];expected=set([t for t in (reference_slots if reference_slots is not None else grid) if t<=b[-1][0]][-21:]);out['missing_last21']=len(expected-{x[0] for x in b})
  if out['missing_last21']:out['blockers'].append('missing_last21_expected_market_slots')
- prior_dates=set([day for day in calendar if day<local(b[-1][0],m).date()][-20:]);prior=[x for x in b[:-1] if local(x[0],m).date() in prior_dates and local(x[0],m).strftime('%H:%M')==local(b[-1][0],m).strftime('%H:%M')];avg=statistics.mean(x[5] for x in prior) if prior else 0;out.update(same_time_sessions=len(prior),same_time_average_volume=avg,same_time_volume_ratio=b[-1][5]/avg if avg>0 else 0)
- if len(prior)!=20 or avg<=0:out['blockers'].append('missing_20_same_time_session_baseline')
- if b[-1][5]<=0:out['blockers'].append('no_volume_in_signal_bar')
- out['volume_confirmed_now']=out['same_time_volume_ratio']>=1.1
+ prior_dates=set([day for day in calendar if day<local(b[-1][0],m).date()][-20:]);prior=[x for x in b[:-1] if local(x[0],m).date() in prior_dates and local(x[0],m).strftime('%H:%M')==local(b[-1][0],m).strftime('%H:%M')];avg=statistics.mean(x[5] for x in prior) if prior else 0
+ if m in COMMODITY_MARKETS:
+  # Spot commodity feeds has no centralized exchange volume in Twelve Data.  Do not
+  # invent a proxy and do not block the setup on volume-only rules.  Keep the
+  # fields present for downstream compatibility and score gold without the
+  # 15-point relative-volume component below.
+  out.update(same_time_sessions=0,same_time_average_volume=0,same_time_volume_ratio=0,volume_confirmed_now=None,volume_rule_applied=False)
+ else:
+  out.update(same_time_sessions=len(prior),same_time_average_volume=avg,same_time_volume_ratio=b[-1][5]/avg if avg>0 else 0,volume_rule_applied=True)
+  if len(prior)!=20 or avg<=0:out['blockers'].append('missing_20_same_time_session_baseline')
+  if b[-1][5]<=0:out['blockers'].append('no_volume_in_signal_bar')
+  out['volume_confirmed_now']=out['same_time_volume_ratio']>=1.1
  out['hour_trend_up']=indicators(h)['trend_up'] if len(h)>=200 and local(h[-1][0],m).date().isoformat()==local(b[-1][0],m).date().isoformat() else None
  out['hour_bar_end_local']=local(h[-1][0]+3600,m).isoformat() if h else None
  if not 35<=out['rsi14']<=75:out['blockers'].append('RSI_outside_35_75')
@@ -85,4 +95,23 @@ def evaluate(r,calendar,raw,asof,reference_slots=None):
  n=available[0];out.update(selected_target_pct=n,selected_target_price=out[f'target_{n}pct'],selected_reward_risk=out[f'reward_risk_{n}pct'],actual_selected_target_pct=100*(out[f'target_{n}pct']/entry-1))
  resistance=[b[i][2] for i in pivots(b,2) if b[i][2]>entry+.1*out['atr14']];high20=max(x[2] for x in b[-21:-1]);out['prior_high20']=high20
  if high20>entry+.1*out['atr14']:resistance.append(high20)
- out['next_local_resistance']=min(resistance,default=None);out['resistance_before_selected_target']=out['next_local_resistance'] is not None and out['next_local_resistance']<out['selected_target_price'];out['conditional_plan']=True;out['hour_confirmation_required_for_priority']=True;out['priority_candidate']=out['hour_trend_up'] is True and out['volume_confirmed_now'] and not out['resistance_before_selected_target'];out['unknown_resistance']=out['next_local_resistance'] is None;out['setup_type']='اتجاه قصير' if out['ema20']>=out['ema50'] else 'ارتداد مبكر';out['plan_status']='خطة مشروطة؛ انتظار إغلاق تفعيل وحجم وإعادة اختبار';out['activation_status']='pending_future_close_above_entry_volume_110pct_and_retest';out['targets_type']='percentage_objectives_not_forecasts';out['news_status']='not_reviewed';out['execution_costs_status']='not_included';out['score_type']='experimental_technical_priority_not_probability';return MODEL.score(out)
+ out['next_local_resistance']=min(resistance,default=None);out['resistance_before_selected_target']=out['next_local_resistance'] is not None and out['next_local_resistance']<out['selected_target_price'];out['conditional_plan']=True;out['hour_confirmation_required_for_priority']=True;out['priority_candidate']=out['hour_trend_up'] is True and (m in COMMODITY_MARKETS or out['volume_confirmed_now']) and not out['resistance_before_selected_target'];out['unknown_resistance']=out['next_local_resistance'] is None;out['setup_type']='اتجاه قصير' if out['ema20']>=out['ema50'] else 'ارتداد مبكر'
+ if m in COMMODITY_MARKETS:
+  out['plan_status']='خطة مشروطة للسلعة؛ انتظار إغلاق تفعيل وإعادة اختبار'
+  out['activation_status']='pending_future_close_above_entry_and_retest'
+ else:
+  out['plan_status']='خطة مشروطة؛ انتظار إغلاق تفعيل وحجم وإعادة اختبار'
+  out['activation_status']='pending_future_close_above_entry_volume_110pct_and_retest'
+ out['targets_type']='percentage_objectives_not_forecasts';out['news_status']='not_reviewed';out['execution_costs_status']='not_included';out['score_type']='experimental_technical_priority_not_probability'
+ scored=MODEL.score(out)
+ if m in COMMODITY_MARKETS:
+  # The legacy score allocates 15/100 points to relative volume.  Since spot
+  # gold deliberately has no volume rule, normalize the remaining 85 points
+  # back to a 100-point scale so customer minimum-score settings remain fair.
+  parts=dict(scored.get('score_components') or {})
+  non_volume=sum(float(v) for k,v in parts.items() if k!='relative_volume')
+  parts['relative_volume']=0
+  scored['score_components']=parts
+  scored['technical_score_100']=round(min(100,non_volume*100/85),1)
+  scored['commodity_score_volume_excluded']=True
+ return scored
