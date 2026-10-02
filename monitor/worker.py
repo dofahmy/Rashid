@@ -9,7 +9,7 @@ from core import database, now
 from .models import Stock, Candle, Plan, Scan, OPEN
 from .engine import new_plan, advance, policy
 from .strategy import clean, local, CONFIG, evaluate
-from .provider import YahooProvider, FeedError
+from .provider import YahooProvider, InvestingGoldProvider, FeedError
 
 log=logging.getLogger('rajih.monitor')
 DATA=Path(__file__).parent/'data'
@@ -32,7 +32,7 @@ def initialize(DB):
             stock.metadata_json=json.dumps(r,ensure_ascii=False)
         # Gold is a separate single-instrument market. The customer sees XAUUSD;
         # the public feed symbol is configurable without changing stored identity.
-        gold_feed=os.getenv('GOLD_FEED_SYMBOL','XAUUSD=X').strip() or 'XAUUSD=X'
+        gold_feed='XAUUSD'
         gold=s.get(Stock,'XAUUSD')
         if gold is None:
             gold=Stock(symbol='XAUUSD',last_bar=0);s.add(gold)
@@ -41,7 +41,7 @@ def initialize(DB):
         gold.metadata_json=json.dumps({'symbol':'XAUUSD','feed_symbol':gold_feed,'market_key':'XA',
             'name':'Gold / US Dollar','name_ar':'الذهب مقابل الدولار الأمريكي',
             'sharia_label':'غير مطبق','sharia_code':'NA','reported_price':None},ensure_ascii=False)
-    CONFIG['XA']['ref']=os.getenv('GOLD_FEED_SYMBOL','XAUUSD=X').strip() or 'XAUUSD=X'
+    CONFIG['XA']['ref']='XAUUSD'
     return {'US':counts['US'],'XA':1}
 
 @contextlib.contextmanager
@@ -188,18 +188,31 @@ def apply_stock(DB,symbol,raw,expected,reference_bars,settings,clock,strategy_di
         return created,changes,True
 
 async def scan_market(DB,provider,m,clock,settings):
-    boundary=int(clock)//900*900;expected=expected_slot(m,clock)
-    if expected is None:return
-    with DB.begin() as s:
-        scan=Scan(market=m,boundary=boundary,expected_bar=expected);s.add(scan);s.flush();scan_id=scan.id
+    boundary=int(clock)//900*900
+    expected=expected_slot(m,clock) if m!='XA' else None
+    scan_id=None
     try:
         reference_raw=await provider.fetch(CONFIG[m]['ref'],True)
         meta=reference_raw['chart']['result'][0]['meta']
         if meta.get('dataGranularity')!='15m' or meta.get('symbol')!=CONFIG[m]['ref']:
             raise FeedError('invalid_reference')
         reference_bars=clean(reference_raw,m,clock)
-        if not reference_bars or reference_bars[-1][0]!=expected:
+        if m=='XA':
+            # Gold trades across a near-24h FX session with provider maintenance
+            # gaps.  Use Investing.com's latest actually closed M15 candle rather
+            # than demanding a candle for the wall-clock quarter.
+            if not reference_bars:
+                raise FeedError('investing_no_complete_15m_bar')
+            expected=int(reference_bars[-1][0])
+            retrieval=reference_raw.get('_retrieval',{})
+            log.info('XA Investing reference pair_id=%s source=%s bars=%s latest=%s',
+                     retrieval.get('pair_id'),retrieval.get('pair_id_source'),
+                     retrieval.get('bars',len(reference_bars)),expected)
+        elif not reference_bars or reference_bars[-1][0]!=expected:
             raise FeedError('reference_awaiting_closed_bar_or_market_holiday')
+        if expected is None:return
+        with DB.begin() as s:
+            scan=Scan(market=m,boundary=boundary,expected_bar=expected);s.add(scan);s.flush();scan_id=scan.id
         with DB() as s:
             priority=set(s.scalars(select(Plan.symbol).where(Plan.market==m,Plan.state.in_(OPEN))).all())
             stocks=s.scalars(select(Stock).where(Stock.market==m,Stock.last_bar<expected)
@@ -280,10 +293,12 @@ async def scan_market(DB,provider,m,clock,settings):
             for reason,count in error_counts.most_common():
                 log.warning('%s error %s: count=%s examples=%s',m,reason,count,','.join(error_examples[reason]))
     except Exception as error:
-        with DB.begin() as s:
-            scan=s.get(Scan,scan_id);scan.status='waiting_feed';scan.finished_at=now()
-            scan.summary_json=json.dumps({'reason':str(error) if isinstance(error,FeedError) else type(error).__name__})
-        log.warning('%s reference unavailable or session closed; progress retained',m)
+        if scan_id is not None:
+            with DB.begin() as s:
+                scan=s.get(Scan,scan_id);scan.status='waiting_feed';scan.finished_at=now()
+                scan.summary_json=json.dumps({'reason':str(error) if isinstance(error,FeedError) else type(error).__name__})
+        reason=str(error) if isinstance(error,FeedError) else type(error).__name__
+        log.warning('%s reference unavailable or session closed; reason=%s; progress retained',m,reason)
 
 async def run(DB,once=False):
     settings=policy();delay=max(10,int(os.getenv('MONITOR_CLOSE_DELAY_SECONDS','45')))
@@ -298,7 +313,7 @@ async def run(DB,once=False):
     # candle can create a plan. Set MONITOR_FORCE_STARTUP_SCAN=0 to disable later.
     force_startup=os.getenv('MONITOR_FORCE_STARTUP_SCAN','1').strip().lower() not in {'0','false','no','off'}
     startup_done=False
-    async with YahooProvider(concurrency) as provider:
+    async with YahooProvider(concurrency) as us_provider, InvestingGoldProvider() as gold_provider:
         while True:
             clock=time.time();boundary=int(clock)//900*900;offset=int(clock)-boundary
             # One forced scan immediately after startup for development/diagnostics.
@@ -307,7 +322,7 @@ async def run(DB,once=False):
                     if locked:
                         log.info('Startup diagnostic scan forced outside normal market-window rules')
                         for m in ('XA','US'):
-                            await scan_market(DB,provider,m,clock,settings)
+                            await scan_market(DB,gold_provider if m=='XA' else us_provider,m,clock,settings)
                 startup_done=True
                 if once:return
                 # Mark the current retry key so we do not immediately duplicate this scan.
@@ -322,7 +337,7 @@ async def run(DB,once=False):
                 with exclusive(DB) as locked:
                     if locked:
                         for m in ('XA','US'):
-                            if due(m,clock):await scan_market(DB,provider,m,clock,settings)
+                            if due(m,clock):await scan_market(DB,gold_provider if m=='XA' else us_provider,m,clock,settings)
                 last_attempt=key
             if once:return
             await asyncio.sleep(10)
