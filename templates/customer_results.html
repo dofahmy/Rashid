@@ -1,0 +1,10 @@
+<!doctype html>
+<html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>نتائج توصيات الشهر | راجح</title>
+<style>body{font-family:Arial,Tahoma,sans-serif;background:#f4f7fb;color:#10233d;margin:0}.wrap{max-width:1200px;margin:30px auto;padding:0 16px}.card{background:white;border:1px solid #dce4ee;border-radius:18px;padding:22px;overflow:auto}h1{margin-top:0}table{width:100%;border-collapse:collapse;min-width:900px}th,td{padding:12px 9px;border-bottom:1px solid #e5ebf2;text-align:center}th{background:#f7f9fc}.gain{color:#137a50;font-weight:700}.loss{color:#b42318;font-weight:700}.muted{color:#667085}.bad{background:#fff3f2;border:1px solid #fecdca;padding:16px;border-radius:12px}</style></head>
+<body><div class="wrap"><div class="card">
+{% if expired %}<div class="bad">انتهت صلاحية الرابط أو لم يعد الحساب مؤهلًا. افتح نتائج الشهر من البوت للحصول على رابط جديد.</div>
+{% else %}<h1>📊 نتائج توصياتك أنت | {{ month }}</h1><p class="muted">هذا الجدول خاص بحسابك ويعرض فقط التوصيات التي تم تسليمها لك.</p>
+<table><thead><tr><th>السهم</th><th>الحالة</th><th>وقت التفعيل</th><th>الدخول</th><th>الهدف</th><th>الوقف</th><th>الخروج/آخر سعر</th><th>النتيجة</th></tr></thead><tbody>
+{% for r in rows %}<tr><td><b>{{ r.symbol }}</b><br><span class="muted">{{ r.company }}</span></td><td>{{ labels.get(r.state,r.state) }}</td><td>{{ r.activation }}</td><td>{{ price(r.entry) }}$</td><td>{{ price(r.target) }}$</td><td>{{ price(r.stop) }}$</td><td>{{ price(r.exit if r.exit is not none else r.last) }}$</td><td class="{{ 'gain' if r.pnl is not none and r.pnl>0 else 'loss' if r.pnl is not none and r.pnl<0 else '' }}">{{ ('%+.2f%%'|format(r.pnl)) if r.pnl is not none else 'غير متاح' }}</td></tr>{% else %}<tr><td colspan="8">لا توجد توصيات تم تسليمها إلى حسابك ضمن نتائج هذا الشهر.</td></tr>{% endfor %}
+</tbody></table><p class="muted">الأداء مرجعي قبل الرسوم وليس عائد محفظة.</p>{% endif %}</div></div></body></html>

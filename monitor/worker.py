@@ -17,7 +17,7 @@ LOCK_KEY=72617368696415
 
 def initialize(DB):
     universe=json.loads((DATA/'universe.json').read_text(encoding='utf-8'))
-    counts={m:sum(r['market_key']==m for r in universe) for m in CONFIG}
+    counts={m:sum(r['market_key']==m for r in universe) for m in ('SA','US')}
     if counts!={'SA':375,'US':5691} or len({r['symbol'] for r in universe})!=6066:
         raise RuntimeError('Universe count or unique symbol mismatch')
     with DB.begin() as s:
@@ -30,7 +30,19 @@ def initialize(DB):
             stock.feed_symbol=r['feed_symbol'];stock.market=r['market_key']
             stock.company=r['name_ar'] or r['name'];stock.sharia_label=r['sharia_label']
             stock.metadata_json=json.dumps(r,ensure_ascii=False)
-    return {'US':counts['US']}
+        # Gold is a separate single-instrument market. The customer sees XAUUSD;
+        # the public feed symbol is configurable without changing stored identity.
+        gold_feed=os.getenv('GOLD_FEED_SYMBOL','XAUUSD=X').strip() or 'XAUUSD=X'
+        gold=s.get(Stock,'XAUUSD')
+        if gold is None:
+            gold=Stock(symbol='XAUUSD',last_bar=0);s.add(gold)
+        gold.feed_symbol=gold_feed;gold.market='XA';gold.company='الذهب مقابل الدولار الأمريكي'
+        gold.sharia_label='غير مطبق'
+        gold.metadata_json=json.dumps({'symbol':'XAUUSD','feed_symbol':gold_feed,'market_key':'XA',
+            'name':'Gold / US Dollar','name_ar':'الذهب مقابل الدولار الأمريكي',
+            'sharia_label':'غير مطبق','sharia_code':'NA','reported_price':None},ensure_ascii=False)
+    CONFIG['XA']['ref']=os.getenv('GOLD_FEED_SYMBOL','XAUUSD=X').strip() or 'XAUUSD=X'
+    return {'US':counts['US'],'XA':1}
 
 @contextlib.contextmanager
 def exclusive(DB,lock_key=LOCK_KEY):
@@ -88,7 +100,7 @@ def validate(raw,stock):
     conditions=[(meta.get('symbol')==stock.feed_symbol,'symbol_mismatch'),
                 (meta.get('dataGranularity')=='15m','wrong_granularity'),
                 (meta.get('currency')==CONFIG[stock.market]['currency'],'currency_mismatch'),
-                (meta.get('instrumentType')=='EQUITY','not_equity')]
+                (meta.get('instrumentType')==('CURRENCY' if stock.market=='XA' else 'EQUITY'),'wrong_instrument_type')]
     for ok,reason in conditions:
         if not ok:raise FeedError(reason)
     return meta
@@ -120,7 +132,7 @@ def apply_stock(DB,symbol,raw,expected,reference_bars,settings,clock,strategy_di
     """One symbol, one transaction: bars, watermark, plans and events commit together."""
     with DB.begin() as s:
         stock=s.get(Stock,symbol);meta=validate(raw,stock)
-        if stock.market!='US':return 0,0,False
+        if stock.market not in ('US','XA'):return 0,0,False
         incoming=[b for b in clean(raw,stock.market,clock) if b[0]<=expected]
         stock.checked_at=now()
         if not incoming:stock.error='no_complete_bars';return 0,0,False
@@ -294,7 +306,7 @@ async def run(DB,once=False):
                 with exclusive(DB) as locked:
                     if locked:
                         log.info('Startup diagnostic scan forced outside normal market-window rules')
-                        for m in ('US',):
+                        for m in ('XA','US'):
                             await scan_market(DB,provider,m,clock,settings)
                 startup_done=True
                 if once:return
@@ -309,7 +321,7 @@ async def run(DB,once=False):
             if once or (offset>=delay and key!=last_attempt):
                 with exclusive(DB) as locked:
                     if locked:
-                        for m in ('US',):
+                        for m in ('XA','US'):
                             if due(m,clock):await scan_market(DB,provider,m,clock,settings)
                 last_attempt=key
             if once:return

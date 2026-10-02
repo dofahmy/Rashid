@@ -59,10 +59,11 @@ def available(s,tid,price,clock=None,before_id=None):
     cap=limits(s,tid);used=occupied(s,tid,clock,before_id);category=bucket(price)
     return bool(category and used['total']<cap['total'] and used[category]<cap[category])
 
-def delivered_ids(tid):
+def delivered_ids(tid,market='US'):
     from .customer import Recipient
     return (select(Recipient.plan_id).join(Outbox,Outbox.key==Recipient.entry_key)
-            .where(Recipient.telegram_id==tid,Outbox.status=='sent'))
+            .join(Plan,Plan.id==Recipient.plan_id)
+            .where(Recipient.telegram_id==tid,Outbox.status=='sent',Plan.market==market))
 
 def holding_settings(s):
     def number(key,default,low,high):

@@ -2,7 +2,7 @@ import json,math,statistics,pathlib,collections,datetime,importlib.util
 from zoneinfo import ZoneInfo
 ROOT=pathlib.Path(__file__).resolve().parent
 spec=importlib.util.spec_from_file_location('prior_score',((ROOT/'rank_stocks.py') if (ROOT/'rank_stocks.py').exists() else ROOT.parent.parent/'output/rajih_rank_100/rank_stocks.py'));MODEL=importlib.util.module_from_spec(spec);spec.loader.exec_module(MODEL)
-CONFIG={'SA':{'tz':'Asia/Riyadh','start':600,'end':900,'currency':'SAR','ref':'2222.SR'},'US':{'tz':'America/New_York','start':570,'end':960,'currency':'USD','ref':'AAPL'}}
+CONFIG={'SA':{'tz':'Asia/Riyadh','start':600,'end':900,'currency':'SAR','ref':'2222.SR'},'US':{'tz':'America/New_York','start':570,'end':960,'currency':'USD','ref':'AAPL'},'XA':{'tz':'America/New_York','start':0,'end':1440,'currency':'USD','ref':'XAUUSD=X'}}
 def local(t,m):return datetime.datetime.fromtimestamp(t,ZoneInfo(CONFIG[m]['tz']))
 def clean(raw,m,asof=None):
  d=raw['chart']['result'][0];q=d['indicators']['quote'][0];b=[];cfg=CONFIG[m]
@@ -36,7 +36,7 @@ def pivots(b,col):
   if col==2 and x>=max(left+right) and x>min(left) and x>min(right):out.append(i)
  return out
 def tick(price,m):
- if m=='US':return .0001 if price<1 else .01
+ if m in ('US','XA'):return .0001 if price<1 else .01
  return .01 if price<25 else .02 if price<50 else .05 if price<100 else .1 if price<250 else .2 if price<500 else .5
 def rounded(price,m,up):
  t=tick(price,m)
@@ -53,7 +53,8 @@ def evaluate(r,calendar,raw,asof,reference_slots=None):
  except Exception as e:out['blockers']=['parse_'+type(e).__name__];return out
  out.update(bars=len(b),hourly_bars=len(h),source_url=raw.get('_retrieval',{}).get('url','https://query1.finance.yahoo.com/v8/finance/chart/'+sym+'?range=60d&interval=15m&includePrePost=false'),retrieved_utc=raw.get('_retrieval',{}).get('retrieved_utc'),data_granularity=meta.get('dataGranularity'))
  if meta.get('dataGranularity')!='15m':out['blockers'].append('wrong_data_granularity')
- if meta.get('instrumentType')!='EQUITY':out['blockers'].append('feed_not_equity')
+ expected_type='CURRENCY' if m=='XA' else 'EQUITY'
+ if meta.get('instrumentType')!=expected_type:out['blockers'].append('feed_not_'+expected_type.lower())
  if meta.get('currency')!=cfg['currency']:out['blockers'].append('currency_mismatch')
  if meta.get('symbol')!=sym:out['blockers'].append('feed_symbol_mismatch')
  if len(b)<200:out['blockers'].append('fewer_than_200_complete_bars')

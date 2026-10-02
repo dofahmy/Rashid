@@ -42,7 +42,7 @@ def event(s,p,kind,ts,details=None):
         queue(s,key+f':{chat}',chat,text)
 
 def new_plan(s,stock,result,ts,settings):
-    if stock.market!='US' or not result.get('conditional_plan'): return None
+    if stock.market not in ('US','XA') or not result.get('conditional_plan'): return None
     # Development reset clears old plans and stock watermarks.  The worker then
     # re-evaluates the latest complete candle.  Do not reject that candle merely
     # because it closed before the reset button was pressed (for example, a

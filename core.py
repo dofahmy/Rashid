@@ -141,20 +141,36 @@ def handle_update(s,u):
         counter+=1; queue(s,f'update:{uid}:{counter}',tid,t,markup)
     if cb:
         s.add(Outbox(key=f'ack:{uid}',chat_id=tid,method='answerCallbackQuery',payload=json.dumps({'callback_query_id':cb['id']})))
-    if text in ('/stop_us','/resume_us'):
+    if text in ('/stop_gold','/resume_gold'):
+        from monitor.customer import GoldPreference
+        pref=s.get(GoldPreference,tid)
+        if not pref:pref=GoldPreference(telegram_id=tid);s.add(pref)
+        pref.paused=int(text=='/stop_gold')
+        send('تم إيقاف تنبيهات الذهب.' if pref.paused else 'تم استئناف تنبيهات الذهب إذا كان حسابك مفعّلًا.',menu())
+    elif text in ('/stop_us','/resume_us'):
         from monitor.customer import Preference
         pref=s.get(Preference,tid)
         if not pref:pref=Preference(telegram_id=tid);s.add(pref)
         pref.paused=int(text=='/stop_us')
         send('تم إيقاف تنبيهات الأمريكي.' if pref.paused else 'تم استئناف تنبيهات الأمريكي إذا كانت التجربة أو الاشتراك مفعّلة.',menu())
-    elif data.startswith('us:') or text.split('@')[0] in ('/current','/results','/menu'):
+    elif data.startswith('us:') or data.startswith('gold:') or data=='main:menu' or text.split('@')[0] in ('/current','/results','/gold','/menu'):
         from monitor.customer import view
         command=text.split('@')[0]
-        if command=='/menu':send('قائمة راجح:',menu())
+        if command=='/menu' or data=='main:menu':send('قائمة راجح:',menu())
+        elif data=='gold:menu' or command=='/gold':
+            from monitor.customer import gold_buttons
+            send('🟡 تداول الذهب | XAUUSD — فريم 15 دقيقة\nنفس منطق التوصيات الفنية، مع تطبيق خصائص مصدر الذهب المتاح.',gold_buttons())
+        elif data.startswith('gold:'):
+            from monitor.customer import gold_view
+            parts=data.split(':');kind=parts[1] if len(parts)>1 else 'current'
+            page=min(100000,int(parts[2])) if len(parts)>2 and parts[2].isdigit() else 0
+            body,kb=gold_view(s,l,kind,page);send(body,kb)
         else:
             parts=data.split(':');kind=parts[1] if len(parts)>1 else ('current' if command=='/current' else 'results')
             page=min(100000,int(parts[2])) if len(parts)>2 and parts[2].isdigit() else 0
-            if kind=='results':body,kb=view(s,l,'results',page)
+            if kind=='results':
+                from monitor.customer_table import results_entry
+                body,kb=results_entry(s,l)
             else:
                 from monitor.customer_table import table_entry
                 body,kb=table_entry(s,l)
