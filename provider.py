@@ -1,8 +1,10 @@
 """Replaceable public research feeds. No realtime/SLA claim."""
-import asyncio, time, random, os, math
+import asyncio, time, random, os, math, logging
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 import aiohttp
+
+log=logging.getLogger('rajih.monitor.provider')
 
 class FeedError(Exception): pass
 
@@ -53,6 +55,12 @@ class TwelveDataCommodityProvider:
     def __init__(self):
         self.session=None
         self.api_key=(os.getenv('TWELVE_DATA_API_KEY') or '').strip()
+        # Per-symbol cooldown prevents repeated paid/plan/auth failures from hammering
+        # Twelve Data every worker loop. The first real failure is logged with the
+        # upstream HTTP status/code/message; later retries wait for the cooldown.
+        self.cooldown_seconds=max(300,int(os.getenv('TWELVE_DATA_ERROR_COOLDOWN_SECONDS','900')))
+        self._cooldown_until={}
+        self._cooldown_reason={}
 
     async def __aenter__(self):
         self.session=aiohttp.ClientSession(trust_env=True,timeout=aiohttp.ClientTimeout(total=40),
@@ -83,13 +91,39 @@ class TwelveDataCommodityProvider:
         env,default=self.SYMBOLS.get(symbol,('',symbol))
         return (os.getenv(env) or default).strip() if env else default
 
+    @staticmethod
+    def _clean_message(value):
+        text=' '.join(str(value or '').replace('\n',' ').replace('\r',' ').split())
+        return text[:220] or 'no_message'
+
+    @classmethod
+    def _api_error_reason(cls,http_status,payload):
+        payload=payload if isinstance(payload,dict) else {}
+        code=payload.get('code')
+        status=payload.get('status')
+        message=cls._clean_message(payload.get('message') or payload.get('detail') or '')
+        parts=[f'twelve_http_{http_status}']
+        if code is not None: parts.append(f'code={code}')
+        if status: parts.append(f'status={status}')
+        parts.append(f'message={message}')
+        return ';'.join(parts)
+
+    def _set_cooldown(self,symbol,reason):
+        self._cooldown_until[symbol]=time.time()+self.cooldown_seconds
+        self._cooldown_reason[symbol]=reason
+
     def _normalize(self,payload,symbol,upstream_symbol):
         if not isinstance(payload,dict):raise FeedError('twelve_invalid_json')
         if payload.get('status')=='error':
             code=payload.get('code');message=str(payload.get('message') or '').lower()
-            if code in (401,403):raise FeedError('twelve_auth_or_plan_error')
-            if code==429 or 'limit' in message or 'credits' in message:raise FeedError('twelve_rate_or_credit_limit')
-            raise FeedError('twelve_api_error_'+str(code or 'unknown'))
+            reason=self._api_error_reason(200,payload)
+            if code in (401,403):
+                self._set_cooldown(symbol,reason)
+                raise FeedError(reason)
+            if code==429 or 'limit' in message or 'credits' in message:
+                self._set_cooldown(symbol,reason)
+                raise FeedError(reason)
+            raise FeedError(reason)
         values=payload.get('values')
         if not isinstance(values,list) or not values:raise FeedError('twelve_no_15m_rows')
         rows=[]
@@ -108,16 +142,39 @@ class TwelveDataCommodityProvider:
     async def fetch(self,symbol='XAUUSD',bootstrap=False):
         if not self.api_key:raise FeedError('twelve_api_key_missing')
         upstream_symbol=self.upstream(symbol)
+        until=self._cooldown_until.get(symbol,0)
+        if until>time.time():
+            remaining=max(1,int(until-time.time()))
+            cached=self._cooldown_reason.get(symbol,'twelve_previous_error')
+            raise FeedError(f'twelve_cooldown_active;retry_in={remaining}s;last={cached}')
         params={'symbol':upstream_symbol,'interval':'15min','outputsize':'5000' if bootstrap else '1200','timezone':'UTC','order':'ASC','apikey':self.api_key}
         last_error=None
         for attempt in range(3):
             try:
                 async with self.session.get(self.API_URL,params=params) as resp:
+                    payload=None
+                    try:
+                        payload=await resp.json(content_type=None)
+                    except Exception:
+                        payload=None
                     if resp.status in (429,500,502,503,504):
+                        if resp.status==429:
+                            reason=self._api_error_reason(resp.status,payload)
+                            self._set_cooldown(symbol,reason)
+                            raise FeedError(reason)
                         last_error='twelve_http_'+str(resp.status);await asyncio.sleep(min(15,2**(attempt+1))+random.random());continue
-                    if resp.status in (401,403):raise FeedError('twelve_auth_or_plan_error')
-                    if resp.status!=200:raise FeedError('twelve_http_'+str(resp.status))
-                    return self._normalize(await resp.json(content_type=None),symbol,upstream_symbol)
+                    if resp.status in (401,403):
+                        reason=self._api_error_reason(resp.status,payload)
+                        self._set_cooldown(symbol,reason)
+                        raise FeedError(reason)
+                    if resp.status!=200:
+                        reason=self._api_error_reason(resp.status,payload)
+                        raise FeedError(reason)
+                    if payload is None:raise FeedError('twelve_network_or_json')
+                    result=self._normalize(payload,symbol,upstream_symbol)
+                    # Successful access clears any stale cooldown for this symbol.
+                    self._cooldown_until.pop(symbol,None);self._cooldown_reason.pop(symbol,None)
+                    return result
             except FeedError:raise
             except (aiohttp.ClientError,asyncio.TimeoutError,ValueError):
                 if attempt==2:raise FeedError('twelve_network_or_json') from None

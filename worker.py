@@ -15,6 +15,8 @@ log=logging.getLogger('rajih.monitor')
 DATA=Path(__file__).parent/'data'
 LOCK_KEY=72617368696415
 
+COMMODITY_NAMES={'XA':'gold/XAUUSD','XS':'silver/XAGUSD','XO':'oil/WTIUSD'}
+
 def initialize(DB):
     universe=json.loads((DATA/'universe.json').read_text(encoding='utf-8'))
     counts={m:sum(r['market_key']==m for r in universe) for m in ('SA','US')}
@@ -306,7 +308,14 @@ async def scan_market(DB,provider,m,clock,settings):
                 scan=s.get(Scan,scan_id);scan.status='waiting_feed';scan.finished_at=now()
                 scan.summary_json=json.dumps({'reason':str(error) if isinstance(error,FeedError) else type(error).__name__})
         reason=str(error) if isinstance(error,FeedError) else type(error).__name__
-        log.warning('%s reference unavailable or session closed; reason=%s; progress retained',m,reason)
+        if m in COMMODITY_MARKETS:
+            label=COMMODITY_NAMES.get(m,m)
+            if reason.startswith('twelve_cooldown_active;'):
+                log.info('%s %s TwelveData retry deferred; %s',m,label,reason)
+            else:
+                log.warning('%s %s TwelveData reference failed; %s; progress retained',m,label,reason)
+        else:
+            log.warning('%s reference unavailable or session closed; reason=%s; progress retained',m,reason)
 
 async def run(DB,once=False):
     settings=policy();delay=max(10,int(os.getenv('MONITOR_CLOSE_DELAY_SECONDS','45')))
