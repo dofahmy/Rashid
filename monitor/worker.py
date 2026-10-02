@@ -8,12 +8,14 @@ from sqlalchemy import select, delete, func, case, text
 from core import database, now
 from .models import Stock, Candle, Plan, Scan, OPEN
 from .engine import new_plan, advance, policy
-from .strategy import clean, local, CONFIG, evaluate
-from .provider import YahooProvider, TwelveDataGoldProvider, FeedError
+from .strategy import clean, local, CONFIG, COMMODITY_MARKETS, evaluate
+from .provider import YahooProvider, TwelveDataCommodityProvider, FeedError
 
 log=logging.getLogger('rajih.monitor')
 DATA=Path(__file__).parent/'data'
 LOCK_KEY=72617368696415
+
+COMMODITY_NAMES={'XA':'gold/XAUUSD','XS':'silver/XAGUSD','XO':'oil/WTIUSD'}
 
 def initialize(DB):
     universe=json.loads((DATA/'universe.json').read_text(encoding='utf-8'))
@@ -30,28 +32,27 @@ def initialize(DB):
             stock.feed_symbol=r['feed_symbol'];stock.market=r['market_key']
             stock.company=r['name_ar'] or r['name'];stock.sharia_label=r['sharia_label']
             stock.metadata_json=json.dumps(r,ensure_ascii=False)
-        # Gold is a separate single-instrument market. The customer sees XAUUSD;
-        # the public feed symbol is configurable without changing stored identity.
-        gold_feed='XAUUSD'
-        gold=s.get(Stock,'XAUUSD')
-        if gold is None:
-            gold=Stock(symbol='XAUUSD',last_bar=0);s.add(gold)
-        gold.feed_symbol=gold_feed;gold.market='XA';gold.company='الذهب مقابل الدولار الأمريكي'
-        gold.sharia_label='غير مطبق'
-        gold_meta={'symbol':'XAUUSD','feed_symbol':gold_feed,'market_key':'XA',
-            'name':'Gold / US Dollar','name_ar':'الذهب مقابل الدولار الأمريكي',
-            'sharia_label':'غير مطبق','sharia_code':'NA','reported_price':None,
-            'volume_rule':'disabled_for_spot_xauusd_v1'}
-        try: old_gold_meta=json.loads(gold.metadata_json or '{}')
-        except Exception: old_gold_meta={}
-        if old_gold_meta.get('volume_rule')!='disabled_for_spot_xauusd_v1':
-            # One-time gold-only re-evaluation after changing the strategy.
-            # Do not reset US stock watermarks or customer data.
-            gold.last_bar=0;gold.error='';gold.checked_at=None
-            log.info('XA volume rule disabled; gold watermark reset for one full re-evaluation')
-        gold.metadata_json=json.dumps(gold_meta,ensure_ascii=False)
-    CONFIG['XA']['ref']='XAUUSD'
-    return {'US':counts['US'],'XA':1}
+        # Spot commodities are separate single-instrument markets sourced from Twelve Data.
+        commodities=[
+            ('XAUUSD','XA','الذهب مقابل الدولار الأمريكي','Gold / US Dollar','disabled_for_spot_commodity_v2'),
+            ('XAGUSD','XS','الفضة مقابل الدولار الأمريكي','Silver / US Dollar','disabled_for_spot_commodity_v2'),
+            ('WTIUSD','XO','بترول خام غرب تكساس مقابل الدولار','WTI Crude Oil / US Dollar','disabled_for_spot_commodity_v2'),
+        ]
+        for symbol,market,name_ar,name,version in commodities:
+            row=s.get(Stock,symbol)
+            if row is None:
+                row=Stock(symbol=symbol,last_bar=0);s.add(row)
+            row.feed_symbol=symbol;row.market=market;row.company=name_ar;row.sharia_label='غير مطبق'
+            meta={'symbol':symbol,'feed_symbol':symbol,'market_key':market,'name':name,'name_ar':name_ar,
+                  'sharia_label':'غير مطبق','sharia_code':'NA','reported_price':None,'volume_rule':version}
+            try: old_meta=json.loads(row.metadata_json or '{}')
+            except Exception: old_meta={}
+            if old_meta.get('volume_rule')!=version:
+                row.last_bar=0;row.error='';row.checked_at=None
+                log.info('%s spot commodity volume rule disabled; watermark reset for one full re-evaluation',market)
+            row.metadata_json=json.dumps(meta,ensure_ascii=False)
+    CONFIG['XA']['ref']='XAUUSD';CONFIG['XS']['ref']='XAGUSD';CONFIG['XO']['ref']='WTIUSD'
+    return {'US':counts['US'],'XA':1,'XS':1,'XO':1}
 
 @contextlib.contextmanager
 def exclusive(DB,lock_key=LOCK_KEY):
@@ -109,7 +110,7 @@ def validate(raw,stock):
     conditions=[(meta.get('symbol')==stock.feed_symbol,'symbol_mismatch'),
                 (meta.get('dataGranularity')=='15m','wrong_granularity'),
                 (meta.get('currency')==CONFIG[stock.market]['currency'],'currency_mismatch'),
-                (meta.get('instrumentType')==('CURRENCY' if stock.market=='XA' else 'EQUITY'),'wrong_instrument_type')]
+                (meta.get('instrumentType')==('CURRENCY' if stock.market in COMMODITY_MARKETS else 'EQUITY'),'wrong_instrument_type')]
     for ok,reason in conditions:
         if not ok:raise FeedError(reason)
     return meta
@@ -141,7 +142,7 @@ def apply_stock(DB,symbol,raw,expected,reference_bars,settings,clock,strategy_di
     """One symbol, one transaction: bars, watermark, plans and events commit together."""
     with DB.begin() as s:
         stock=s.get(Stock,symbol);meta=validate(raw,stock)
-        if stock.market not in ('US','XA'):return 0,0,False
+        if stock.market!='US' and stock.market not in COMMODITY_MARKETS:return 0,0,False
         incoming=[b for b in clean(raw,stock.market,clock) if b[0]<=expected]
         stock.checked_at=now()
         if not incoming:stock.error='no_complete_bars';return 0,0,False
@@ -198,7 +199,7 @@ def apply_stock(DB,symbol,raw,expected,reference_bars,settings,clock,strategy_di
 
 async def scan_market(DB,provider,m,clock,settings):
     boundary=int(clock)//900*900
-    expected=expected_slot(m,clock) if m!='XA' else None
+    expected=expected_slot(m,clock) if m not in COMMODITY_MARKETS else None
     scan_id=None
     try:
         reference_raw=await provider.fetch(CONFIG[m]['ref'],True)
@@ -206,15 +207,15 @@ async def scan_market(DB,provider,m,clock,settings):
         if meta.get('dataGranularity')!='15m' or meta.get('symbol')!=CONFIG[m]['ref']:
             raise FeedError('invalid_reference')
         reference_bars=clean(reference_raw,m,clock)
-        if m=='XA':
-            # Gold is sourced from Twelve Data. Use the latest actually closed M15
+        if m in COMMODITY_MARKETS:
+            # Spot commodities are sourced from Twelve Data. Use the latest actually closed M15
             # candle returned by the official API rather than demanding a wall-clock
             # quarter that may fall inside a provider/session maintenance gap.
             if not reference_bars:
                 raise FeedError('twelve_no_complete_15m_bar')
             expected=int(reference_bars[-1][0])
             retrieval=reference_raw.get('_retrieval',{})
-            log.info('XA TwelveData reference symbol=%s bars=%s latest=%s volume_available=%s',
+            log.info('%s TwelveData reference symbol=%s bars=%s latest=%s volume_available=%s',m,
                      retrieval.get('upstream_symbol'),retrieval.get('bars',len(reference_bars)),
                      expected,retrieval.get('volume_available'))
         elif not reference_bars or reference_bars[-1][0]!=expected:
@@ -307,7 +308,14 @@ async def scan_market(DB,provider,m,clock,settings):
                 scan=s.get(Scan,scan_id);scan.status='waiting_feed';scan.finished_at=now()
                 scan.summary_json=json.dumps({'reason':str(error) if isinstance(error,FeedError) else type(error).__name__})
         reason=str(error) if isinstance(error,FeedError) else type(error).__name__
-        log.warning('%s reference unavailable or session closed; reason=%s; progress retained',m,reason)
+        if m in COMMODITY_MARKETS:
+            label=COMMODITY_NAMES.get(m,m)
+            if reason.startswith('twelve_cooldown_active;'):
+                log.info('%s %s TwelveData retry deferred; %s',m,label,reason)
+            else:
+                log.warning('%s %s TwelveData reference failed; %s; progress retained',m,label,reason)
+        else:
+            log.warning('%s reference unavailable or session closed; reason=%s; progress retained',m,reason)
 
 async def run(DB,once=False):
     settings=policy();delay=max(10,int(os.getenv('MONITOR_CLOSE_DELAY_SECONDS','45')))
@@ -322,7 +330,7 @@ async def run(DB,once=False):
     # candle can create a plan. Set MONITOR_FORCE_STARTUP_SCAN=0 to disable later.
     force_startup=os.getenv('MONITOR_FORCE_STARTUP_SCAN','1').strip().lower() not in {'0','false','no','off'}
     startup_done=False
-    async with YahooProvider(concurrency) as us_provider, TwelveDataGoldProvider() as gold_provider:
+    async with YahooProvider(concurrency) as us_provider, TwelveDataCommodityProvider() as commodity_provider:
         while True:
             clock=time.time();boundary=int(clock)//900*900;offset=int(clock)-boundary
             # One forced scan immediately after startup for development/diagnostics.
@@ -330,8 +338,8 @@ async def run(DB,once=False):
                 with exclusive(DB) as locked:
                     if locked:
                         log.info('Startup diagnostic scan forced outside normal market-window rules')
-                        for m in ('XA','US'):
-                            await scan_market(DB,gold_provider if m=='XA' else us_provider,m,clock,settings)
+                        for m in ('XA','XS','XO','US'):
+                            await scan_market(DB,commodity_provider if m in COMMODITY_MARKETS else us_provider,m,clock,settings)
                 startup_done=True
                 if once:return
                 # Mark the current retry key so we do not immediately duplicate this scan.
@@ -345,8 +353,8 @@ async def run(DB,once=False):
             if once or (offset>=delay and key!=last_attempt):
                 with exclusive(DB) as locked:
                     if locked:
-                        for m in ('XA','US'):
-                            if due(m,clock):await scan_market(DB,gold_provider if m=='XA' else us_provider,m,clock,settings)
+                        for m in ('XA','XS','XO','US'):
+                            if due(m,clock):await scan_market(DB,commodity_provider if m in COMMODITY_MARKETS else us_provider,m,clock,settings)
                 last_attempt=key
             if once:return
             await asyncio.sleep(10)
