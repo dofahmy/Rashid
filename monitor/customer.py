@@ -94,6 +94,21 @@ def order_label(plan):
     except Exception:kind=''
     return {'MARKET':'سوق','LIMIT':'Limit شراء','STOP':'Stop شراء'}.get(kind,'أمر شراء')
 
+def second_stop_customer_card(plan,stock,status,price_value=None):
+    company=' '.join((stock.company or '').split())[:120] if stock else ''
+    heading=f'{plan.symbol} | {company}' if company else plan.symbol
+    buy=plan.paper_entry if price_value is None else price_value
+    if buy is None:buy=plan.entry
+    return (
+        f'{heading} — {status}\n'
+        f'نوع الأمر: ليمت شراء — سعر الشراء: {price(buy)}$ · الهدف: {price(plan.target)}$ · الوقف: {price(plan.stop)}$'
+    )
+
+def _is_second_stop(plan):
+    try:return plan.market=='US' and json.loads(plan.context_json or '{}').get('entry_system')=='SECOND_STOP_RECOVERY'
+    except Exception:return False
+
+
 def performance(plan, stock):
     mark=plan.exit_price if plan.exit_price is not None else (stock.last_price if stock else None)
     if plan.paper_entry is None or not mark:return None
@@ -119,10 +134,112 @@ def card(plan,stock):
     return '\n'.join(lines)
 
 def notice(s,plan,kind,ts,clock=None):
-    """Called in the same transaction as a state change; no historical bootstrap sends."""
+    """Customer recommendation publication and updates."""
     clock=int(time.time() if clock is None else clock)
     if plan.market!='US' and plan.market not in COMMODITIES or not enabled():return
+
     pub=s.get(Publication,plan.id)
+
+    # SECOND_STOP_RECOVERY customer flow:
+    # 1) ENTRY_ALERT when first/original stop is touched -> send pending LIMIT order.
+    # 2) ACTIVE when second level is actually filled -> send activation update.
+    # 3) Later state changes use the exact same two-line compact format.
+    if _is_second_stop(plan):
+        stock=s.get(Stock,plan.symbol)
+
+        if kind=='ENTRY_ALERT':
+            if not score_allowed(s,plan) or pub:return
+            if not 0<=clock-(ts+900)<=900:return
+
+            pub=Publication(plan_id=plan.id,published_ts=clock,activation_end=ts+900)
+            s.add(pub)
+
+            leads=s.scalars(select(Lead).where(Lead.status.in_(('trial','subscribed')))).all()
+            from .limits import available
+            for lead in leads:
+                lead=s.scalar(select(Lead).where(
+                    Lead.id==lead.id
+                ).with_for_update().execution_options(populate_existing=True))
+                if not eligible(s,lead) or not available(s,lead.telegram_id,plan.entry,clock):
+                    continue
+
+                key=f'usrec:{plan.id}:ENTRY_ALERT:{lead.telegram_id}'
+                s.add(Recipient(plan_id=plan.id,telegram_id=lead.telegram_id,entry_key=key))
+                text=second_stop_customer_card(
+                    plan,stock,'مفتوحة',price_value=plan.entry
+                )
+                _queue(
+                    s,key,lead.telegram_id,text,plan.id,'ENTRY_ALERT',
+                    ts+1800,reply_markup=None
+                )
+            return
+
+        if kind=='ACTIVE':
+            # Existing plans created before this update can theoretically activate
+            # without an ENTRY_ALERT.  Fall back to publishing to eligible clients
+            # so no activation is silently lost.
+            if not score_allowed(s,plan) or plan.paper_entry is None:return
+
+            if pub is None:
+                pub=Publication(plan_id=plan.id,published_ts=clock,activation_end=ts+900)
+                s.add(pub)
+                leads=s.scalars(select(Lead).where(Lead.status.in_(('trial','subscribed')))).all()
+                from .limits import available
+                for lead in leads:
+                    lead=s.scalar(select(Lead).where(
+                        Lead.id==lead.id
+                    ).with_for_update().execution_options(populate_existing=True))
+                    if not eligible(s,lead) or not available(s,lead.telegram_id,plan.paper_entry,clock):
+                        continue
+                    entry_key=f'usrec:{plan.id}:ENTRY_ALERT:{lead.telegram_id}'
+                    s.add(Recipient(plan_id=plan.id,telegram_id=lead.telegram_id,entry_key=entry_key))
+                    # For fallback only, send the order card immediately before activation.
+                    order_text=second_stop_customer_card(
+                        plan,stock,'مفتوحة',price_value=plan.entry
+                    )
+                    _queue(
+                        s,entry_key,lead.telegram_id,order_text,plan.id,'ENTRY_ALERT',
+                        ts+1800,reply_markup=None
+                    )
+            else:
+                pub.activation_end=ts+900
+
+            for recipient in s.scalars(select(Recipient).where(Recipient.plan_id==plan.id)):
+                lead=s.scalar(select(Lead).where(Lead.telegram_id==recipient.telegram_id))
+                if not eligible(s,lead):continue
+                text=second_stop_customer_card(
+                    plan,stock,'تم التفعيل',price_value=plan.paper_entry
+                )
+                _queue(
+                    s,f'usrec:{plan.id}:ACTIVE:{recipient.telegram_id}',
+                    recipient.telegram_id,text,plan.id,'ACTIVE',None,
+                    reply_markup=None
+                )
+            return
+
+        if pub and kind in ('TARGET','STOPPED','TIME_EXIT','DATA_GAP'):
+            status={
+                'TARGET':'تحقق الهدف',
+                'STOPPED':'وقف خسارة',
+                'TIME_EXIT':'تم الخروج',
+                'DATA_GAP':'المتابعة معلقة',
+            }[kind]
+            for recipient in s.scalars(select(Recipient).where(Recipient.plan_id==plan.id)):
+                lead=s.scalar(select(Lead).where(Lead.telegram_id==recipient.telegram_id))
+                if not eligible(s,lead):continue
+                text=second_stop_customer_card(
+                    plan,stock,status,price_value=plan.paper_entry or plan.entry
+                )
+                _queue(
+                    s,f'usrec:{plan.id}:{kind}:{recipient.telegram_id}',
+                    recipient.telegram_id,text,plan.id,kind,None,
+                    reply_markup=None
+                )
+            return
+
+        return
+
+    # Legacy US / commodity behavior remains unchanged.
     if kind=='ACTIVE':
         if not score_allowed(s,plan):return
         if pub or plan.paper_entry is None or not 0<=clock-(ts+900)<=900:return
@@ -151,9 +268,11 @@ def notice(s,plan,kind,ts,clock=None):
                 text=title+'\n\n'+card(plan,s.get(Stock,plan.symbol))+'\nوقت الحدث: '+stamp(ts+900)+'\nالأداء مرجعي قبل الرسوم.'
                 _queue(s,f'usrec:{plan.id}:{kind}:{recipient.telegram_id}',recipient.telegram_id,text,plan.id,kind,None)
 
-def _queue(s,key,tid,text,pid,kind,expires):
+def _queue(s,key,tid,text,pid,kind,expires,reply_markup='default'):
     if s.scalar(select(Outbox.id).where(Outbox.key==key)):return
-    payload={'chat_id':tid,'text':text,'reply_markup':buttons(),'_us_plan_id':pid,'_us_kind':kind,'_us_expires':expires}
+    payload={'chat_id':tid,'text':text,'_us_plan_id':pid,'_us_kind':kind,'_us_expires':expires}
+    if reply_markup=='default':payload['reply_markup']=buttons()
+    elif reply_markup is not None:payload['reply_markup']=reply_markup
     s.add(Outbox(key=key,chat_id=tid,payload=json.dumps(payload,ensure_ascii=False)))
 
 def delivery_allowed(s,row,payload,clock=None):
@@ -164,6 +283,20 @@ def delivery_allowed(s,row,payload,clock=None):
     if not plan or (plan.market!='US' and plan.market not in COMMODITIES):return False
     if plan.market=='US' and not eligible(s,lead):return False
     if plan.market in COMMODITIES and not commodity_eligible(s,lead,plan.market):return False
+    if _is_second_stop(plan) and payload['_us_kind']=='ENTRY_ALERT':
+        recipient=s.get(Recipient,(plan.id,row.chat_id))
+        return bool(
+            recipient and score_allowed(s,plan)
+            and plan.state in ('WAITING','ACTIVE')
+        )
+    if _is_second_stop(plan) and payload['_us_kind']=='ACTIVE':
+        recipient=s.get(Recipient,(plan.id,row.chat_id))
+        entry=s.scalar(select(Outbox).where(Outbox.key==recipient.entry_key)) if recipient else None
+        return bool(
+            recipient and entry is not None
+            and entry.status in ('sent','uncertain')
+            and plan.state in ('ACTIVE','TARGET','STOPPED','TIME_EXIT','DATA_GAP')
+        )
     if payload['_us_kind']=='ACTIVE':
         if plan.market=='US':
             from .limits import available

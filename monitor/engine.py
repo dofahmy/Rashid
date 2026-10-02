@@ -184,13 +184,28 @@ def advance(s,p,bar,ratio,contiguous=True):
             # the limit receives the better opening price in this paper model.
             if o<=p.stop:
                 p.state='CANCELLED';details={'reason':'Gap opened at/below stop before safe limit fill','order_type':kind}
-            elif l<=p.entry:
-                fill=min(o,p.entry) if o<=p.entry else p.entry
-                ok,reason=_activate_fill(s,p,fill,ts,kind,{'limit_price':p.entry,'gap_improvement':fill<p.entry})
-                if ok:return True
-                p.state='CANCELLED';details={'reason':reason,'order_type':kind,'attempted_fill':fill}
-            elif not _second_stop_system(p) and h>=p.target:
-                p.state='MISSED';details={'reason':'Target touched before limit order filled','order_type':kind}
+            else:
+                if _second_stop_system(p) and l<=p.target:
+                    # In SECOND_STOP_RECOVERY, p.target is the original/first stop.
+                    # As soon as price first touches that level, publish the pending
+                    # LIMIT recommendation to customers.  Do this only once.
+                    alerted=s.scalar(select(Event.id).where(
+                        Event.plan_id==p.id,Event.kind=='ENTRY_ALERT'
+                    ))
+                    if not alerted:
+                        event(s,p,'ENTRY_ALERT',ts,{
+                            'first_stop_touched':p.target,
+                            'second_stop_limit':p.entry,
+                            'third_stop_protective':p.stop,
+                            'order_type':'LIMIT',
+                        })
+                if l<=p.entry:
+                    fill=min(o,p.entry) if o<=p.entry else p.entry
+                    ok,reason=_activate_fill(s,p,fill,ts,kind,{'limit_price':p.entry,'gap_improvement':fill<p.entry})
+                    if ok:return True
+                    p.state='CANCELLED';details={'reason':reason,'order_type':kind,'attempted_fill':fill}
+                elif not _second_stop_system(p) and h>=p.target:
+                    p.state='MISSED';details={'reason':'Target touched before limit order filled','order_type':kind}
         else: # STOP breakout order
             if l<=p.stop:
                 p.state='CANCELLED';details={'reason':'Stop invalidated setup before buy-stop fill','order_type':kind}
