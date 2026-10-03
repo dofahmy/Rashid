@@ -47,12 +47,17 @@ Run:
 
 from __future__ import annotations
 
+import os
+
 import argparse
 import csv
 import json
 import math
 from collections import defaultdict
 from pathlib import Path
+
+DATA_DIR = Path(os.getenv("RAJIH_DATA_DIR", "/data"))
+DATA_DIR.mkdir(parents=True, exist_ok=True)
 from statistics import mean, median
 
 from sqlalchemy import MetaData, Table, select, func
@@ -476,7 +481,7 @@ def main():
         x.update(outcome(f, i, args.lookahead))
         out.append(x)
 
-    write_csv("daily_rule_all_dates.csv", out)
+    write_csv(DATA_DIR / "daily_rule_all_dates.csv", out)
 
     base = metrics(out)
 
@@ -593,7 +598,7 @@ def main():
         ),
         reverse=True
     )
-    write_csv("daily_rule_all_dates_filter_results.csv", tests_sorted)
+    write_csv(DATA_DIR / "daily_rule_all_dates_filter_results.csv", tests_sorted)
 
     # Yearly baseline.
     yearly = []
@@ -607,7 +612,7 @@ def main():
             "year": year,
             **{k: fmt(v) if isinstance(v, float) else v for k, v in m.items()},
         })
-    write_csv("daily_rule_all_dates_yearly.csv", yearly)
+    write_csv(DATA_DIR / "daily_rule_all_dates_yearly.csv", yearly)
 
     # Report only rules with at least 20 signals, plus at least 30 signals section.
     robust20 = [r for r in tests_sorted if r["n"] >= 20]
@@ -654,7 +659,7 @@ def main():
             f"median MAE21={r['median_mae21']}%"
         )
 
-    Path("daily_rule_all_dates_report.txt").write_text("\n".join(lines), encoding="utf-8")
+    (DATA_DIR / "daily_rule_all_dates_report.txt").write_text("\n".join(lines), encoding="utf-8")
 
     summary = {
         "distinct_dates": len(out),
@@ -669,7 +674,7 @@ def main():
             "daily_rule_all_dates_report.txt",
         ],
     }
-    Path("daily_rule_all_dates_summary.json").write_text(
+    (DATA_DIR / "daily_rule_all_dates_summary.json").write_text(
         json.dumps(summary, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )

@@ -13,14 +13,19 @@ Outputs:
 """
 
 from __future__ import annotations
+
+import os
 import csv, math
 from pathlib import Path
+
+DATA_DIR = Path(os.getenv("RAJIH_DATA_DIR", "/data"))
+DATA_DIR.mkdir(parents=True, exist_ok=True)
 from statistics import mean, median
 
-INPUT = "daily_rule_validation30_diverse_dates.csv"
-OUT_COMPARE = "daily_validation_success_vs_fail.csv"
-OUT_RULES = "daily_validation_best_split_rules.csv"
-OUT_REPORT = "daily_validation_success_vs_fail_report.txt"
+INPUT = DATA_DIR / "daily_rule_validation30_diverse_dates.csv"
+OUT_COMPARE = DATA_DIR / "daily_validation_success_vs_fail.csv"
+OUT_RULES = DATA_DIR / "daily_validation_best_split_rules.csv"
+OUT_REPORT = DATA_DIR / "daily_validation_success_vs_fail_report.txt"
 
 NON_PREDICTIVE = {
     "rank","symbol","signal_date",

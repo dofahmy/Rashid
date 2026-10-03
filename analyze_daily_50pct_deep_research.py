@@ -59,6 +59,8 @@ Useful:
 
 from __future__ import annotations
 
+import os
+
 import argparse
 import bisect
 import csv
@@ -66,6 +68,9 @@ import json
 import math
 from collections import defaultdict
 from pathlib import Path
+
+DATA_DIR = Path(os.getenv("RAJIH_DATA_DIR", "/data"))
+DATA_DIR.mkdir(parents=True, exist_ok=True)
 from statistics import mean, median
 
 from sqlalchemy import MetaData, Table, select, func
@@ -598,7 +603,7 @@ def feature_names_from_rows(rows,prefix="t-1_"):
 
 def main():
     ap=argparse.ArgumentParser()
-    ap.add_argument("--events",default="daily_50pct_tradable30.csv")
+    ap.add_argument("--events",default=str(DATA_DIR / "daily_50pct_tradable30.csv"))
     ap.add_argument("--controls-per-winner",type=int,default=10)
     ap.add_argument("--min-price",type=float,default=1.0)
     ap.add_argument("--max-price",type=float,default=20.0)
@@ -909,14 +914,14 @@ def main():
                 })
 
     # Write outputs.
-    write_csv("daily_50pct_deep_winners.csv",winner_rows)
-    write_csv("daily_50pct_deep_matched_controls.csv",matched)
-    write_csv("daily_50pct_deep_winner_vs_control.csv",comparison)
-    write_csv("daily_50pct_deep_correlations.csv",correlations)
-    write_csv("daily_50pct_deep_threshold_rules.csv",thresholds)
-    write_csv("daily_50pct_deep_pair_rules.csv",pairs)
-    write_csv("daily_50pct_deep_trajectory.csv",trajectory)
-    write_csv("daily_50pct_deep_checkpoints.csv",checkpoints)
+    write_csv(DATA_DIR / "daily_50pct_deep_winners.csv",winner_rows)
+    write_csv(DATA_DIR / "daily_50pct_deep_matched_controls.csv",matched)
+    write_csv(DATA_DIR / "daily_50pct_deep_winner_vs_control.csv",comparison)
+    write_csv(DATA_DIR / "daily_50pct_deep_correlations.csv",correlations)
+    write_csv(DATA_DIR / "daily_50pct_deep_threshold_rules.csv",thresholds)
+    write_csv(DATA_DIR / "daily_50pct_deep_pair_rules.csv",pairs)
+    write_csv(DATA_DIR / "daily_50pct_deep_trajectory.csv",trajectory)
+    write_csv(DATA_DIR / "daily_50pct_deep_checkpoints.csv",checkpoints)
 
     # Readable report.
     lines=[]
@@ -960,7 +965,7 @@ def main():
             f"days_to_peak={r['corr_with_days_to_peak']} | MAE21={r['corr_with_mae21']}"
         )
 
-    Path("daily_50pct_deep_report.txt").write_text("\n".join(lines),encoding="utf-8")
+    (DATA_DIR / "daily_50pct_deep_report.txt").write_text("\n".join(lines),encoding="utf-8")
 
     summary={
         "winners":len(winner_rows),
@@ -981,7 +986,7 @@ def main():
             "daily_50pct_deep_report.txt",
         ],
     }
-    Path("daily_50pct_deep_report.json").write_text(
+    (DATA_DIR / "daily_50pct_deep_report.json").write_text(
         json.dumps(summary,ensure_ascii=False,indent=2),encoding="utf-8"
     )
 

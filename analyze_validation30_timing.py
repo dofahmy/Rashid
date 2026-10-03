@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
+import os
 import csv, math
 from pathlib import Path
+
+DATA_DIR = Path(os.getenv("RAJIH_DATA_DIR", "/data"))
+DATA_DIR.mkdir(parents=True, exist_ok=True)
 from statistics import median, mean
 from sqlalchemy import MetaData, Table, select
 from core import database
 
-INPUT = "daily_rule_validation30_diverse_dates.csv"
+INPUT = DATA_DIR / "daily_rule_validation30_diverse_dates.csv"
 
 def fnum(x):
     try:
@@ -91,8 +95,8 @@ for th in (20,30,50,100):
     print(f"Median days to peak: {median(peakdays):.1f}")
     print(f"Finished DOWN after touch: {len(ended_down)}/{len(touched)} = {100*len(ended_down)/len(touched):.2f}%")
 
-with Path("daily_validation30_timing.csv").open("w",encoding="utf-8-sig",newline="") as fh:
+with (DATA_DIR / "daily_validation30_timing.csv").open("w",encoding="utf-8-sig",newline="") as fh:
     w=csv.DictWriter(fh,fieldnames=list(rows[0].keys()))
     w.writeheader(); w.writerows(rows)
 
-print("\nCreated: daily_validation30_timing.csv")
+print(f"\nCreated: {DATA_DIR / 'daily_validation30_timing.csv'}")

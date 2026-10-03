@@ -28,9 +28,14 @@ Run:
 """
 
 from __future__ import annotations
+
+import os
 import argparse, csv, json, math
 from collections import defaultdict
 from pathlib import Path
+
+DATA_DIR = Path(os.getenv("RAJIH_DATA_DIR", "/data"))
+DATA_DIR.mkdir(parents=True, exist_ok=True)
 from statistics import mean, median
 from sqlalchemy import MetaData, Table, select, func
 from core import database
@@ -207,8 +212,8 @@ def main():
     ap.add_argument("--range5-threshold",type=float,default=9.42)
     ap.add_argument("--max-prior-jump",type=float,default=100.0)
     ap.add_argument("--lookahead",type=int,default=21)
-    ap.add_argument("--output",default="daily_rule_validation30_diverse_dates.csv")
-    ap.add_argument("--summary-output",default="daily_rule_validation30_diverse_dates_summary.json")
+    ap.add_argument("--output",default=str(DATA_DIR / "daily_rule_validation30_diverse_dates.csv"))
+    ap.add_argument("--summary-output",default=str(DATA_DIR / "daily_rule_validation30_diverse_dates_summary.json"))
     args=ap.parse_args()
 
     DB=database()

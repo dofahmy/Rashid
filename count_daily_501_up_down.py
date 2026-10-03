@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
+import os
 import csv
 from pathlib import Path
+
+DATA_DIR = Path(os.getenv("RAJIH_DATA_DIR", "/data"))
+DATA_DIR.mkdir(parents=True, exist_ok=True)
 from sqlalchemy import MetaData, Table, select
 from core import database
 
-INPUT = "daily_rule_all_dates.csv"
+INPUT = DATA_DIR / "daily_rule_all_dates.csv"
 
 p = Path(INPUT)
 if not p.exists():

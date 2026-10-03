@@ -28,10 +28,15 @@ Run:
 
 from __future__ import annotations
 
+import os
+
 import csv
 import json
 import math
 from pathlib import Path
+
+DATA_DIR = Path(os.getenv("RAJIH_DATA_DIR", "/data"))
+DATA_DIR.mkdir(parents=True, exist_ok=True)
 from statistics import mean, median
 
 from sqlalchemy import MetaData, Table, select
@@ -39,7 +44,7 @@ from sqlalchemy import MetaData, Table, select
 from core import database
 
 
-INPUT = "daily_rule_all_dates.csv"
+INPUT = DATA_DIR / "daily_rule_all_dates.csv"
 
 
 def finite(x):
@@ -195,7 +200,7 @@ def analyze():
         raise SystemExit("No usable setups.")
 
     fields = list(rows[0].keys())
-    with Path("daily_501_spike_then_fade.csv").open(
+    with (DATA_DIR / "daily_501_spike_then_fade.csv").open(
         "w", newline="", encoding="utf-8-sig"
     ) as fh:
         w = csv.DictWriter(fh, fieldnames=fields)
@@ -251,7 +256,7 @@ def analyze():
         "median_giveback_pct_of_peak_gain": fmt(median(all_giveback)),
     }
 
-    Path("daily_501_spike_then_fade_summary.json").write_text(
+    (DATA_DIR / "daily_501_spike_then_fade_summary.json").write_text(
         json.dumps(summary, ensure_ascii=False, indent=2),
         encoding="utf-8"
     )
@@ -297,7 +302,7 @@ def analyze():
         )
         lines.append("")
 
-    Path("daily_501_spike_then_fade_report.txt").write_text(
+    (DATA_DIR / "daily_501_spike_then_fade_report.txt").write_text(
         "\n".join(lines), encoding="utf-8"
     )
 

@@ -45,6 +45,9 @@ import random
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+DATA_DIR = Path(os.getenv("RAJIH_DATA_DIR", "/data"))
+DATA_DIR.mkdir(parents=True, exist_ok=True)
 from zoneinfo import ZoneInfo
 from urllib.parse import quote
 
@@ -471,7 +474,7 @@ def main():
     ap.add_argument("--pause-between-batches", type=float, default=0.6)
     ap.add_argument(
         "--checkpoint",
-        default="backfill_us_daily_yahoo_checkpoint.json",
+        default=str(DATA_DIR / "backfill_us_daily_yahoo_checkpoint.json"),
     )
     ap.add_argument("--fresh", action="store_true")
     ap.add_argument("--verify-only", action="store_true")

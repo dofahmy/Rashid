@@ -23,11 +23,16 @@ Key correction vs first analyzer
 
 from __future__ import annotations
 
+import os
+
 import argparse
 import csv
 import json
 import math
 from pathlib import Path
+
+DATA_DIR = Path(os.getenv("RAJIH_DATA_DIR", "/data"))
+DATA_DIR.mkdir(parents=True, exist_ok=True)
 from statistics import mean, median
 
 from sqlalchemy import MetaData, Table, select, func
@@ -259,9 +264,9 @@ def main():
     ap.add_argument("--min-gain",type=float,default=50.0)
     ap.add_argument("--lookahead",type=int,default=21)
     ap.add_argument("--min-history",type=int,default=220)
-    ap.add_argument("--output",default="daily_50pct_top30_clean.csv")
-    ap.add_argument("--commonality-output",default="daily_50pct_commonality_clean.csv")
-    ap.add_argument("--summary-output",default="daily_50pct_top30_clean_summary.json")
+    ap.add_argument("--output",default=str(DATA_DIR / "daily_50pct_top30_clean.csv"))
+    ap.add_argument("--commonality-output",default=str(DATA_DIR / "daily_50pct_commonality_clean.csv"))
+    ap.add_argument("--summary-output",default=str(DATA_DIR / "daily_50pct_top30_clean_summary.json"))
     args=ap.parse_args()
 
     DB=database()
