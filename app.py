@@ -351,9 +351,14 @@ def create_app(db=None,test_config=None):
     @app.get('/egx-lab')
     @auth
     def egx_lab():
-        """Interactive historical EGX R²/Slope signal explorer for one symbol."""
+        """Interactive EGX signal lab: one stock or the whole Egyptian market."""
         import html as _html
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        scope=request.args.get('scope','symbol').strip().lower()
+        if scope not in ('symbol','market'): scope='symbol'
         symbol=request.args.get('symbol','').strip().upper().replace('.CA','')[:20]
+        chart_symbol=request.args.get('chart_symbol','').strip().upper().replace('.CA','')[:20]
         try:r2_min=float(request.args.get('r2','0.791694'))
         except (TypeError,ValueError):r2_min=0.791694
         try:slope_min=float(request.args.get('slope','67.5062'))
@@ -368,255 +373,202 @@ def create_app(db=None,test_config=None):
         try:time_exit_sessions=max(1,min(2000,int(request.args.get('time_exit','126'))))
         except (TypeError,ValueError):time_exit_sessions=126
         confirm=request.args.get('confirm','1')!='0'
-        rows=[];error='';latest_date='';company='';bars_count=0;chart_svg=''
+        rows=[];error='';latest_date='';company='';bars_count=0;chart_svg='';market_errors=0;market_symbols=0
         summary={}
 
-        def _build_svg(data, rows, tp_pct, exit_mode):
-            if not data:
-                return ''
-            width=1180; height=360
-            ml=64; mr=20; mt=24; mb=40
-            pw=max(10,width-ml-mr); ph=max(10,height-mt-mb)
-            closes=[float(x['ac']) for x in data]
-            highs=[float(x['ah']) for x in data]
-            lows=[float(x['al']) for x in data]
-            pmin=min(lows); pmax=max(highs)
-            if pmax<=pmin:
-                pmax=pmin+1.0
-            n=max(1,len(data)-1)
-            def px(i): return ml + (i/n)*pw
-            def py(v): return mt + (pmax-float(v))/(pmax-pmin)*ph
-            path=' '.join(('M' if i==0 else 'L')+f'{px(i):.2f},{py(c):.2f}' for i,c in enumerate(closes))
-            parts=[]
-            parts.append(f'<svg viewBox="0 0 {width} {height}" width="100%" height="360" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="EGX signal chart">')
-            parts.append('<rect x="0" y="0" width="100%" height="100%" rx="12" fill="#ffffff"/>')
-            for frac in [0,0.25,0.50,0.75,1.0]:
-                y=mt+ph*frac
-                val=pmax-(pmax-pmin)*frac
-                parts.append(f'<line x1="{ml}" y1="{y:.2f}" x2="{width-mr}" y2="{y:.2f}" stroke="#e9edf5" stroke-width="1"/>')
-                parts.append(f'<text x="{ml-8}" y="{y+4:.2f}" text-anchor="end" font-size="11" fill="#60708a">{val:.2f}</text>')
-            parts.append(f'<path d="{path}" fill="none" stroke="#0b5ed7" stroke-width="2.2"/>')
-            # Mark signals
-            for r in rows:
-                i=r.get('index')
-                if i is None or i<0 or i>=len(data):
-                    continue
-                x=px(i); y=py(r['price'])
-                status=r.get('status')
-                entry_color=('#0f9d58' if status=='CLOSED_TP' else ('#7c3aed' if status=='CLOSED_TIME' else '#ff8a00'))
-                parts.append(f'<line x1="{x:.2f}" y1="{mt}" x2="{x:.2f}" y2="{mt+ph}" stroke="#cfd7e6" stroke-dasharray="3 4" stroke-width="1"/>')
-                parts.append(f'<circle cx="{x:.2f}" cy="{y:.2f}" r="5.5" fill="{entry_color}" stroke="#ffffff" stroke-width="1.5"/>')
-                parts.append(f'<text x="{x:.2f}" y="{max(14, y-10):.2f}" text-anchor="middle" font-size="10" font-weight="700" fill="{entry_color}">{_html.escape(r["date"][5:])}</text>')
-                if r.get('status')=='CLOSED_TP' and r.get('exit_index') is not None:
-                    xi=px(r['exit_index']); yi=py(r['exit_price'])
-                    parts.append(f'<line x1="{x:.2f}" y1="{y:.2f}" x2="{xi:.2f}" y2="{yi:.2f}" stroke="#14a44d" stroke-width="2"/>')
-                    parts.append(f'<circle cx="{xi:.2f}" cy="{yi:.2f}" r="5.5" fill="#14a44d" stroke="#ffffff" stroke-width="1.5"/>')
-                    parts.append(f'<text x="{xi:.2f}" y="{min(height-6, yi+16):.2f}" text-anchor="middle" font-size="10" fill="#14a44d">TP</text>')
-                elif r.get('status')=='CLOSED_TIME' and r.get('exit_index') is not None:
-                    xi=px(r['exit_index']); yi=py(r['exit_price'])
-                    parts.append(f'<line x1="{x:.2f}" y1="{y:.2f}" x2="{xi:.2f}" y2="{yi:.2f}" stroke="#7c3aed" stroke-width="2"/>')
-                    parts.append(f'<circle cx="{xi:.2f}" cy="{yi:.2f}" r="5.5" fill="#7c3aed" stroke="#ffffff" stroke-width="1.5"/>')
-                    parts.append(f'<text x="{xi:.2f}" y="{min(height-6, yi+16):.2f}" text-anchor="middle" font-size="10" fill="#7c3aed">TIME</text>')
-                else:
-                    li=len(data)-1
-                    x2=px(li); y2=py(float(data[-1]['ac']))
-                    parts.append(f'<line x1="{x:.2f}" y1="{y:.2f}" x2="{x2:.2f}" y2="{y2:.2f}" stroke="#ff8a00" stroke-width="2" stroke-dasharray="5 4"/>')
-                    parts.append(f'<circle cx="{x2:.2f}" cy="{y2:.2f}" r="5.5" fill="#ff8a00" stroke="#ffffff" stroke-width="1.5"/>')
-                    parts.append(f'<text x="{x2:.2f}" y="{max(14, y2-10):.2f}" text-anchor="middle" font-size="10" fill="#ff8a00">OPEN</text>')
-            # x-axis labels
-            wanted=min(6,len(data))
-            if wanted>1:
-                step=max(1,(len(data)-1)//(wanted-1))
-                idxs=list(range(0,len(data),step))
-                if idxs[-1]!=len(data)-1:
-                    idxs.append(len(data)-1)
-                idxs=idxs[:wanted-1]+[len(data)-1]
-                seen=[]
-                for i in idxs:
-                    if i in seen: continue
-                    seen.append(i)
-                    x=px(i)
-                    parts.append(f'<text x="{x:.2f}" y="{height-12}" text-anchor="middle" font-size="11" fill="#60708a">{_html.escape(str(data[i]["date"]))}</text>')
-            # legend
-            parts.append('<g font-size="11" font-weight="600">')
-            lx=ml; ly=18
-            legend=[('#0b5ed7','السعر'),('#ff8a00','إشارة مفتوحة حتى الآن')]
-            
-            if exit_mode=='tp':
-                legend.insert(1, ('#14a44d','إغلاق TP'))
-            elif exit_mode=='time':
-                legend.insert(1, ('#7c3aed','إغلاق زمني'))
-            else:
-                legend.insert(1, ('#14a44d','إغلاق TP'))
-                legend.insert(2, ('#7c3aed','إغلاق زمني'))
-            for color,label in legend:
-                parts.append(f'<rect x="{lx}" y="{ly-8}" width="12" height="12" rx="2" fill="{color}"/>')
-                parts.append(f'<text x="{lx+18}" y="{ly+2}" fill="#203040">{label}</text>')
-                lx += 170 if label=='السعر' else 210
-            parts.append('</g>')
-            parts.append('</svg>')
-            return ''.join(parts)
+        from monitor.worker import _egx_daily_sync, _egx_price_confirm
+        try:
+            from monitor.worker import _egx_discover_sync
+        except ImportError:
+            _egx_discover_sync=None
 
-        if symbol:
-            try:
-                from monitor.worker import _egx_daily_sync, _egx_linreg, _egx_price_confirm
-                data=_egx_daily_sync(symbol)
-                bars_count=len(data)
-                if not data:
-                    raise RuntimeError('لم يرجع Yahoo تاريخًا يوميًا لهذا الرمز.')
-                latest_date=data[-1]['date']
-                company=data[-1].get('name','') if isinstance(data[-1],dict) else ''
-                ac=[float(x['ac']) for x in data]
-                metrics=[];rule=[]
-                for i in range(len(data)):
-                    slope,r2=_egx_linreg(ac,i)
-                    metrics.append((slope,r2))
-                    ok=(slope is not None and r2 is not None and r2>=r2_min and slope>=slope_min)
-                    if confirm:ok=ok and _egx_price_confirm(data,i)
-                    rule.append(bool(ok))
-                activations=[i for i,x in enumerate(rule) if x and (i==0 or not rule[i-1])]
-                # Sequential recommendations only: never open a new recommendation while
-                # a previous recommendation is still open. Exit can be TP-based or time-based.
-                kept=[];last_entry=-10**9;position_open_until=-1
-                def _first_tp_index(entry_i):
-                    entry=float(data[entry_i]['ac'])
-                    target=entry*(1+tp_target)
-                    for jj in range(entry_i+1,len(data)):
-                        if float(data[jj]['ah'])>=target:
-                            return jj
-                    return None
-                def _exit_index(entry_i):
-                    tp_i=_first_tp_index(entry_i)
-                    time_i=entry_i+time_exit_sessions
-                    time_i=time_i if time_i < len(data) else None
-                    if exit_mode=='time':
-                        return time_i
-                    if exit_mode=='tp':
-                        return tp_i
-                    # BOTH: whichever happens first. If TP is touched on the
-                    # time-exit session, TP wins because it occurs intraday,
-                    # before the session close used by Time Exit.
-                    if tp_i is None:return time_i
-                    if time_i is None:return tp_i
-                    return tp_i if tp_i<=time_i else time_i
-                for i in activations:
-                    if i<=position_open_until:
-                        continue
-                    if i-last_entry<cooldown:
-                        continue
-                    exit_i=_exit_index(i)
-                    kept.append(i);last_entry=i
-                    # If the configured exit has not happened yet, position remains open
-                    # to the latest bar and blocks every later activation.
-                    position_open_until=(exit_i if exit_i is not None else len(data)-1)
-                def ret_at(i,n):
-                    j=i+n
-                    if j>=len(data):return None
-                    return 100*(float(data[j]['ac'])/float(data[i]['ac'])-1)
-                def fmt_hit(i,target):
-                    entry=float(data[i]['ac'])
-                    for j in range(i+1,len(data)):
-                        if float(data[j]['ah'])>=entry*(1+target):
-                            return j-i,data[j]['date'],j
-                    return None,None,None
-                for i in kept:
-                    entry=float(data[i]['ac'])
-                    h20,d20,i20=fmt_hit(i,.20);h50,d50,i50=fmt_hit(i,.50);h100,d100,i100=fmt_hit(i,1.00)
-                    htp,dtp,itp=fmt_hit(i,tp_target)
-                    slope,r2=metrics[i]
-                    current_return=100*(float(data[-1]['ac'])/entry-1)
-                    time_i=i+time_exit_sessions
-                    time_i=time_i if time_i < len(data) else None
-                    if exit_mode=='time':
-                        if time_i is not None:
-                            status='CLOSED_TIME'; exit_index=time_i; exit_date=data[time_i]['date']; exit_price=float(data[time_i]['ac'])
-                            exit_return=100*(exit_price/entry-1); trade_end=time_i
-                        else:
-                            status='OPEN'; exit_index=None; exit_date=None; exit_price=None; exit_return=None; trade_end=len(data)-1
-                    elif exit_mode=='tp':
-                        if htp is not None:
-                            status='CLOSED_TP'; exit_index=itp; exit_date=dtp; exit_price=entry*(1+tp_target); exit_return=tp_pct; trade_end=itp
-                        else:
-                            status='OPEN'; exit_index=None; exit_date=None; exit_price=None; exit_return=None; trade_end=len(data)-1
+        def _fast_metrics(data, window=126):
+            """Same previous-126-session linear regression as worker, but O(n)."""
+            vals=[float(x['ac']) for x in data]
+            n=len(vals); out=[(None,None)]*n
+            sy=[0.0]*(n+1); sy2=[0.0]*(n+1); sky=[0.0]*(n+1)
+            for k,v in enumerate(vals):
+                sy[k+1]=sy[k]+v; sy2[k+1]=sy2[k]+v*v; sky[k+1]=sky[k]+k*v
+            xm=(window-1)/2.0
+            xss=sum((x-xm)**2 for x in range(window))
+            for i in range(window,n):
+                a=i-window; b=i
+                sumy=sy[b]-sy[a]; sumy2=sy2[b]-sy2[a]
+                ym=sumy/window
+                if ym==0: continue
+                sum_local_xy=(sky[b]-sky[a])-a*sumy
+                cov=sum_local_xy-xm*sumy
+                beta=cov/xss
+                sst=sumy2-(sumy*sumy/window)
+                r2=(beta*beta*xss/sst) if sst>0 else 0.0
+                r2=max(0.0,min(1.0,r2))
+                slope_pct=100*(beta*(window-1))/ym
+                out[i]=(slope_pct,r2)
+            return out
+
+        def _analyse(symbol_code, company_name=''):
+            data=_egx_daily_sync(symbol_code)
+            if not data:return {'symbol':symbol_code,'company':company_name,'data':[],'rows':[]}
+            metrics=_fast_metrics(data)
+            rule=[]
+            for i,(slope,r2) in enumerate(metrics):
+                ok=(slope is not None and r2 is not None and r2>=r2_min and slope>=slope_min)
+                if confirm:ok=ok and _egx_price_confirm(data,i)
+                rule.append(bool(ok))
+            activations=[i for i,x in enumerate(rule) if x and (i==0 or not rule[i-1])]
+
+            def first_tp_index(entry_i):
+                entry=float(data[entry_i]['ac']);target=entry*(1+tp_target)
+                for jj in range(entry_i+1,len(data)):
+                    if float(data[jj]['ah'])>=target:return jj
+                return None
+            def exit_idx_for(entry_i):
+                tp_i=first_tp_index(entry_i)
+                time_i=entry_i+time_exit_sessions
+                time_i=time_i if time_i<len(data) else None
+                if exit_mode=='time':return time_i
+                if exit_mode=='tp':return tp_i
+                if tp_i is None:return time_i
+                if time_i is None:return tp_i
+                return tp_i if tp_i<=time_i else time_i
+
+            kept=[];last_entry=-10**9;position_open_until=-1
+            for i in activations:
+                if i<=position_open_until:continue
+                if i-last_entry<cooldown:continue
+                ex=exit_idx_for(i)
+                kept.append(i);last_entry=i
+                position_open_until=ex if ex is not None else len(data)-1
+
+            def ret_at(i,n):
+                j=i+n
+                if j>=len(data):return None
+                return 100*(float(data[j]['ac'])/float(data[i]['ac'])-1)
+            def fmt_hit(i,target):
+                entry=float(data[i]['ac'])
+                for j in range(i+1,len(data)):
+                    if float(data[j]['ah'])>=entry*(1+target):return j-i,data[j]['date'],j
+                return None,None,None
+
+            out=[]
+            for i in kept:
+                entry=float(data[i]['ac'])
+                h20,d20,i20=fmt_hit(i,.20);h50,d50,i50=fmt_hit(i,.50);h100,d100,i100=fmt_hit(i,1.00)
+                htp,dtp,itp=fmt_hit(i,tp_target)
+                slope,r2=metrics[i]
+                current_return=100*(float(data[-1]['ac'])/entry-1)
+                time_i=i+time_exit_sessions;time_i=time_i if time_i<len(data) else None
+                if exit_mode=='time':
+                    if time_i is not None:
+                        status='CLOSED_TIME';exit_index=time_i;exit_date=data[time_i]['date'];exit_price=float(data[time_i]['ac']);exit_return=100*(exit_price/entry-1);trade_end=time_i
                     else:
-                        # BOTH: exit at TP or the configured time exit, whichever comes first.
-                        # On the time-exit day, an intraday TP touch is considered first.
-                        if itp is not None and (time_i is None or itp<=time_i):
-                            status='CLOSED_TP'; exit_index=itp; exit_date=dtp; exit_price=entry*(1+tp_target); exit_return=tp_pct; trade_end=itp
-                        elif time_i is not None:
-                            status='CLOSED_TIME'; exit_index=time_i; exit_date=data[time_i]['date']; exit_price=float(data[time_i]['ac'])
-                            exit_return=100*(exit_price/entry-1); trade_end=time_i
-                        else:
-                            status='OPEN'; exit_index=None; exit_date=None; exit_price=None; exit_return=None; trade_end=len(data)-1
-                    trade_window=data[i:trade_end+1]
-                    max_gain=100*(max(float(x['ah']) for x in trade_window)/entry-1)
-                    max_dd=100*(min(float(x['al']) for x in trade_window)/entry-1)
-                    # In Time Exit mode, report whether the optional TP level was touched
-                    # BEFORE the time exit; it does not close the recommendation.
-                    tp_before_exit=False
-                    tp_before_exit_sessions=None
-                    tp_before_exit_date=None
-                    if exit_mode in ('time','both'):
-                        target=entry*(1+tp_target)
-                        for jj in range(i+1,trade_end+1):
-                            if float(data[jj]['ah'])>=target:
-                                tp_before_exit=True;tp_before_exit_sessions=jj-i;tp_before_exit_date=data[jj]['date'];break
-                    rows.append({
-                        'index':i,
-                        'date':data[i]['date'],'price':entry,'r2':r2,'slope':slope,
-                        'ret_1m':ret_at(i,21),'ret_3m':ret_at(i,63),'ret_6m':ret_at(i,126),'ret_1y':ret_at(i,252),
-                        'current_return':current_return,
-                        'max_gain':max_gain,'max_dd':max_dd,
-                        'hit20':h20,'hit20_date':d20,'hit50':h50,'hit50_date':d50,'hit100':h100,'hit100_date':d100,
-                        'hit_tp':htp,'hit_tp_date':dtp,'tp_index':itp,
-                        'exit_index':exit_index,'exit_date':exit_date,'exit_price':exit_price,'exit_return':exit_return,
-                        'tp_before_exit':tp_before_exit,'tp_before_exit_sessions':tp_before_exit_sessions,'tp_before_exit_date':tp_before_exit_date,
-                        'age':len(data)-1-i,
-                        'confirm':_egx_price_confirm(data,i),
-                        'status':status,
-                    })
-                rows.reverse()
-                chart_svg=_build_svg(data, list(reversed(rows)), tp_pct, exit_mode)
-                n=len(rows)
-                if n:
-                    hit50=sum(1 for x in rows if x['hit50'] is not None)
-                    hit_tp=sum(1 for x in rows if x['hit_tp'] is not None)
-                    closed_n=sum(1 for x in rows if x['status']!='OPEN')
-                    open_n=sum(1 for x in rows if x['status']=='OPEN')
-                    tp_sessions=[x['hit_tp'] for x in rows if x['hit_tp'] is not None]
-                    matured6=[x for x in rows if x['ret_6m'] is not None]
-                    matured1y=[x for x in rows if x['ret_1y'] is not None]
-                    closed_time=[x for x in rows if x['status']=='CLOSED_TIME' and x['exit_return'] is not None]
-                    closed_tp=[x for x in rows if x['status']=='CLOSED_TP' and x['exit_return'] is not None]
-                    time_returns=[x['exit_return'] for x in closed_time]
-                    time_wins=sum(1 for v in time_returns if v>0)
-                    exit_returns=[x['exit_return'] for x in rows if x['status']!='OPEN' and x['exit_return'] is not None]
-                    exit_wins=sum(1 for v in exit_returns if v>0)
-                    summary={
-                        'count':n,
-                        'hit50_pct':100*hit50/n,
-                        'hit_tp_pct':100*hit_tp/n,
-                        'tp_hits':hit_tp,
-                        'closed_n':closed_n,
-                        'open_n':open_n,
-                        'time_avg_return':(sum(time_returns)/len(time_returns) if time_returns else None),
-                        'time_median_return':(sorted(time_returns)[len(time_returns)//2] if time_returns else None),
-                        'time_win_pct':(100*time_wins/len(time_returns) if time_returns else None),
-                        'tp_exit_n':len(closed_tp),
-                        'time_exit_n':len(closed_time),
-                        'exit_avg_return':(sum(exit_returns)/len(exit_returns) if exit_returns else None),
-                        'exit_median_return':(sorted(exit_returns)[len(exit_returns)//2] if exit_returns else None),
-                        'exit_win_pct':(100*exit_wins/len(exit_returns) if exit_returns else None),
-                        'tp_median_sessions':sorted(tp_sessions)[len(tp_sessions)//2] if tp_sessions else None,
-                        'avg3m':sum(x['ret_3m'] for x in rows if x['ret_3m'] is not None)/max(1,sum(x['ret_3m'] is not None for x in rows)),
-                        'avg6m':sum(x['ret_6m'] for x in matured6)/len(matured6) if matured6 else None,
-                        'avg1y':sum(x['ret_1y'] for x in matured1y)/len(matured1y) if matured1y else None,
-                    }
-            except Exception as exc:
-                error=f'{type(exc).__name__}: {exc}'
-        return render_template('egx_lab.html',symbol=symbol,r2_min=r2_min,slope_min=slope_min,cooldown=cooldown,tp_pct=tp_pct,
+                        status='OPEN';exit_index=None;exit_date=None;exit_price=None;exit_return=None;trade_end=len(data)-1
+                elif exit_mode=='tp':
+                    if htp is not None:
+                        status='CLOSED_TP';exit_index=itp;exit_date=dtp;exit_price=entry*(1+tp_target);exit_return=tp_pct;trade_end=itp
+                    else:
+                        status='OPEN';exit_index=None;exit_date=None;exit_price=None;exit_return=None;trade_end=len(data)-1
+                else:
+                    if itp is not None and (time_i is None or itp<=time_i):
+                        status='CLOSED_TP';exit_index=itp;exit_date=dtp;exit_price=entry*(1+tp_target);exit_return=tp_pct;trade_end=itp
+                    elif time_i is not None:
+                        status='CLOSED_TIME';exit_index=time_i;exit_date=data[time_i]['date'];exit_price=float(data[time_i]['ac']);exit_return=100*(exit_price/entry-1);trade_end=time_i
+                    else:
+                        status='OPEN';exit_index=None;exit_date=None;exit_price=None;exit_return=None;trade_end=len(data)-1
+                trade_window=data[i:trade_end+1]
+                max_gain=100*(max(float(x['ah']) for x in trade_window)/entry-1)
+                max_dd=100*(min(float(x['al']) for x in trade_window)/entry-1)
+                tp_before_exit=False;tp_before_exit_sessions=None;tp_before_exit_date=None
+                if exit_mode in ('time','both'):
+                    target=entry*(1+tp_target)
+                    for jj in range(i+1,trade_end+1):
+                        if float(data[jj]['ah'])>=target:
+                            tp_before_exit=True;tp_before_exit_sessions=jj-i;tp_before_exit_date=data[jj]['date'];break
+                out.append({
+                    'symbol':symbol_code,'company':company_name,'index':i,'date':data[i]['date'],'price':entry,'r2':r2,'slope':slope,
+                    'ret_1m':ret_at(i,21),'ret_3m':ret_at(i,63),'ret_6m':ret_at(i,126),'ret_1y':ret_at(i,252),
+                    'current_return':current_return,'max_gain':max_gain,'max_dd':max_dd,
+                    'hit20':h20,'hit20_date':d20,'hit50':h50,'hit50_date':d50,'hit100':h100,'hit100_date':d100,
+                    'hit_tp':htp,'hit_tp_date':dtp,'tp_index':itp,'exit_index':exit_index,'exit_date':exit_date,
+                    'exit_price':exit_price,'exit_return':exit_return,'tp_before_exit':tp_before_exit,
+                    'tp_before_exit_sessions':tp_before_exit_sessions,'tp_before_exit_date':tp_before_exit_date,
+                    'age':len(data)-1-i,'confirm':_egx_price_confirm(data,i),'status':status,
+                })
+            return {'symbol':symbol_code,'company':company_name,'data':data,'rows':out}
+
+        def _summarize(items):
+            n=len(items)
+            if not n:return {}
+            hit50=sum(1 for x in items if x['hit50'] is not None);hit_tp=sum(1 for x in items if x['hit_tp'] is not None)
+            closed_n=sum(1 for x in items if x['status']!='OPEN');open_n=n-closed_n
+            closed_time=[x for x in items if x['status']=='CLOSED_TIME' and x['exit_return'] is not None]
+            closed_tp=[x for x in items if x['status']=='CLOSED_TP' and x['exit_return'] is not None]
+            time_returns=[x['exit_return'] for x in closed_time];exit_returns=[x['exit_return'] for x in items if x['status']!='OPEN' and x['exit_return'] is not None]
+            tp_sessions=[x['hit_tp'] for x in items if x['hit_tp'] is not None]
+            r3=[x['ret_3m'] for x in items if x['ret_3m'] is not None];r6=[x['ret_6m'] for x in items if x['ret_6m'] is not None];r1=[x['ret_1y'] for x in items if x['ret_1y'] is not None]
+            return {'count':n,'hit50_pct':100*hit50/n,'hit_tp_pct':100*hit_tp/n,'tp_hits':hit_tp,'closed_n':closed_n,'open_n':open_n,
+                'time_avg_return':sum(time_returns)/len(time_returns) if time_returns else None,'time_median_return':sorted(time_returns)[len(time_returns)//2] if time_returns else None,
+                'time_win_pct':100*sum(v>0 for v in time_returns)/len(time_returns) if time_returns else None,'tp_exit_n':len(closed_tp),'time_exit_n':len(closed_time),
+                'exit_avg_return':sum(exit_returns)/len(exit_returns) if exit_returns else None,'exit_median_return':sorted(exit_returns)[len(exit_returns)//2] if exit_returns else None,
+                'exit_win_pct':100*sum(v>0 for v in exit_returns)/len(exit_returns) if exit_returns else None,'tp_median_sessions':sorted(tp_sessions)[len(tp_sessions)//2] if tp_sessions else None,
+                'avg3m':sum(r3)/len(r3) if r3 else None,'avg6m':sum(r6)/len(r6) if r6 else None,'avg1y':sum(r1)/len(r1) if r1 else None}
+
+        def _build_svg(data, chart_rows):
+            if not data:return ''
+            width=1180;height=360;ml=64;mr=20;mt=24;mb=40;pw=width-ml-mr;ph=height-mt-mb
+            closes=[float(x['ac']) for x in data];highs=[float(x['ah']) for x in data];lows=[float(x['al']) for x in data]
+            pmin=min(lows);pmax=max(highs)
+            if pmax<=pmin:pmax=pmin+1
+            nn=max(1,len(data)-1)
+            def px(i):return ml+(i/nn)*pw
+            def py(v):return mt+(pmax-float(v))/(pmax-pmin)*ph
+            path=' '.join(('M' if i==0 else 'L')+f'{px(i):.2f},{py(c):.2f}' for i,c in enumerate(closes))
+            parts=[f'<svg viewBox="0 0 {width} {height}" width="100%" height="360" xmlns="http://www.w3.org/2000/svg">','<rect x="0" y="0" width="100%" height="100%" rx="12" fill="#fff"/>']
+            for frac in [0,.25,.5,.75,1]:
+                y=mt+ph*frac;val=pmax-(pmax-pmin)*frac
+                parts.append(f'<line x1="{ml}" y1="{y:.2f}" x2="{width-mr}" y2="{y:.2f}" stroke="#e9edf5"/><text x="{ml-8}" y="{y+4:.2f}" text-anchor="end" font-size="11" fill="#60708a">{val:.2f}</text>')
+            parts.append(f'<path d="{path}" fill="none" stroke="#0b5ed7" stroke-width="2.2"/>')
+            for r in chart_rows:
+                i=r['index'];x=px(i);y=py(r['price']);status=r['status'];color='#0f9d58' if status=='CLOSED_TP' else ('#7c3aed' if status=='CLOSED_TIME' else '#ff8a00')
+                parts.append(f'<circle cx="{x:.2f}" cy="{y:.2f}" r="5.5" fill="{color}" stroke="#fff" stroke-width="1.5"/><text x="{x:.2f}" y="{max(14,y-10):.2f}" text-anchor="middle" font-size="10" font-weight="700" fill="{color}">{_html.escape(r["date"][5:])}</text>')
+                if r['exit_index'] is not None:
+                    xi=px(r['exit_index']);yi=py(r['exit_price']);label='TP' if status=='CLOSED_TP' else 'TIME';ec='#14a44d' if status=='CLOSED_TP' else '#7c3aed'
+                    parts.append(f'<line x1="{x:.2f}" y1="{y:.2f}" x2="{xi:.2f}" y2="{yi:.2f}" stroke="{ec}" stroke-width="2"/><circle cx="{xi:.2f}" cy="{yi:.2f}" r="5.5" fill="{ec}" stroke="#fff"/><text x="{xi:.2f}" y="{min(height-6,yi+16):.2f}" text-anchor="middle" font-size="10" fill="{ec}">{label}</text>')
+                else:
+                    x2=px(len(data)-1);y2=py(data[-1]['ac'])
+                    parts.append(f'<line x1="{x:.2f}" y1="{y:.2f}" x2="{x2:.2f}" y2="{y2:.2f}" stroke="#ff8a00" stroke-width="2" stroke-dasharray="5 4"/><circle cx="{x2:.2f}" cy="{y2:.2f}" r="5.5" fill="#ff8a00" stroke="#fff"/><text x="{x2:.2f}" y="{max(14,y2-10):.2f}" text-anchor="middle" font-size="10" fill="#ff8a00">OPEN</text>')
+            parts.append('</svg>');return ''.join(parts)
+
+        try:
+            if scope=='symbol':
+                if symbol:
+                    res=_analyse(symbol,symbol);rows=list(reversed(res['rows']));bars_count=len(res['data']);latest_date=res['data'][-1]['date'] if res['data'] else '';summary=_summarize(rows);chart_svg=_build_svg(res['data'],res['rows'])
+            else:
+                if _egx_discover_sync is None:raise RuntimeError('نسخة monitor/worker.py الحالية لا تحتوي على اكتشاف سوق مصر.')
+                universe=_egx_discover_sync();market_symbols=len(universe)
+                collected=[]
+                with ThreadPoolExecutor(max_workers=12) as pool:
+                    futs={pool.submit(_analyse,s,c):(s,c) for s,c in universe}
+                    for fut in as_completed(futs):
+                        try:
+                            res=fut.result();collected.extend(res['rows'])
+                            if res['data']:
+                                d=res['data'][-1]['date'];latest_date=max(latest_date,d) if latest_date else d
+                        except Exception:
+                            market_errors+=1
+                rows=sorted(collected,key=lambda x:(x['date'],x['symbol']),reverse=True);summary=_summarize(rows)
+                if chart_symbol:
+                    lookup=dict(universe);cres=_analyse(chart_symbol,lookup.get(chart_symbol,chart_symbol));chart_svg=_build_svg(cres['data'],cres['rows']);bars_count=len(cres['data']);company=lookup.get(chart_symbol,'')
+        except Exception as exc:
+            error=f'{type(exc).__name__}: {exc}'
+
+        def chart_link(row):
+            args=request.args.to_dict();args['scope']='market';args['chart_symbol']=row['symbol'];args.pop('symbol',None)
+            return url_for('egx_lab',**args)
+
+        return render_template('egx_lab.html',scope=scope,symbol=symbol,chart_symbol=chart_symbol,r2_min=r2_min,slope_min=slope_min,cooldown=cooldown,tp_pct=tp_pct,
             confirm=confirm,rows=rows,error=error,latest_date=latest_date,bars_count=bars_count,summary=summary,company=company,chart_svg=chart_svg,
-            exit_mode=exit_mode,time_exit_sessions=time_exit_sessions)
+            exit_mode=exit_mode,time_exit_sessions=time_exit_sessions,market_symbols=market_symbols,market_errors=market_errors,chart_link=chart_link)
 
 
     @app.get('/stocks/<int:plan_id>')
