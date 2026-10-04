@@ -828,7 +828,7 @@ def create_app(db=None,test_config=None):
                 lookup=dict(cached.get('lookup') or {})
                 compact_data=dict(cached.get('data_map') or {})
                 summary=_summarize(rows)
-                if show_portfolio and market_scan_status=='done':
+                if show_portfolio and rows:
                     portfolio_summary,portfolio_svg=_portfolio_backtest(rows,compact_data)
 
                 if chart_symbol:
