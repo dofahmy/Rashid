@@ -363,11 +363,15 @@ def create_app(db=None,test_config=None):
         try:tp_pct=max(0.1,min(1000.0,float(request.args.get('tp','50'))))
         except (TypeError,ValueError):tp_pct=50.0
         tp_target=tp_pct/100.0
+        exit_mode=request.args.get('exit_mode','tp').strip().lower()
+        if exit_mode not in ('tp','time'): exit_mode='tp'
+        try:time_exit_sessions=max(1,min(2000,int(request.args.get('time_exit','126'))))
+        except (TypeError,ValueError):time_exit_sessions=126
         confirm=request.args.get('confirm','1')!='0'
         rows=[];error='';latest_date='';company='';bars_count=0;chart_svg=''
         summary={}
 
-        def _build_svg(data, rows, tp_pct):
+        def _build_svg(data, rows, tp_pct, exit_mode):
             if not data:
                 return ''
             width=1180; height=360
@@ -399,15 +403,20 @@ def create_app(db=None,test_config=None):
                     continue
                 x=px(i); y=py(r['price'])
                 status=r.get('status')
-                entry_color='#0f9d58' if status=='CLOSED_TP' else '#ff8a00'
+                entry_color=('#0f9d58' if status=='CLOSED_TP' else ('#7c3aed' if status=='CLOSED_TIME' else '#ff8a00'))
                 parts.append(f'<line x1="{x:.2f}" y1="{mt}" x2="{x:.2f}" y2="{mt+ph}" stroke="#cfd7e6" stroke-dasharray="3 4" stroke-width="1"/>')
                 parts.append(f'<circle cx="{x:.2f}" cy="{y:.2f}" r="5.5" fill="{entry_color}" stroke="#ffffff" stroke-width="1.5"/>')
                 parts.append(f'<text x="{x:.2f}" y="{max(14, y-10):.2f}" text-anchor="middle" font-size="10" font-weight="700" fill="{entry_color}">{_html.escape(r["date"][5:])}</text>')
-                if r.get('hit_tp') is not None and r.get('tp_index') is not None:
-                    xi=px(r['tp_index']); yi=py(r['price']*(1+tp_pct/100.0))
+                if r.get('status')=='CLOSED_TP' and r.get('exit_index') is not None:
+                    xi=px(r['exit_index']); yi=py(r['exit_price'])
                     parts.append(f'<line x1="{x:.2f}" y1="{y:.2f}" x2="{xi:.2f}" y2="{yi:.2f}" stroke="#14a44d" stroke-width="2"/>')
                     parts.append(f'<circle cx="{xi:.2f}" cy="{yi:.2f}" r="5.5" fill="#14a44d" stroke="#ffffff" stroke-width="1.5"/>')
                     parts.append(f'<text x="{xi:.2f}" y="{min(height-6, yi+16):.2f}" text-anchor="middle" font-size="10" fill="#14a44d">TP</text>')
+                elif r.get('status')=='CLOSED_TIME' and r.get('exit_index') is not None:
+                    xi=px(r['exit_index']); yi=py(r['exit_price'])
+                    parts.append(f'<line x1="{x:.2f}" y1="{y:.2f}" x2="{xi:.2f}" y2="{yi:.2f}" stroke="#7c3aed" stroke-width="2"/>')
+                    parts.append(f'<circle cx="{xi:.2f}" cy="{yi:.2f}" r="5.5" fill="#7c3aed" stroke="#ffffff" stroke-width="1.5"/>')
+                    parts.append(f'<text x="{xi:.2f}" y="{min(height-6, yi+16):.2f}" text-anchor="middle" font-size="10" fill="#7c3aed">TIME</text>')
                 else:
                     li=len(data)-1
                     x2=px(li); y2=py(float(data[-1]['ac']))
@@ -431,7 +440,9 @@ def create_app(db=None,test_config=None):
             # legend
             parts.append('<g font-size="11" font-weight="600">')
             lx=ml; ly=18
-            for color,label in [('#0b5ed7','السعر'),('#14a44d','إشارة أغلقت على TP'),('#ff8a00','إشارة مفتوحة حتى الآن')]:
+            legend=[('#0b5ed7','السعر'),('#ff8a00','إشارة مفتوحة حتى الآن')]
+            legend.insert(1, ('#14a44d','إغلاق TP') if exit_mode=='tp' else ('#7c3aed','إغلاق زمني'))
+            for color,label in legend:
                 parts.append(f'<rect x="{lx}" y="{ly-8}" width="12" height="12" rx="2" fill="{color}"/>')
                 parts.append(f'<text x="{lx+18}" y="{ly+2}" fill="#203040">{label}</text>')
                 lx += 170 if label=='السعر' else 210
@@ -458,8 +469,7 @@ def create_app(db=None,test_config=None):
                     rule.append(bool(ok))
                 activations=[i for i,x in enumerate(rule) if x and (i==0 or not rule[i-1])]
                 # Sequential recommendations only: never open a new recommendation while
-                # a previous one is still open. A recommendation closes when the selected
-                # TP is first touched. Cooldown is still enforced between entry dates.
+                # a previous recommendation is still open. Exit can be TP-based or time-based.
                 kept=[];last_entry=-10**9;position_open_until=-1
                 def _first_tp_index(entry_i):
                     entry=float(data[entry_i]['ac'])
@@ -468,17 +478,21 @@ def create_app(db=None,test_config=None):
                         if float(data[jj]['ah'])>=target:
                             return jj
                     return None
+                def _exit_index(entry_i):
+                    if exit_mode=='time':
+                        j=entry_i+time_exit_sessions
+                        return j if j < len(data) else None
+                    return _first_tp_index(entry_i)
                 for i in activations:
                     if i<=position_open_until:
                         continue
                     if i-last_entry<cooldown:
                         continue
-                    tp_i=_first_tp_index(i)
-                    kept.append(i)
-                    last_entry=i
-                    # If TP is never reached, this recommendation remains open to the
-                    # latest bar and blocks every later activation.
-                    position_open_until=(tp_i if tp_i is not None else len(data)-1)
+                    exit_i=_exit_index(i)
+                    kept.append(i);last_entry=i
+                    # If the configured exit has not happened yet, position remains open
+                    # to the latest bar and blocks every later activation.
+                    position_open_until=(exit_i if exit_i is not None else len(data)-1)
                 def ret_at(i,n):
                     j=i+n
                     if j>=len(data):return None
@@ -497,7 +511,18 @@ def create_app(db=None,test_config=None):
                     htp,dtp,itp=fmt_hit(i,tp_target)
                     slope,r2=metrics[i]
                     current_return=100*(float(data[-1]['ac'])/entry-1)
-                    status='CLOSED_TP' if htp is not None else 'OPEN'
+                    if exit_mode=='time':
+                        eit=i+time_exit_sessions
+                        if eit < len(data):
+                            status='CLOSED_TIME'; exit_index=eit; exit_date=data[eit]['date']; exit_price=float(data[eit]['ac'])
+                            exit_return=100*(exit_price/entry-1)
+                        else:
+                            status='OPEN'; exit_index=None; exit_date=None; exit_price=None; exit_return=None
+                    else:
+                        if htp is not None:
+                            status='CLOSED_TP'; exit_index=itp; exit_date=dtp; exit_price=entry*(1+tp_target); exit_return=tp_pct
+                        else:
+                            status='OPEN'; exit_index=None; exit_date=None; exit_price=None; exit_return=None
                     rows.append({
                         'index':i,
                         'date':data[i]['date'],'price':entry,'r2':r2,'slope':slope,
@@ -506,16 +531,18 @@ def create_app(db=None,test_config=None):
                         'max_gain':max_gain,'max_dd':max_dd,
                         'hit20':h20,'hit20_date':d20,'hit50':h50,'hit50_date':d50,'hit100':h100,'hit100_date':d100,
                         'hit_tp':htp,'hit_tp_date':dtp,'tp_index':itp,
+                        'exit_index':exit_index,'exit_date':exit_date,'exit_price':exit_price,'exit_return':exit_return,
                         'age':len(data)-1-i,
                         'confirm':_egx_price_confirm(data,i),
                         'status':status,
                     })
                 rows.reverse()
-                chart_svg=_build_svg(data, list(reversed(rows)), tp_pct)
+                chart_svg=_build_svg(data, list(reversed(rows)), tp_pct, exit_mode)
                 n=len(rows)
                 if n:
                     hit50=sum(1 for x in rows if x['hit50'] is not None)
                     hit_tp=sum(1 for x in rows if x['hit_tp'] is not None)
+                    closed_n=sum(1 for x in rows if x['status']!='OPEN')
                     open_n=sum(1 for x in rows if x['status']=='OPEN')
                     tp_sessions=[x['hit_tp'] for x in rows if x['hit_tp'] is not None]
                     matured6=[x for x in rows if x['ret_6m'] is not None]
@@ -525,6 +552,7 @@ def create_app(db=None,test_config=None):
                         'hit50_pct':100*hit50/n,
                         'hit_tp_pct':100*hit_tp/n,
                         'tp_hits':hit_tp,
+                        'closed_n':closed_n,
                         'open_n':open_n,
                         'tp_median_sessions':sorted(tp_sessions)[len(tp_sessions)//2] if tp_sessions else None,
                         'avg3m':sum(x['ret_3m'] for x in rows if x['ret_3m'] is not None)/max(1,sum(x['ret_3m'] is not None for x in rows)),
@@ -534,7 +562,8 @@ def create_app(db=None,test_config=None):
             except Exception as exc:
                 error=f'{type(exc).__name__}: {exc}'
         return render_template('egx_lab.html',symbol=symbol,r2_min=r2_min,slope_min=slope_min,cooldown=cooldown,tp_pct=tp_pct,
-            confirm=confirm,rows=rows,error=error,latest_date=latest_date,bars_count=bars_count,summary=summary,company=company,chart_svg=chart_svg)
+            confirm=confirm,rows=rows,error=error,latest_date=latest_date,bars_count=bars_count,summary=summary,company=company,chart_svg=chart_svg,
+            exit_mode=exit_mode,time_exit_sessions=time_exit_sessions)
 
 
     @app.get('/stocks/<int:plan_id>')
