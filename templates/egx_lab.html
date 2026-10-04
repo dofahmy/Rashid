@@ -19,8 +19,14 @@
   <div class="panel accent"><div class="muted">السهم</div><div class="metric" dir="ltr">{{symbol}}</div></div>
   <div class="panel accent"><div class="muted">عدد الإشارات</div><div class="metric">{{summary.get('count',0)}}</div></div>
   <div class="panel accent"><div class="muted">وصلت TP +{{'%g'|format(tp_pct)}}%</div><div class="metric">{{'%.1f'|format(summary.get('hit_tp_pct',0))}}%</div><div class="muted">{{summary.get('tp_hits',0)}} / {{summary.get('count',0)}} إشارة</div></div>
-  <div class="panel accent"><div class="muted">آخر بيانات</div><div class="metric" style="font-size:18px">{{latest_date}}</div></div>
+  <div class="panel accent"><div class="muted">إشارات مفتوحة</div><div class="metric">{{summary.get('open_n',0)}}</div><div class="muted">آخر بيانات {{latest_date}}</div></div>
 </div>
+{% if chart_svg %}
+<div class="panel">
+  <div class="actions"><strong>شارت السهم مع الإشارات</strong><span class="muted">الأخضر = إشارة أغلقت على TP | البرتقالي = إشارة ما زالت مفتوحة</span></div>
+  <div style="margin-top:10px;overflow:auto">{{chart_svg|safe}}</div>
+</div>
+{% endif %}
 <div class="panel"><div class="actions">
   <span>شموع يومية: {{bars_count}}</span>
   <span>متوسط 3M: {{'%+.2f'|format(summary.get('avg3m',0) or 0)}}%</span>
@@ -30,21 +36,23 @@
 </div></div>
 <div class="panel tablewrap">
 <table>
-<thead><tr><th>تاريخ الإشارة</th><th>سعر الإشارة</th><th>R²</th><th>Slope %</th><th>بعد 1M</th><th>بعد 3M</th><th>بعد 6M</th><th>بعد 1Y</th><th>أقصى صعود</th><th>أقصى هبوط</th><th>TP +{{'%g'|format(tp_pct)}}%</th><th>+20%</th><th>+50%</th><th>+100%</th><th>العمر</th></tr></thead>
+<thead><tr><th>الحالة</th><th>تاريخ الإشارة</th><th>سعر الإشارة</th><th>R²</th><th>Slope %</th><th>الأداء الحالي</th><th>بعد 1M</th><th>بعد 3M</th><th>بعد 6M</th><th>بعد 1Y</th><th>أقصى صعود</th><th>أقصى هبوط</th><th>TP +{{'%g'|format(tp_pct)}}%</th><th>+20%</th><th>+50%</th><th>+100%</th><th>العمر</th></tr></thead>
 <tbody>
 {% for x in rows %}<tr>
+<td>{% if x.status == 'OPEN' %}<strong style="color:#d97706">مفتوحة</strong>{% else %}<strong style="color:#15803d">أغلقت على TP</strong>{% endif %}</td>
 <td dir="ltr">{{x.date}}</td><td>{{'%.2f'|format(x.price)}}</td><td>{{'%.4f'|format(x.r2)}}</td><td>{{'%.2f'|format(x.slope)}}</td>
+<td>{% if x.status == 'OPEN' %}<strong>{{'%+.2f%%'|format(x.current_return)}}</strong>{% else %}<span class="muted">{{'%+.2f%%'|format(x.current_return)}}</span>{% endif %}</td>
 <td>{{('%+.2f%%'|format(x.ret_1m)) if x.ret_1m is not none else '—'}}</td>
 <td>{{('%+.2f%%'|format(x.ret_3m)) if x.ret_3m is not none else '—'}}</td>
 <td>{{('%+.2f%%'|format(x.ret_6m)) if x.ret_6m is not none else '—'}}</td>
 <td>{{('%+.2f%%'|format(x.ret_1y)) if x.ret_1y is not none else '—'}}</td>
 <td>{{'%+.2f%%'|format(x.max_gain)}}</td><td>{{'%+.2f%%'|format(x.max_dd)}}</td>
-<td>{% if x.hit_tp is not none %}<strong>{{x.hit_tp}} جلسة</strong><br><span class="muted">{{x.hit_tp_date}}</span>{% else %}—{% endif %}</td>
+<td>{% if x.hit_tp is not none %}<strong>{{x.hit_tp}} جلسة</strong><br><span class="muted">{{x.hit_tp_date}}</span>{% else %}<strong style="color:#d97706">مفتوحة</strong>{% endif %}</td>
 <td>{% if x.hit20 is not none %}{{x.hit20}} جلسة<br><span class="muted">{{x.hit20_date}}</span>{% else %}—{% endif %}</td>
 <td>{% if x.hit50 is not none %}<strong>{{x.hit50}} جلسة</strong><br><span class="muted">{{x.hit50_date}}</span>{% else %}—{% endif %}</td>
 <td>{% if x.hit100 is not none %}{{x.hit100}} جلسة<br><span class="muted">{{x.hit100_date}}</span>{% else %}—{% endif %}</td>
 <td>{{x.age}}</td>
-</tr>{% else %}<tr><td colspan="15">لا توجد إشارات تاريخية بهذه القيم.</td></tr>{% endfor %}
+</tr>{% else %}<tr><td colspan="17">لا توجد إشارات تاريخية بهذه القيم.</td></tr>{% endfor %}
 </tbody></table>
 </div>
 {% endif %}
