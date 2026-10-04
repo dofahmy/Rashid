@@ -457,10 +457,28 @@ def create_app(db=None,test_config=None):
                     if confirm:ok=ok and _egx_price_confirm(data,i)
                     rule.append(bool(ok))
                 activations=[i for i,x in enumerate(rule) if x and (i==0 or not rule[i-1])]
-                kept=[];last=-10**9
+                # Sequential recommendations only: never open a new recommendation while
+                # a previous one is still open. A recommendation closes when the selected
+                # TP is first touched. Cooldown is still enforced between entry dates.
+                kept=[];last_entry=-10**9;position_open_until=-1
+                def _first_tp_index(entry_i):
+                    entry=float(data[entry_i]['ac'])
+                    target=entry*(1+tp_target)
+                    for jj in range(entry_i+1,len(data)):
+                        if float(data[jj]['ah'])>=target:
+                            return jj
+                    return None
                 for i in activations:
-                    if i-last<cooldown:continue
-                    kept.append(i);last=i
+                    if i<=position_open_until:
+                        continue
+                    if i-last_entry<cooldown:
+                        continue
+                    tp_i=_first_tp_index(i)
+                    kept.append(i)
+                    last_entry=i
+                    # If TP is never reached, this recommendation remains open to the
+                    # latest bar and blocks every later activation.
+                    position_open_until=(tp_i if tp_i is not None else len(data)-1)
                 def ret_at(i,n):
                     j=i+n
                     if j>=len(data):return None
