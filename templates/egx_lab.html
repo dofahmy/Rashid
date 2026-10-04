@@ -11,7 +11,7 @@
     {% if not confirm %}<input type="hidden" name="confirm" value="0">{% endif %}
     <button>حلّل التاريخ</button>
   </form>
-  <p class="muted">R² وSlope محسوبان من 126 جلسة سابقة فقط، بدون استخدام شمعة الإشارة داخل الحساب. عند تفعيل شروط الشمعة: Close &gt; High أمس، Close &gt; Open، و(Close−Open) &gt; (High−Close). الإشارة تُحسب عند بداية تحقق الشروط ثم يُطبق الـCooldown.</p>
+  <p class="muted">R² وSlope محسوبان من 126 جلسة سابقة فقط، بدون استخدام شمعة الإشارة داخل الحساب. عند تفعيل شروط الشمعة: Close &gt; High أمس، Close &gt; Open، و(Close−Open) &gt; (High−Close). الإشارة تُحسب عند بداية تحقق الشروط ثم يُطبق الـCooldown. ولا تُفتح أي توصية جديدة على نفس السهم طالما توجد توصية سابقة مفتوحة؛ التوصية التالية لا تبدأ إلا بعد وصول السابقة إلى TP المختار.</p>
 </div>
 {% if error %}<div class="panel warning"><strong>تعذر التحليل:</strong> {{error}}</div>{% endif %}
 {% if symbol and not error %}
