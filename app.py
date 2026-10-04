@@ -386,7 +386,7 @@ def create_app(db=None,test_config=None):
         if exit_slope_op not in ('gte','lte'): exit_slope_op='gte'
         confirm=request.args.get('confirm','1')!='0'
         rows=[];error='';latest_date='';company='';bars_count=0;chart_svg='';market_errors=0;market_symbols=0;market_scan_status='';market_scan_progress=0;market_scan_error=''
-        summary={}
+        summary={};show_portfolio=request.args.get('portfolio','0')=='1';portfolio_svg='';portfolio_summary={}
 
         from monitor.worker import _egx_daily_sync, _egx_price_confirm
         try:
@@ -566,6 +566,177 @@ def create_app(db=None,test_config=None):
                     parts.append(f'<line x1="{x:.2f}" y1="{y:.2f}" x2="{x2:.2f}" y2="{y2:.2f}" stroke="#ff8a00" stroke-width="2" stroke-dasharray="5 4"/><circle cx="{x2:.2f}" cy="{y2:.2f}" r="5.5" fill="#ff8a00" stroke="#fff"/><text x="{x2:.2f}" y="{max(14,y2-10):.2f}" text-anchor="middle" font-size="10" fill="#ff8a00">OPEN</text>')
             parts.append('</svg>');return ''.join(parts)
 
+
+        def _portfolio_backtest(signal_rows, compact_data):
+            """10-slot portfolio. Each slot starts at 10% of capital.
+            Natural setup exits release a slot to cash. If a new recommendation
+            arrives while all 10 slots are occupied, the currently best-performing
+            open position is closed at that day's close and its slot is reused.
+            """
+            import bisect
+            if not signal_rows:
+                return {},''
+
+            # One compact adjusted-close series per symbol.
+            series={}
+            date_union=set()
+            for row in signal_rows:
+                sym=row['symbol']
+                if sym in series:
+                    continue
+                pts=compact_data.get(sym)
+                if not pts:
+                    raw=_egx_daily_sync(sym)
+                    pts=[(x['date'],float(x['ac'])) for x in raw]
+                pts=sorted((str(d),float(p)) for d,p in pts)
+                if not pts:
+                    continue
+                dates=[d for d,_ in pts]; prices=[p for _,p in pts]
+                series[sym]=(dates,prices)
+                date_union.update(dates)
+
+            signals=[x for x in signal_rows if x.get('symbol') in series]
+            if not signals:
+                return {},''
+
+            signals.sort(key=lambda x:(x['date'],x['symbol']))
+            first_date=signals[0]['date']
+            last_date=max((dates[-1] for dates,_prices in series.values()), default=first_date)
+            calendar=sorted(d for d in date_union if first_date<=d<=last_date)
+            if not calendar:
+                return {},''
+
+            def mark(sym, d):
+                dates,prices=series[sym]
+                k=bisect.bisect_right(dates,d)-1
+                return prices[k] if k>=0 else None
+
+            # 10 independent capital slots, each worth 10 at inception.
+            slots=[{'cash':10.0,'pos':None} for _ in range(10)]
+            by_entry={}
+            by_exit={}
+            for r in signals:
+                by_entry.setdefault(r['date'],[]).append(r)
+                if r.get('exit_date'):
+                    by_exit.setdefault(r['exit_date'],[]).append(r)
+
+            equity_curve=[]
+            portfolio_trades=0
+            forced_rotations=0
+            natural_exits=0
+            winners=0
+            closed_returns=[]
+
+            def close_slot(slot, d, price, reason):
+                nonlocal forced_rotations,natural_exits,winners
+                pos=slot.get('pos')
+                if not pos:
+                    return
+                value=pos['shares']*price
+                ret=100*(price/pos['entry_price']-1)
+                slot['cash']=value
+                slot['pos']=None
+                closed_returns.append(ret)
+                if ret>0:winners+=1
+                if reason=='FORCED_ROTATION':forced_rotations+=1
+                else:natural_exits+=1
+
+            for d in calendar:
+                # Natural exits first. Exit price follows the selected setup.
+                for r in by_exit.get(d,[]):
+                    for slot in slots:
+                        pos=slot.get('pos')
+                        if pos and pos['row'] is r:
+                            close_slot(slot,d,float(r['exit_price']),r['status'])
+                            break
+
+                # Then process all new recommendations at their signal close.
+                for r in sorted(by_entry.get(d,[]),key=lambda x:x['symbol']):
+                    entry_price=float(r['price'])
+                    empty=next((s for s in slots if s['pos'] is None),None)
+                    if empty is None:
+                        candidates=[]
+                        for s in slots:
+                            p=s['pos']
+                            cp=mark(p['symbol'],d)
+                            if cp is None: continue
+                            current_ret=100*(cp/p['entry_price']-1)
+                            candidates.append((current_ret,p['entry_date'],p['symbol'],s,cp))
+                        if not candidates:
+                            continue
+                        # "Close the one that gained the most"; if all are losing,
+                        # this closes the least-negative one.
+                        _ret,_ed,_sym,empty,cp=max(candidates,key=lambda z:(z[0],-len(z[1]),z[2]))
+                        close_slot(empty,d,cp,'FORCED_ROTATION')
+
+                    capital=float(empty['cash'])
+                    if capital<=0:
+                        continue
+                    empty['cash']=0.0
+                    empty['pos']={
+                        'symbol':r['symbol'],'entry_date':d,'entry_price':entry_price,
+                        'shares':capital/entry_price,'row':r
+                    }
+                    portfolio_trades+=1
+
+                equity=0.0
+                for slot in slots:
+                    if slot['pos'] is None:
+                        equity+=slot['cash']
+                    else:
+                        p=slot['pos'];cp=mark(p['symbol'],d)
+                        equity+=p['shares']*(cp if cp is not None else p['entry_price'])
+                equity_curve.append((d,equity))
+
+            if not equity_curve:
+                return {},''
+
+            end_value=equity_curve[-1][1]
+            total_return=100*(end_value/100.0-1)
+            peak=equity_curve[0][1];max_dd=0.0
+            for _d,v in equity_curve:
+                peak=max(peak,v)
+                if peak>0:
+                    max_dd=min(max_dd,100*(v/peak-1))
+            open_positions=sum(1 for s in slots if s['pos'] is not None)
+            summary={
+                'start_value':100.0,'end_value':end_value,'total_return':total_return,
+                'max_dd':max_dd,'trades':portfolio_trades,'forced_rotations':forced_rotations,
+                'natural_exits':natural_exits,'open_positions':open_positions,
+                'closed_trades':len(closed_returns),
+                'win_rate':(100*winners/len(closed_returns)) if closed_returns else None,
+                'avg_closed_return':(sum(closed_returns)/len(closed_returns)) if closed_returns else None,
+            }
+
+            # SVG performance chart, normalized to 100 at inception.
+            width=1180;height=360;ml=64;mr=20;mt=28;mb=44
+            pw=width-ml-mr;ph=height-mt-mb
+            vals=[v for _,v in equity_curve]
+            vmin=min(vals+[100.0]);vmax=max(vals+[100.0])
+            pad=max(1.0,(vmax-vmin)*.08)
+            vmin-=pad;vmax+=pad
+            nn=max(1,len(equity_curve)-1)
+            def px(i):return ml+(i/nn)*pw
+            def py(v):return mt+(vmax-v)/(vmax-vmin)*ph
+            path=' '.join(('M' if i==0 else 'L')+f'{px(i):.2f},{py(v):.2f}' for i,(_d,v) in enumerate(equity_curve))
+            parts=[f'<svg viewBox="0 0 {width} {height}" width="100%" height="360" xmlns="http://www.w3.org/2000/svg">',
+                   '<rect x="0" y="0" width="100%" height="100%" rx="12" fill="#fff"/>']
+            for frac in [0,.25,.5,.75,1]:
+                y=mt+ph*frac;val=vmax-(vmax-vmin)*frac
+                parts.append(f'<line x1="{ml}" y1="{y:.2f}" x2="{width-mr}" y2="{y:.2f}" stroke="#e9edf5"/>')
+                parts.append(f'<text x="{ml-8}" y="{y+4:.2f}" text-anchor="end" font-size="11" fill="#60708a">{val:.1f}</text>')
+            if vmin<=100<=vmax:
+                y0=py(100)
+                parts.append(f'<line x1="{ml}" y1="{y0:.2f}" x2="{width-mr}" y2="{y0:.2f}" stroke="#9aa8bb" stroke-dasharray="4 4"/>')
+            parts.append(f'<path d="{path}" fill="none" stroke="#0b5ed7" stroke-width="2.5"/>')
+            tick_idxs=sorted(set([0,len(equity_curve)//4,len(equity_curve)//2,(3*len(equity_curve))//4,len(equity_curve)-1]))
+            for i in tick_idxs:
+                x=px(i);label=_html.escape(equity_curve[i][0])
+                parts.append(f'<text x="{x:.2f}" y="{height-14}" text-anchor="middle" font-size="11" fill="#60708a">{label}</text>')
+            parts.append(f'<text x="{width-mr}" y="18" text-anchor="end" font-size="12" font-weight="700" fill="#203040">Portfolio value · start = 100</text>')
+            parts.append('</svg>')
+            return summary,''.join(parts)
+
         try:
             if scope=='symbol':
                 if symbol:
@@ -581,7 +752,7 @@ def create_app(db=None,test_config=None):
                 force=request.args.get('force_scan','0')=='1'
 
                 def _market_scan_job(key):
-                    collected=[];errors=0;latest='';lookup={}
+                    collected=[];errors=0;latest='';lookup={};data_map={}
                     try:
                         universe=_egx_discover_sync()
                         lookup=dict(universe)
@@ -598,6 +769,8 @@ def create_app(db=None,test_config=None):
                                 try:
                                     res=fut.result()
                                     collected.extend(res['rows'])
+                                    if res['rows'] and res['data']:
+                                        data_map[res['symbol']]=[(x['date'],float(x['ac'])) for x in res['data']]
                                     if res['data']:
                                         d=res['data'][-1]['date']
                                         latest=max(latest,d) if latest else d
@@ -610,14 +783,14 @@ def create_app(db=None,test_config=None):
                                         e=egx_market_cache.get(key,{})
                                         e.update({'status':'running','total':len(universe),'progress':done,
                                                   'errors':errors,'rows':partial,'latest_date':latest,
-                                                  'lookup':lookup})
+                                                  'lookup':lookup,'data_map':data_map})
                                         egx_market_cache[key]=e
                         final_rows=sorted(collected,key=lambda x:(x['date'],x['symbol']),reverse=True)
                         with egx_market_lock:
                             egx_market_cache[key]={
                                 'status':'done','total':len(universe),'progress':len(universe),
                                 'errors':errors,'rows':final_rows,'latest_date':latest,
-                                'lookup':lookup,'started_at':egx_market_cache.get(key,{}).get('started_at',time.time()),
+                                'lookup':lookup,'data_map':data_map,'started_at':egx_market_cache.get(key,{}).get('started_at',time.time()),
                                 'finished_at':time.time()
                             }
                     except Exception as exc:
@@ -639,7 +812,7 @@ def create_app(db=None,test_config=None):
                         egx_market_cache.pop(cache_key,None)
                     if cached is None:
                         egx_market_cache[cache_key]={'status':'starting','rows':[],'progress':0,'total':0,'errors':0,
-                                                     'latest_date':'','lookup':{},'started_at':time.time()}
+                                                     'latest_date':'','lookup':{},'data_map':{},'started_at':time.time()}
                         threading.Thread(target=_market_scan_job,args=(cache_key,),daemon=True,name='egx-lab-market-scan').start()
                         cached=egx_market_cache[cache_key]
 
@@ -653,7 +826,10 @@ def create_app(db=None,test_config=None):
                 market_scan_progress=int(cached.get('progress') or 0)
                 market_scan_error=cached.get('error','')
                 lookup=dict(cached.get('lookup') or {})
+                compact_data=dict(cached.get('data_map') or {})
                 summary=_summarize(rows)
+                if show_portfolio and market_scan_status=='done':
+                    portfolio_summary,portfolio_svg=_portfolio_backtest(rows,compact_data)
 
                 if chart_symbol:
                     cres=_analyse(chart_symbol,lookup.get(chart_symbol,chart_symbol))
@@ -714,7 +890,7 @@ def create_app(db=None,test_config=None):
 
         return render_template('egx_lab.html',scope=scope,symbol=symbol,chart_symbol=chart_symbol,r2_min=r2_min,slope_min=slope_min,slope_max=slope_max,cooldown=cooldown,tp_pct=tp_pct,
             confirm=confirm,rows=rows,error=error,latest_date=latest_date,bars_count=bars_count,summary=summary,company=company,chart_svg=chart_svg,
-            exit_mode=exit_mode,time_exit_sessions=time_exit_sessions,exit_slope=exit_slope,exit_slope_op=exit_slope_op,market_symbols=market_symbols,market_errors=market_errors,chart_link=chart_link,sort_link=sort_link,sort_mark=sort_mark,sort_key=sort_key,sort_dir=sort_dir)
+            exit_mode=exit_mode,time_exit_sessions=time_exit_sessions,exit_slope=exit_slope,exit_slope_op=exit_slope_op,market_symbols=market_symbols,market_errors=market_errors,chart_link=chart_link,sort_link=sort_link,sort_mark=sort_mark,sort_key=sort_key,sort_dir=sort_dir,show_portfolio=show_portfolio,portfolio_svg=portfolio_svg,portfolio_summary=portfolio_summary)
 
 
     @app.get('/stocks/<int:plan_id>')
