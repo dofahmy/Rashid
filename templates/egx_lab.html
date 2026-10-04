@@ -109,6 +109,18 @@
 </div>
 {% endif %}
 {% if not error and ((scope=='symbol' and symbol) or scope=='market') %}
+{% if scope=='market' and rows %}
+<div class="panel" style="border:2px solid #0f8f8a">
+  <div class="actions">
+    <strong>نتائج السوق جاهزة: {{rows|length}} إشارة</strong>
+    {% if not show_portfolio %}
+      <a class="button" style="font-size:16px;font-weight:700" href="{{url_for('egx_lab', **dict(request.args, portfolio='1'))}}">📈 أداء المحفظة</a>
+    {% else %}
+      <a class="button secondary" href="{{url_for('egx_lab', **dict(request.args, portfolio=None))}}">إخفاء أداء المحفظة</a>
+    {% endif %}
+  </div>
+</div>
+{% endif %}
 {% if scope=='market' and show_portfolio and portfolio_svg %}
 <div class="panel">
   <div class="actions">
