@@ -364,7 +364,7 @@ def create_app(db=None,test_config=None):
         except (TypeError,ValueError):tp_pct=50.0
         tp_target=tp_pct/100.0
         exit_mode=request.args.get('exit_mode','tp').strip().lower()
-        if exit_mode not in ('tp','time'): exit_mode='tp'
+        if exit_mode not in ('tp','time','both'): exit_mode='tp'
         try:time_exit_sessions=max(1,min(2000,int(request.args.get('time_exit','126'))))
         except (TypeError,ValueError):time_exit_sessions=126
         confirm=request.args.get('confirm','1')!='0'
@@ -441,7 +441,14 @@ def create_app(db=None,test_config=None):
             parts.append('<g font-size="11" font-weight="600">')
             lx=ml; ly=18
             legend=[('#0b5ed7','السعر'),('#ff8a00','إشارة مفتوحة حتى الآن')]
-            legend.insert(1, ('#14a44d','إغلاق TP') if exit_mode=='tp' else ('#7c3aed','إغلاق زمني'))
+            
+            if exit_mode=='tp':
+                legend.insert(1, ('#14a44d','إغلاق TP'))
+            elif exit_mode=='time':
+                legend.insert(1, ('#7c3aed','إغلاق زمني'))
+            else:
+                legend.insert(1, ('#14a44d','إغلاق TP'))
+                legend.insert(2, ('#7c3aed','إغلاق زمني'))
             for color,label in legend:
                 parts.append(f'<rect x="{lx}" y="{ly-8}" width="12" height="12" rx="2" fill="{color}"/>')
                 parts.append(f'<text x="{lx+18}" y="{ly+2}" fill="#203040">{label}</text>')
@@ -479,10 +486,19 @@ def create_app(db=None,test_config=None):
                             return jj
                     return None
                 def _exit_index(entry_i):
+                    tp_i=_first_tp_index(entry_i)
+                    time_i=entry_i+time_exit_sessions
+                    time_i=time_i if time_i < len(data) else None
                     if exit_mode=='time':
-                        j=entry_i+time_exit_sessions
-                        return j if j < len(data) else None
-                    return _first_tp_index(entry_i)
+                        return time_i
+                    if exit_mode=='tp':
+                        return tp_i
+                    # BOTH: whichever happens first. If TP is touched on the
+                    # time-exit session, TP wins because it occurs intraday,
+                    # before the session close used by Time Exit.
+                    if tp_i is None:return time_i
+                    if time_i is None:return tp_i
+                    return tp_i if tp_i<=time_i else time_i
                 for i in activations:
                     if i<=position_open_until:
                         continue
@@ -504,25 +520,47 @@ def create_app(db=None,test_config=None):
                             return j-i,data[j]['date'],j
                     return None,None,None
                 for i in kept:
-                    entry=float(data[i]['ac']);future=data[i:]
-                    max_gain=100*(max(float(x['ah']) for x in future)/entry-1)
-                    max_dd=100*(min(float(x['al']) for x in future)/entry-1)
+                    entry=float(data[i]['ac'])
                     h20,d20,i20=fmt_hit(i,.20);h50,d50,i50=fmt_hit(i,.50);h100,d100,i100=fmt_hit(i,1.00)
                     htp,dtp,itp=fmt_hit(i,tp_target)
                     slope,r2=metrics[i]
                     current_return=100*(float(data[-1]['ac'])/entry-1)
+                    time_i=i+time_exit_sessions
+                    time_i=time_i if time_i < len(data) else None
                     if exit_mode=='time':
-                        eit=i+time_exit_sessions
-                        if eit < len(data):
-                            status='CLOSED_TIME'; exit_index=eit; exit_date=data[eit]['date']; exit_price=float(data[eit]['ac'])
-                            exit_return=100*(exit_price/entry-1)
+                        if time_i is not None:
+                            status='CLOSED_TIME'; exit_index=time_i; exit_date=data[time_i]['date']; exit_price=float(data[time_i]['ac'])
+                            exit_return=100*(exit_price/entry-1); trade_end=time_i
                         else:
-                            status='OPEN'; exit_index=None; exit_date=None; exit_price=None; exit_return=None
-                    else:
+                            status='OPEN'; exit_index=None; exit_date=None; exit_price=None; exit_return=None; trade_end=len(data)-1
+                    elif exit_mode=='tp':
                         if htp is not None:
-                            status='CLOSED_TP'; exit_index=itp; exit_date=dtp; exit_price=entry*(1+tp_target); exit_return=tp_pct
+                            status='CLOSED_TP'; exit_index=itp; exit_date=dtp; exit_price=entry*(1+tp_target); exit_return=tp_pct; trade_end=itp
                         else:
-                            status='OPEN'; exit_index=None; exit_date=None; exit_price=None; exit_return=None
+                            status='OPEN'; exit_index=None; exit_date=None; exit_price=None; exit_return=None; trade_end=len(data)-1
+                    else:
+                        # BOTH: exit at TP or the configured time exit, whichever comes first.
+                        # On the time-exit day, an intraday TP touch is considered first.
+                        if itp is not None and (time_i is None or itp<=time_i):
+                            status='CLOSED_TP'; exit_index=itp; exit_date=dtp; exit_price=entry*(1+tp_target); exit_return=tp_pct; trade_end=itp
+                        elif time_i is not None:
+                            status='CLOSED_TIME'; exit_index=time_i; exit_date=data[time_i]['date']; exit_price=float(data[time_i]['ac'])
+                            exit_return=100*(exit_price/entry-1); trade_end=time_i
+                        else:
+                            status='OPEN'; exit_index=None; exit_date=None; exit_price=None; exit_return=None; trade_end=len(data)-1
+                    trade_window=data[i:trade_end+1]
+                    max_gain=100*(max(float(x['ah']) for x in trade_window)/entry-1)
+                    max_dd=100*(min(float(x['al']) for x in trade_window)/entry-1)
+                    # In Time Exit mode, report whether the optional TP level was touched
+                    # BEFORE the time exit; it does not close the recommendation.
+                    tp_before_exit=False
+                    tp_before_exit_sessions=None
+                    tp_before_exit_date=None
+                    if exit_mode in ('time','both'):
+                        target=entry*(1+tp_target)
+                        for jj in range(i+1,trade_end+1):
+                            if float(data[jj]['ah'])>=target:
+                                tp_before_exit=True;tp_before_exit_sessions=jj-i;tp_before_exit_date=data[jj]['date'];break
                     rows.append({
                         'index':i,
                         'date':data[i]['date'],'price':entry,'r2':r2,'slope':slope,
@@ -532,6 +570,7 @@ def create_app(db=None,test_config=None):
                         'hit20':h20,'hit20_date':d20,'hit50':h50,'hit50_date':d50,'hit100':h100,'hit100_date':d100,
                         'hit_tp':htp,'hit_tp_date':dtp,'tp_index':itp,
                         'exit_index':exit_index,'exit_date':exit_date,'exit_price':exit_price,'exit_return':exit_return,
+                        'tp_before_exit':tp_before_exit,'tp_before_exit_sessions':tp_before_exit_sessions,'tp_before_exit_date':tp_before_exit_date,
                         'age':len(data)-1-i,
                         'confirm':_egx_price_confirm(data,i),
                         'status':status,
@@ -547,6 +586,12 @@ def create_app(db=None,test_config=None):
                     tp_sessions=[x['hit_tp'] for x in rows if x['hit_tp'] is not None]
                     matured6=[x for x in rows if x['ret_6m'] is not None]
                     matured1y=[x for x in rows if x['ret_1y'] is not None]
+                    closed_time=[x for x in rows if x['status']=='CLOSED_TIME' and x['exit_return'] is not None]
+                    closed_tp=[x for x in rows if x['status']=='CLOSED_TP' and x['exit_return'] is not None]
+                    time_returns=[x['exit_return'] for x in closed_time]
+                    time_wins=sum(1 for v in time_returns if v>0)
+                    exit_returns=[x['exit_return'] for x in rows if x['status']!='OPEN' and x['exit_return'] is not None]
+                    exit_wins=sum(1 for v in exit_returns if v>0)
                     summary={
                         'count':n,
                         'hit50_pct':100*hit50/n,
@@ -554,6 +599,14 @@ def create_app(db=None,test_config=None):
                         'tp_hits':hit_tp,
                         'closed_n':closed_n,
                         'open_n':open_n,
+                        'time_avg_return':(sum(time_returns)/len(time_returns) if time_returns else None),
+                        'time_median_return':(sorted(time_returns)[len(time_returns)//2] if time_returns else None),
+                        'time_win_pct':(100*time_wins/len(time_returns) if time_returns else None),
+                        'tp_exit_n':len(closed_tp),
+                        'time_exit_n':len(closed_time),
+                        'exit_avg_return':(sum(exit_returns)/len(exit_returns) if exit_returns else None),
+                        'exit_median_return':(sorted(exit_returns)[len(exit_returns)//2] if exit_returns else None),
+                        'exit_win_pct':(100*exit_wins/len(exit_returns) if exit_returns else None),
                         'tp_median_sessions':sorted(tp_sessions)[len(tp_sessions)//2] if tp_sessions else None,
                         'avg3m':sum(x['ret_3m'] for x in rows if x['ret_3m'] is not None)/max(1,sum(x['ret_3m'] is not None for x in rows)),
                         'avg6m':sum(x['ret_6m'] for x in matured6)/len(matured6) if matured6 else None,
