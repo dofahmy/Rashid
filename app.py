@@ -361,6 +361,17 @@ def create_app(db=None,test_config=None):
 
         scope=request.args.get('scope','symbol').strip().lower()
         if scope not in ('symbol','market'): scope='symbol'
+        year_raw=request.args.get('year','all').strip().lower()
+        if year_raw in ('','all','0'):
+            analysis_year=None
+        else:
+            try:
+                analysis_year=int(year_raw)
+                if analysis_year<2000 or analysis_year>2100: analysis_year=None
+            except (TypeError,ValueError):
+                analysis_year=None
+        current_year=datetime.now(timezone.utc).year
+        analysis_years=list(range(current_year,2018,-1))
         symbol=request.args.get('symbol','').strip().upper().replace('.CA','')[:20]
         chart_symbol=request.args.get('chart_symbol','').strip().upper().replace('.CA','')[:20]
         try:r2_min=float(request.args.get('r2','0.791694'))
@@ -567,7 +578,7 @@ def create_app(db=None,test_config=None):
             parts.append('</svg>');return ''.join(parts)
 
 
-        def _portfolio_backtest(signal_rows, compact_data):
+        def _portfolio_backtest(signal_rows, compact_data, analysis_year=None):
             """10-slot portfolio. Each slot starts at 10% of capital.
             Natural setup exits release a slot to cash. If a new recommendation
             arrives while all 10 slots are occupied, the currently best-performing
@@ -602,6 +613,11 @@ def create_app(db=None,test_config=None):
             signals.sort(key=lambda x:(x['date'],x['symbol']))
             first_date=signals[0]['date']
             last_date=max((dates[-1] for dates,_prices in series.values()), default=first_date)
+            if analysis_year is not None:
+                year_start=f'{analysis_year:04d}-01-01'
+                year_end=f'{analysis_year:04d}-12-31'
+                first_date=max(first_date,year_start)
+                last_date=min(last_date,year_end)
             calendar=sorted(d for d in date_union if first_date<=d<=last_date)
             if not calendar:
                 return {},''
@@ -740,7 +756,13 @@ def create_app(db=None,test_config=None):
         try:
             if scope=='symbol':
                 if symbol:
-                    res=_analyse(symbol,symbol);rows=list(reversed(res['rows']));bars_count=len(res['data']);latest_date=res['data'][-1]['date'] if res['data'] else '';summary=_summarize(rows);chart_svg=_build_svg(res['data'],res['rows'])
+                    res=_analyse(symbol,symbol)
+                    filtered_rows=[x for x in res['rows'] if analysis_year is None or str(x.get('date','')).startswith(f'{analysis_year:04d}-')]
+                    rows=list(reversed(filtered_rows))
+                    bars_count=len(res['data'])
+                    latest_date=res['data'][-1]['date'] if res['data'] else ''
+                    summary=_summarize(rows)
+                    chart_svg=_build_svg(res['data'],filtered_rows)
             else:
                 if _egx_discover_sync is None:raise RuntimeError('نسخة monitor/worker.py الحالية لا تحتوي على اكتشاف سوق مصر.')
 
@@ -819,6 +841,8 @@ def create_app(db=None,test_config=None):
                 with egx_market_lock:
                     cached=dict(egx_market_cache.get(cache_key,cached))
                 rows=list(cached.get('rows') or [])
+                if analysis_year is not None:
+                    rows=[x for x in rows if str(x.get('date','')).startswith(f'{analysis_year:04d}-')]
                 market_symbols=int(cached.get('total') or 0)
                 market_errors=int(cached.get('errors') or 0)
                 latest_date=cached.get('latest_date') or ''
@@ -829,11 +853,12 @@ def create_app(db=None,test_config=None):
                 compact_data=dict(cached.get('data_map') or {})
                 summary=_summarize(rows)
                 if show_portfolio and rows:
-                    portfolio_summary,portfolio_svg=_portfolio_backtest(rows,compact_data)
+                    portfolio_summary,portfolio_svg=_portfolio_backtest(rows,compact_data,analysis_year)
 
                 if chart_symbol:
                     cres=_analyse(chart_symbol,lookup.get(chart_symbol,chart_symbol))
-                    chart_svg=_build_svg(cres['data'],cres['rows'])
+                    chart_rows=[x for x in cres['rows'] if analysis_year is None or str(x.get('date','')).startswith(f'{analysis_year:04d}-')]
+                    chart_svg=_build_svg(cres['data'],chart_rows)
                     bars_count=len(cres['data'])
                     company=lookup.get(chart_symbol,chart_symbol)
         except Exception as exc:
@@ -889,6 +914,7 @@ def create_app(db=None,test_config=None):
             return url_for('egx_lab',**args)
 
         return render_template('egx_lab.html',scope=scope,symbol=symbol,chart_symbol=chart_symbol,r2_min=r2_min,slope_min=slope_min,slope_max=slope_max,cooldown=cooldown,tp_pct=tp_pct,
+            analysis_year=analysis_year,analysis_years=analysis_years,
             confirm=confirm,rows=rows,error=error,latest_date=latest_date,bars_count=bars_count,summary=summary,company=company,chart_svg=chart_svg,
             exit_mode=exit_mode,time_exit_sessions=time_exit_sessions,exit_slope=exit_slope,exit_slope_op=exit_slope_op,market_symbols=market_symbols,market_errors=market_errors,chart_link=chart_link,sort_link=sort_link,sort_mark=sort_mark,sort_key=sort_key,sort_dir=sort_dir,show_portfolio=show_portfolio,portfolio_svg=portfolio_svg,portfolio_summary=portfolio_summary)
 
