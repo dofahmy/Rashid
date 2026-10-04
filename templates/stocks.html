@@ -12,19 +12,21 @@
 
 <div class="panel">
   <div class="actions">
-    <h2 style="margin:0">فحص السوق المصري · R² + Slope يومي</h2>
-    <span class="button secondary" style="cursor:default">الإشارات المسجلة: {{egx_total}}</span>
+    <h2 style="margin:0">بورصة مصر · الإشارات المفتوحة حاليًا</h2>
+    <span class="button secondary" style="cursor:default">مفتوح: {{egx_total}}</span>
+    <span class="button secondary" style="cursor:default">موجب الآن: {{egx_positive}}</span>
+    <span class="button secondary" style="cursor:default">متوسط الأداء: {{"%.2f"|format(egx_avg_return or 0)}}%</span>
   </div>
   <p class="muted">
-    دخول جديد فقط عند بداية الإشارة: R² ≥ 0.791694 و Slope ≥ 67.5062، مع نفس فلاتر السيولة والـ126 جلسة Cooldown المستخدمة في البحث.
-    العرض هنا للباك إند فقط ولا يرسل أي رسالة إلى تليجرام.
+    هذه الصفحة تعيد بناء إشارات R² + Slope التاريخية تلقائيًا، وليس فقط الإشارات التي ظهرت بعد تشغيل البوت.
+    «مفتوح» هنا يعني أن السهم لم يلمس هدف +50% منذ تاريخ الإشارة. الأداء محسوب حتى أحدث جلسة متاحة.
   </p>
   {% if egx_scan %}
-  <p class="muted">آخر فحص: {{egx_scan.finished_at or egx_scan.started_at}} · الحالة: {{egx_scan.status}} · إشارات جديدة في الفحص: {{egx_scan.new_plans}}</p>
+  <p class="muted">آخر فحص: {{egx_scan.finished_at or egx_scan.started_at}} · الحالة: {{egx_scan.status}} · أسهم فُحصت: {{egx_scan.ok}} / {{egx_scan.total}}</p>
   {% endif %}
   <div class="tablewrap">
     <table>
-      <thead><tr><th>السهم</th><th>الشركة</th><th>تاريخ الإشارة</th><th>سعر الإشارة</th><th>R²</th><th>Slope %</th><th>ADV20</th><th>Avg Vol20</th><th>الحالة</th></tr></thead>
+      <thead><tr><th>السهم</th><th>الشركة</th><th>تاريخ الإشارة</th><th>سعر الإشارة</th><th>آخر سعر</th><th>آخر جلسة</th><th>الأداء الآن</th><th>أقصى صعود</th><th>أقصى هبوط</th><th>العمر/جلسة</th><th>R²</th><th>Slope %</th></tr></thead>
       <tbody>
       {% for e in egx_signals %}
         <tr>
@@ -32,14 +34,17 @@
           <td>{{e.company}}</td>
           <td dir="ltr">{{e.signal_date}}</td>
           <td>{{"%.2f"|format(e.signal_price)}}</td>
+          <td>{{"%.2f"|format(e.current_price)}}</td>
+          <td dir="ltr">{{e.latest_date}}</td>
+          <td><strong>{{"%+.2f"|format(e.current_return_pct)}}%</strong></td>
+          <td>{{"%+.2f"|format(e.max_gain_pct)}}%</td>
+          <td>{{"%+.2f"|format(e.max_drawdown_pct)}}%</td>
+          <td>{{e.age_sessions}}</td>
           <td>{{"%.4f"|format(e.pre_trend_r2)}}</td>
           <td>{{"%.2f"|format(e.pre_trend_slope_pct)}}</td>
-          <td>{{"{:,.0f}".format(e.adv20 or 0)}}</td>
-          <td>{{"{:,.0f}".format(e.avgvol20 or 0)}}</td>
-          <td><span class="notice">NEW / ACTIVE</span></td>
         </tr>
       {% else %}
-        <tr><td colspan="9">لا توجد إشارات مصرية مسجلة بعد. شغّلي Monitor ليعمل فحص EGX اليومي.</td></tr>
+        <tr><td colspan="12">لم يكتمل فحص مصر التاريخي بعد. بعد أول EGX scan ستظهر هنا كل الإشارات المفتوحة الحالية مع تاريخها وأدائها.</td></tr>
       {% endfor %}
       </tbody>
     </table>
