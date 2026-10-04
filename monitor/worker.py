@@ -71,29 +71,58 @@ def _egx_daily_sync(symbol):
     if not res:return []
     z=res[0];ts=z.get('timestamp') or []
     q=(((z.get('indicators') or {}).get('quote') or [{}])[0])
-    adj=((z.get('indicators') or {}).get('adjclose') or [{}])[0].get('adjclose') or []
     opens=q.get('open') or [];highs=q.get('high') or [];lows=q.get('low') or []
     closes=q.get('close') or [];vols=q.get('volume') or []
     n=min(len(ts),len(opens),len(highs),len(lows),len(closes),len(vols))
-    rows=[]
+    raw=[]
     for i in range(n):
         vals=(opens[i],highs[i],lows[i],closes[i])
         if any(v is None for v in vals):continue
         try:o,h,l,c=map(float,vals);v=float(vols[i] or 0)
         except (TypeError,ValueError):continue
         if min(o,h,l,c)<=0:continue
-        ac=float(adj[i]) if i<len(adj) and adj[i] not in (None,0) else c
-        factor=ac/c if c else 1.0
-        rows.append({
-            'ts':int(ts[i]),'o':o,'h':h,'l':l,'c':c,'v':v,
-            'ac':ac,'ah':h*factor,'al':l*factor,
+        raw.append({
+            'ts':int(ts[i]),'ro':o,'rh':h,'rl':l,'rc':c,'v':v,
             'date':datetime.fromtimestamp(int(ts[i]),ZoneInfo(EGX_TZ)).date().isoformat(),
         })
-    rows.sort(key=lambda r:r['ts'])
-    # de-duplicate by local date, keep last
+    raw.sort(key=lambda r:r['ts'])
     dedup={}
-    for r in rows:dedup[r['date']]=r
-    return list(dedup.values())
+    for r in raw:dedup[r['date']]=r
+    raw=list(dedup.values())
+    if not raw:return []
+
+    # Yahoo EGX history can keep pre-corporate-action nominal prices while
+    # TradingView shows a continuous adjusted chart. Build a split/bonus-share
+    # continuous price series ourselves by stitching only very large overnight
+    # discontinuities. This keeps historical signal prices on today's scale.
+    common_factors=(0.10,0.20,0.25,1/3,0.40,0.50,2/3,0.75,0.80,
+                    1.25,4/3,1.50,2.0,2.5,3.0,4.0,5.0,10.0)
+    scales=[1.0]*len(raw)
+    cumulative=1.0
+    for i in range(len(raw)-2,-1,-1):
+        nxt=raw[i+1];cur=raw[i]
+        gap=float(nxt['ro'])/float(cur['rc']) if cur['rc'] else 1.0
+        # EGX ordinary daily gaps are much smaller; a >28% mechanical jump/drop
+        # is treated as a corporate-action boundary for continuity purposes.
+        if gap < 0.72 or gap > 1.38:
+            nearest=min(common_factors,key=lambda f:abs(gap-f)/f)
+            if abs(gap-nearest)/nearest <= 0.10:
+                gap=nearest
+            cumulative*=gap
+        scales[i]=cumulative
+
+    rows=[]
+    for r,scale in zip(raw,scales):
+        o=r['ro']*scale;h=r['rh']*scale;l=r['rl']*scale;c=r['rc']*scale
+        rows.append({
+            'ts':r['ts'],'date':r['date'],'v':r['v'],
+            # Continuous split/bonus-adjusted OHLC used by signal logic/display.
+            'o':o,'h':h,'l':l,'c':c,'ac':c,'ah':h,'al':l,
+            # Preserve actual Yahoo nominal prices for turnover diagnostics.
+            'raw_o':r['ro'],'raw_h':r['rh'],'raw_l':r['rl'],'raw_c':r['rc'],
+            'corp_scale':scale,
+        })
+    return rows
 
 def _egx_linreg(values,end_idx,window=EGX_LOOKBACK):
     # Previous window only; current bar excluded, exactly like the research script.
@@ -232,7 +261,7 @@ def _egx_analyze_signals(rows):
         slope,r2=_egx_linreg(ac,i)
         metrics.append((slope,r2))
         # Entry confirmation added to the standalone R2+Slope signal:
-        # 1) today's raw close must break above yesterday's raw high;
+        # 1) today's corporate-action-adjusted close must break above yesterday's adjusted high;
         # 2) today's candle must be positive (close > open);
         # 3) the real body must be larger than the upper wick:
         #    (close - open) > (high - close).
@@ -251,7 +280,7 @@ def _egx_analyze_signals(rows):
         r=rows[i]
         if r['c']<EGX_MIN_PRICE or i<21:continue
         prior=rows[i-20:i]
-        adv20=sum(x['c']*x['v'] for x in prior)/20
+        adv20=sum(x.get('raw_c',x['c'])*x['v'] for x in prior)/20
         avgvol20=sum(x['v'] for x in prior)/20
         if adv20<EGX_MIN_ADV20 or avgvol20<EGX_MIN_AVGVOL20:continue
         last_kept=i
