@@ -395,6 +395,16 @@ def create_app(db=None,test_config=None):
         except (TypeError,ValueError):exit_slope=100.0
         exit_slope_op=request.args.get('exit_slope_op','gte').strip().lower()
         if exit_slope_op not in ('gte','lte'): exit_slope_op='gte'
+
+        cci_enabled=request.args.get('cci_enabled','0')=='1'
+        try:cci_period=max(2,min(500,int(request.args.get('cci_period','20'))))
+        except (TypeError,ValueError):cci_period=20
+        try:cci_min=float(request.args.get('cci_min','-200'))
+        except (TypeError,ValueError):cci_min=-200.0
+        try:cci_max=float(request.args.get('cci_max','200'))
+        except (TypeError,ValueError):cci_max=200.0
+        if cci_max < cci_min:
+            cci_min,cci_max=cci_max,cci_min
         confirm=request.args.get('confirm','1')!='0'
         rows=[];error='';latest_date='';company='';bars_count=0;chart_svg='';market_errors=0;market_symbols=0;market_scan_status='';market_scan_progress=0;market_scan_error=''
         summary={};show_portfolio=request.args.get('portfolio','0')=='1';portfolio_svg='';portfolio_summary={};portfolio_ledger=[]
@@ -429,14 +439,31 @@ def create_app(db=None,test_config=None):
                 out[i]=(slope_pct,r2)
             return out
 
+        def _cci_series(data, period):
+            typical=[(float(x['ah'])+float(x['al'])+float(x['ac']))/3.0 for x in data]
+            vals=[]
+            for i in range(len(typical)):
+                if i+1<period:
+                    vals.append(None)
+                    continue
+                w=typical[i-period+1:i+1]
+                sma=sum(w)/period
+                md=sum(abs(v-sma) for v in w)/period
+                vals.append(0.0 if md==0 else (typical[i]-sma)/(0.015*md))
+            return vals
+
         def _analyse(symbol_code, company_name=''):
             data=_egx_daily_sync(symbol_code)
             if not data:return {'symbol':symbol_code,'company':company_name,'data':[],'rows':[]}
             metrics=_fast_metrics(data)
+            cci_values=_cci_series(data,cci_period)
             rule=[]
             for i,(slope,r2) in enumerate(metrics):
                 ok=(slope is not None and r2 is not None and r2>=r2_min and slope>=slope_min and slope<=slope_max)
                 if confirm:ok=ok and _egx_price_confirm(data,i)
+                if cci_enabled:
+                    cv=cci_values[i]
+                    ok=ok and cv is not None and cci_min<=cv<=cci_max
                 rule.append(bool(ok))
             activations=[i for i,x in enumerate(rule) if x and (i==0 or not rule[i-1])]
 
@@ -526,6 +553,8 @@ def create_app(db=None,test_config=None):
                     'hit20':h20,'hit20_date':d20,'hit50':h50,'hit50_date':d50,'hit100':h100,'hit100_date':d100,
                     'hit_tp':htp,'hit_tp_date':dtp,'tp_index':itp,'exit_index':exit_index,'exit_date':exit_date,
                     'exit_price':exit_price,'exit_return':exit_return,'tp_before_exit':tp_before_exit,
+                    'entry_cci':cci_values[i],
+                    'exit_cci':(cci_values[exit_index] if exit_index is not None and exit_index<len(cci_values) else None),
                     'exit_slope_value':(metrics[exit_index][0] if exit_index is not None and metrics[exit_index][0] is not None else None),
                     'tp_before_exit_sessions':tp_before_exit_sessions,'tp_before_exit_date':tp_before_exit_date,
                     'trade_duration':(exit_index-i if exit_index is not None else len(data)-1-i),
@@ -831,7 +860,7 @@ def create_app(db=None,test_config=None):
                 cache_key=(
                     round(r2_min,8),round(slope_min,6),round(slope_max,6),cooldown,
                     round(tp_pct,6),exit_mode,time_exit_sessions,round(exit_slope,6),
-                    exit_slope_op,bool(confirm)
+                    exit_slope_op,bool(confirm),bool(cci_enabled),cci_period,round(cci_min,6),round(cci_max,6)
                 )
                 force=request.args.get('force_scan','0')=='1'
 
@@ -940,6 +969,8 @@ def create_app(db=None,test_config=None):
             'exit_return':lambda x:x.get('exit_return'),
             'exit_price':lambda x:x.get('exit_price'),
             'exit_slope':lambda x:x.get('exit_slope_value'),
+            'entry_cci':lambda x:x.get('entry_cci'),
+            'exit_cci':lambda x:x.get('exit_cci'),
             'price':lambda x:x.get('price'),
             'r2':lambda x:x.get('r2'),
             'slope':lambda x:x.get('slope'),
@@ -978,7 +1009,9 @@ def create_app(db=None,test_config=None):
         return render_template('egx_lab.html',scope=scope,symbol=symbol,chart_symbol=chart_symbol,r2_min=r2_min,slope_min=slope_min,slope_max=slope_max,cooldown=cooldown,tp_pct=tp_pct,
             analysis_year=analysis_year,analysis_years=analysis_years,
             confirm=confirm,rows=rows,error=error,latest_date=latest_date,bars_count=bars_count,summary=summary,company=company,chart_svg=chart_svg,
-            exit_mode=exit_mode,time_exit_sessions=time_exit_sessions,exit_slope=exit_slope,exit_slope_op=exit_slope_op,market_symbols=market_symbols,market_errors=market_errors,chart_link=chart_link,sort_link=sort_link,sort_mark=sort_mark,sort_key=sort_key,sort_dir=sort_dir,show_portfolio=show_portfolio,portfolio_svg=portfolio_svg,portfolio_summary=portfolio_summary,portfolio_ledger=portfolio_ledger)
+            exit_mode=exit_mode,time_exit_sessions=time_exit_sessions,exit_slope=exit_slope,exit_slope_op=exit_slope_op,
+            cci_enabled=cci_enabled,cci_period=cci_period,cci_min=cci_min,cci_max=cci_max,
+            market_symbols=market_symbols,market_errors=market_errors,chart_link=chart_link,sort_link=sort_link,sort_mark=sort_mark,sort_key=sort_key,sort_dir=sort_dir,show_portfolio=show_portfolio,portfolio_svg=portfolio_svg,portfolio_summary=portfolio_summary,portfolio_ledger=portfolio_ledger)
 
 
     @app.get('/stocks/<int:plan_id>')
