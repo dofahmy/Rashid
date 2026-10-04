@@ -82,7 +82,18 @@
 <label>Time Exit جلسة<input name="time_exit" type="number" min="1" max="2000" step="1" value="{{time_exit_sessions}}" required></label>
 <label>شرط Slope للخروج<select name="exit_slope_op"><option value="gte" {{'selected' if exit_slope_op=='gte' else ''}}>Slope ≥</option><option value="lte" {{'selected' if exit_slope_op=='lte' else ''}}>Slope ≤</option></select></label>
 <label>قيمة Slope Exit<input name="exit_slope" type="number" step="0.0001" value="{{exit_slope}}" required></label>
-<label style="display:flex;gap:8px;align-items:center"><input name="confirm" type="checkbox" value="1" {{'checked' if confirm else ''}}>طبّق شروط الشمعة الحالية</label>{% if not confirm %}<input type="hidden" name="confirm" value="0">{% endif %}
+<label style="display:flex;gap:8px;align-items:center"><input name="confirm" type="checkbox" value="1" {{'checked' if confirm else ''}}>طبّق شروط الشمعة الحالية</label>
+{% if not confirm %}<input type="hidden" name="confirm" value="0">{% endif %}
+
+<label style="display:flex;gap:8px;align-items:center">
+  <input name="cci_enabled" type="checkbox" value="1" {{'checked' if cci_enabled else ''}}>
+  فعّل فلتر CCI
+</label>
+{% if not cci_enabled %}<input type="hidden" name="cci_enabled" value="0">{% endif %}
+<label>CCI Period<input name="cci_period" type="number" min="2" max="500" step="1" value="{{cci_period}}"></label>
+<label>CCI ≥<input name="cci_min" type="number" step="0.1" value="{{cci_min}}"></label>
+<label>CCI ≤<input name="cci_max" type="number" step="0.1" value="{{cci_max}}"></label>
+
 <button>حلّل التاريخ</button>
 </form>
 <p class="muted">اختاري «سهم واحد» لتحليل سهم ورسم الشارت مباشرة، أو «السوق المصري كله» لاستخراج كل الإشارات بنفس القيم. في وضع السوق كله لا يُرسم شارت تلقائيًا؛ اضغطي «عرض الشارت» على أي إشارة وسيظهر شارت سهمها وكل إشاراته بنفس إعدادات الاختبار. شرط الدخول الآن يستخدم نطاق Slope من الحد الأدنى إلى الحد الأقصى. ويمكن الخروج بـ TP أو Time أو Slope أو أول واحد منهم حسب الاختيار. لا تُفتح توصية جديدة على نفس السهم أثناء وجود توصية مفتوحة. فلتر CCI اختياري: لو غير مفعّل لا يدخل في اختيار الإشارة، لكن قيمة CCI تظل محسوبة لكل توصية وتظهر وقت الشراء ووقت البيع. عند اختيار سنة معينة، تظهر فقط الإشارات التي بدأ دخولها داخل هذه السنة؛ وأداء المحفظة يُحسب داخل نفس السنة حتى آخر جلسة تداول فيها. أما «كل التاريخ» فيستخدم كل الإشارات وكل الفترة المتاحة.</p>
