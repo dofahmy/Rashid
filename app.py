@@ -347,6 +347,94 @@ def create_app(db=None,test_config=None):
             hold_days=hold_days,hold_min_profit=hold_min_profit,send_minimum_score=send_minimum_score,labels=LABELS,stock_map=stocks_by_symbol,order_map=order_map,
             egx_signals=egx_signals,egx_total=egx_total,egx_positive=egx_positive,egx_avg_return=egx_avg_return,egx_scan=egx_scan,total=total,page=page,pages=pages,link=link,local=local)
 
+    @app.get('/egx-lab')
+    @auth
+    def egx_lab():
+        """Interactive historical EGX R²/Slope signal explorer for one symbol."""
+        symbol=request.args.get('symbol','').strip().upper().replace('.CA','')[:20]
+        try:r2_min=float(request.args.get('r2','0.791694'))
+        except (TypeError,ValueError):r2_min=0.791694
+        try:slope_min=float(request.args.get('slope','67.5062'))
+        except (TypeError,ValueError):slope_min=67.5062
+        try:cooldown=max(0,min(1000,int(request.args.get('cooldown','126'))))
+        except (TypeError,ValueError):cooldown=126
+        try:tp_pct=max(0.1,min(1000.0,float(request.args.get('tp','50'))))
+        except (TypeError,ValueError):tp_pct=50.0
+        tp_target=tp_pct/100.0
+        confirm=request.args.get('confirm','1')!='0'
+        rows=[];error='';latest_date='';company='';bars_count=0
+        summary={}
+        if symbol:
+            try:
+                from monitor.worker import _egx_daily_sync, _egx_linreg, _egx_price_confirm
+                data=_egx_daily_sync(symbol)
+                bars_count=len(data)
+                if not data:
+                    raise RuntimeError('لم يرجع Yahoo تاريخًا يوميًا لهذا الرمز.')
+                latest_date=data[-1]['date']
+                ac=[float(x['ac']) for x in data]
+                metrics=[];rule=[]
+                for i in range(len(data)):
+                    slope,r2=_egx_linreg(ac,i)
+                    metrics.append((slope,r2))
+                    ok=(slope is not None and r2 is not None and r2>=r2_min and slope>=slope_min)
+                    if confirm:ok=ok and _egx_price_confirm(data,i)
+                    rule.append(bool(ok))
+                activations=[i for i,x in enumerate(rule) if x and (i==0 or not rule[i-1])]
+                kept=[];last=-10**9
+                for i in activations:
+                    if i-last<cooldown:continue
+                    kept.append(i);last=i
+                def ret_at(i,n):
+                    j=i+n
+                    if j>=len(data):return None
+                    return 100*(float(data[j]['ac'])/float(data[i]['ac'])-1)
+                def fmt_hit(i,target):
+                    entry=float(data[i]['ac'])
+                    for j in range(i+1,len(data)):
+                        if float(data[j]['ah'])>=entry*(1+target):
+                            return j-i,data[j]['date']
+                    return None,None
+                for i in kept:
+                    entry=float(data[i]['ac']);future=data[i:]
+                    max_gain=100*(max(float(x['ah']) for x in future)/entry-1)
+                    max_dd=100*(min(float(x['al']) for x in future)/entry-1)
+                    h20,d20=fmt_hit(i,.20);h50,d50=fmt_hit(i,.50);h100,d100=fmt_hit(i,1.00)
+                    htp,dtp=fmt_hit(i,tp_target)
+                    slope,r2=metrics[i]
+                    rows.append({
+                        'date':data[i]['date'],'price':entry,'r2':r2,'slope':slope,
+                        'ret_1m':ret_at(i,21),'ret_3m':ret_at(i,63),'ret_6m':ret_at(i,126),'ret_1y':ret_at(i,252),
+                        'current_return':100*(float(data[-1]['ac'])/entry-1),
+                        'max_gain':max_gain,'max_dd':max_dd,
+                        'hit20':h20,'hit20_date':d20,'hit50':h50,'hit50_date':d50,'hit100':h100,'hit100_date':d100,
+                        'hit_tp':htp,'hit_tp_date':dtp,
+                        'age':len(data)-1-i,
+                        'confirm':_egx_price_confirm(data,i),
+                    })
+                rows.reverse()
+                n=len(rows)
+                if n:
+                    hit50=sum(1 for x in rows if x['hit50'] is not None)
+                    hit_tp=sum(1 for x in rows if x['hit_tp'] is not None)
+                    tp_sessions=[x['hit_tp'] for x in rows if x['hit_tp'] is not None]
+                    matured6=[x for x in rows if x['ret_6m'] is not None]
+                    matured1y=[x for x in rows if x['ret_1y'] is not None]
+                    summary={
+                        'count':n,
+                        'hit50_pct':100*hit50/n,
+                        'hit_tp_pct':100*hit_tp/n,
+                        'tp_hits':hit_tp,
+                        'tp_median_sessions':sorted(tp_sessions)[len(tp_sessions)//2] if tp_sessions else None,
+                        'avg3m':sum(x['ret_3m'] for x in rows if x['ret_3m'] is not None)/max(1,sum(x['ret_3m'] is not None for x in rows)),
+                        'avg6m':sum(x['ret_6m'] for x in matured6)/len(matured6) if matured6 else None,
+                        'avg1y':sum(x['ret_1y'] for x in matured1y)/len(matured1y) if matured1y else None,
+                    }
+            except Exception as exc:
+                error=f'{type(exc).__name__}: {exc}'
+        return render_template('egx_lab.html',symbol=symbol,r2_min=r2_min,slope_min=slope_min,cooldown=cooldown,tp_pct=tp_pct,
+            confirm=confirm,rows=rows,error=error,latest_date=latest_date,bars_count=bars_count,summary=summary,company=company)
+
     @app.get('/stocks/<int:plan_id>')
     @auth
     def stock_plan(plan_id):
