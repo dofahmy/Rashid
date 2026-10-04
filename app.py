@@ -361,17 +361,25 @@ def create_app(db=None,test_config=None):
         chart_symbol=request.args.get('chart_symbol','').strip().upper().replace('.CA','')[:20]
         try:r2_min=float(request.args.get('r2','0.791694'))
         except (TypeError,ValueError):r2_min=0.791694
-        try:slope_min=float(request.args.get('slope','67.5062'))
+        try:slope_min=float(request.args.get('slope_min',request.args.get('slope','67.5062')))
         except (TypeError,ValueError):slope_min=67.5062
+        try:slope_max=float(request.args.get('slope_max','999999'))
+        except (TypeError,ValueError):slope_max=999999.0
+        if slope_max < slope_min:
+            slope_min,slope_max=slope_max,slope_min
         try:cooldown=max(0,min(1000,int(request.args.get('cooldown','126'))))
         except (TypeError,ValueError):cooldown=126
         try:tp_pct=max(0.1,min(1000.0,float(request.args.get('tp','50'))))
         except (TypeError,ValueError):tp_pct=50.0
         tp_target=tp_pct/100.0
         exit_mode=request.args.get('exit_mode','tp').strip().lower()
-        if exit_mode not in ('tp','time','both'): exit_mode='tp'
+        if exit_mode not in ('tp','time','both','slope','all'): exit_mode='tp'
         try:time_exit_sessions=max(1,min(2000,int(request.args.get('time_exit','126'))))
         except (TypeError,ValueError):time_exit_sessions=126
+        try:exit_slope=float(request.args.get('exit_slope','100'))
+        except (TypeError,ValueError):exit_slope=100.0
+        exit_slope_op=request.args.get('exit_slope_op','gte').strip().lower()
+        if exit_slope_op not in ('gte','lte'): exit_slope_op='gte'
         confirm=request.args.get('confirm','1')!='0'
         rows=[];error='';latest_date='';company='';bars_count=0;chart_svg='';market_errors=0;market_symbols=0
         summary={}
@@ -412,7 +420,7 @@ def create_app(db=None,test_config=None):
             metrics=_fast_metrics(data)
             rule=[]
             for i,(slope,r2) in enumerate(metrics):
-                ok=(slope is not None and r2 is not None and r2>=r2_min and slope>=slope_min)
+                ok=(slope is not None and r2 is not None and r2>=r2_min and slope>=slope_min and slope<=slope_max)
                 if confirm:ok=ok and _egx_price_confirm(data,i)
                 rule.append(bool(ok))
             activations=[i for i,x in enumerate(rule) if x and (i==0 or not rule[i-1])]
@@ -422,15 +430,26 @@ def create_app(db=None,test_config=None):
                 for jj in range(entry_i+1,len(data)):
                     if float(data[jj]['ah'])>=target:return jj
                 return None
-            def exit_idx_for(entry_i):
+            def first_slope_exit_index(entry_i):
+                for jj in range(entry_i+1,len(data)):
+                    sv,_rv=metrics[jj]
+                    if sv is None:continue
+                    if exit_slope_op=='gte' and sv>=exit_slope:return jj
+                    if exit_slope_op=='lte' and sv<=exit_slope:return jj
+                return None
+            def exit_candidates(entry_i):
                 tp_i=first_tp_index(entry_i)
                 time_i=entry_i+time_exit_sessions
                 time_i=time_i if time_i<len(data) else None
-                if exit_mode=='time':return time_i
-                if exit_mode=='tp':return tp_i
-                if tp_i is None:return time_i
-                if time_i is None:return tp_i
-                return tp_i if tp_i<=time_i else time_i
+                slope_i=first_slope_exit_index(entry_i)
+                if exit_mode=='tp':return [('tp',tp_i)]
+                if exit_mode=='time':return [('time',time_i)]
+                if exit_mode=='both':return [('tp',tp_i),('time',time_i)]
+                if exit_mode=='slope':return [('slope',slope_i)]
+                return [('tp',tp_i),('time',time_i),('slope',slope_i)]
+            def exit_idx_for(entry_i):
+                vals=[idx for _kind,idx in exit_candidates(entry_i) if idx is not None]
+                return min(vals) if vals else None
 
             kept=[];last_entry=-10**9;position_open_until=-1
             for i in activations:
@@ -458,23 +477,24 @@ def create_app(db=None,test_config=None):
                 slope,r2=metrics[i]
                 current_return=100*(float(data[-1]['ac'])/entry-1)
                 time_i=i+time_exit_sessions;time_i=time_i if time_i<len(data) else None
-                if exit_mode=='time':
-                    if time_i is not None:
-                        status='CLOSED_TIME';exit_index=time_i;exit_date=data[time_i]['date'];exit_price=float(data[time_i]['ac']);exit_return=100*(exit_price/entry-1);trade_end=time_i
-                    else:
-                        status='OPEN';exit_index=None;exit_date=None;exit_price=None;exit_return=None;trade_end=len(data)-1
-                elif exit_mode=='tp':
-                    if htp is not None:
-                        status='CLOSED_TP';exit_index=itp;exit_date=dtp;exit_price=entry*(1+tp_target);exit_return=tp_pct;trade_end=itp
-                    else:
-                        status='OPEN';exit_index=None;exit_date=None;exit_price=None;exit_return=None;trade_end=len(data)-1
+                slope_i=first_slope_exit_index(i)
+                candidates=exit_candidates(i)
+                valid=[(kind,idx) for kind,idx in candidates if idx is not None]
+                chosen_kind=None;chosen_idx=None
+                if valid:
+                    # Earliest exit wins. If TP and another exit happen on the same
+                    # daily bar, TP gets priority because intraday high can hit it
+                    # before the close-based time/slope exit.
+                    priority={'tp':0,'slope':1,'time':2}
+                    chosen_kind,chosen_idx=min(valid,key=lambda kv:(kv[1],priority.get(kv[0],9)))
+                if chosen_kind=='tp':
+                    status='CLOSED_TP';exit_index=chosen_idx;exit_date=data[chosen_idx]['date'];exit_price=entry*(1+tp_target);exit_return=tp_pct;trade_end=chosen_idx
+                elif chosen_kind=='time':
+                    status='CLOSED_TIME';exit_index=chosen_idx;exit_date=data[chosen_idx]['date'];exit_price=float(data[chosen_idx]['ac']);exit_return=100*(exit_price/entry-1);trade_end=chosen_idx
+                elif chosen_kind=='slope':
+                    status='CLOSED_SLOPE';exit_index=chosen_idx;exit_date=data[chosen_idx]['date'];exit_price=float(data[chosen_idx]['ac']);exit_return=100*(exit_price/entry-1);trade_end=chosen_idx
                 else:
-                    if itp is not None and (time_i is None or itp<=time_i):
-                        status='CLOSED_TP';exit_index=itp;exit_date=dtp;exit_price=entry*(1+tp_target);exit_return=tp_pct;trade_end=itp
-                    elif time_i is not None:
-                        status='CLOSED_TIME';exit_index=time_i;exit_date=data[time_i]['date'];exit_price=float(data[time_i]['ac']);exit_return=100*(exit_price/entry-1);trade_end=time_i
-                    else:
-                        status='OPEN';exit_index=None;exit_date=None;exit_price=None;exit_return=None;trade_end=len(data)-1
+                    status='OPEN';exit_index=None;exit_date=None;exit_price=None;exit_return=None;trade_end=len(data)-1
                 trade_window=data[i:trade_end+1]
                 max_gain=100*(max(float(x['ah']) for x in trade_window)/entry-1)
                 max_dd=100*(min(float(x['al']) for x in trade_window)/entry-1)
@@ -491,6 +511,7 @@ def create_app(db=None,test_config=None):
                     'hit20':h20,'hit20_date':d20,'hit50':h50,'hit50_date':d50,'hit100':h100,'hit100_date':d100,
                     'hit_tp':htp,'hit_tp_date':dtp,'tp_index':itp,'exit_index':exit_index,'exit_date':exit_date,
                     'exit_price':exit_price,'exit_return':exit_return,'tp_before_exit':tp_before_exit,
+                    'exit_slope_value':(metrics[exit_index][0] if exit_index is not None and metrics[exit_index][0] is not None else None),
                     'tp_before_exit_sessions':tp_before_exit_sessions,'tp_before_exit_date':tp_before_exit_date,
                     'age':len(data)-1-i,'confirm':_egx_price_confirm(data,i),'status':status,
                 })
@@ -503,12 +524,13 @@ def create_app(db=None,test_config=None):
             closed_n=sum(1 for x in items if x['status']!='OPEN');open_n=n-closed_n
             closed_time=[x for x in items if x['status']=='CLOSED_TIME' and x['exit_return'] is not None]
             closed_tp=[x for x in items if x['status']=='CLOSED_TP' and x['exit_return'] is not None]
+            closed_slope=[x for x in items if x['status']=='CLOSED_SLOPE' and x['exit_return'] is not None]
             time_returns=[x['exit_return'] for x in closed_time];exit_returns=[x['exit_return'] for x in items if x['status']!='OPEN' and x['exit_return'] is not None]
             tp_sessions=[x['hit_tp'] for x in items if x['hit_tp'] is not None]
             r3=[x['ret_3m'] for x in items if x['ret_3m'] is not None];r6=[x['ret_6m'] for x in items if x['ret_6m'] is not None];r1=[x['ret_1y'] for x in items if x['ret_1y'] is not None]
             return {'count':n,'hit50_pct':100*hit50/n,'hit_tp_pct':100*hit_tp/n,'tp_hits':hit_tp,'closed_n':closed_n,'open_n':open_n,
                 'time_avg_return':sum(time_returns)/len(time_returns) if time_returns else None,'time_median_return':sorted(time_returns)[len(time_returns)//2] if time_returns else None,
-                'time_win_pct':100*sum(v>0 for v in time_returns)/len(time_returns) if time_returns else None,'tp_exit_n':len(closed_tp),'time_exit_n':len(closed_time),
+                'time_win_pct':100*sum(v>0 for v in time_returns)/len(time_returns) if time_returns else None,'tp_exit_n':len(closed_tp),'time_exit_n':len(closed_time),'slope_exit_n':len(closed_slope),
                 'exit_avg_return':sum(exit_returns)/len(exit_returns) if exit_returns else None,'exit_median_return':sorted(exit_returns)[len(exit_returns)//2] if exit_returns else None,
                 'exit_win_pct':100*sum(v>0 for v in exit_returns)/len(exit_returns) if exit_returns else None,'tp_median_sessions':sorted(tp_sessions)[len(tp_sessions)//2] if tp_sessions else None,
                 'avg3m':sum(r3)/len(r3) if r3 else None,'avg6m':sum(r6)/len(r6) if r6 else None,'avg1y':sum(r1)/len(r1) if r1 else None}
@@ -529,10 +551,10 @@ def create_app(db=None,test_config=None):
                 parts.append(f'<line x1="{ml}" y1="{y:.2f}" x2="{width-mr}" y2="{y:.2f}" stroke="#e9edf5"/><text x="{ml-8}" y="{y+4:.2f}" text-anchor="end" font-size="11" fill="#60708a">{val:.2f}</text>')
             parts.append(f'<path d="{path}" fill="none" stroke="#0b5ed7" stroke-width="2.2"/>')
             for r in chart_rows:
-                i=r['index'];x=px(i);y=py(r['price']);status=r['status'];color='#0f9d58' if status=='CLOSED_TP' else ('#7c3aed' if status=='CLOSED_TIME' else '#ff8a00')
+                i=r['index'];x=px(i);y=py(r['price']);status=r['status'];color='#0f9d58' if status=='CLOSED_TP' else ('#7c3aed' if status=='CLOSED_TIME' else ('#dc2626' if status=='CLOSED_SLOPE' else '#ff8a00'))
                 parts.append(f'<circle cx="{x:.2f}" cy="{y:.2f}" r="5.5" fill="{color}" stroke="#fff" stroke-width="1.5"/><text x="{x:.2f}" y="{max(14,y-10):.2f}" text-anchor="middle" font-size="10" font-weight="700" fill="{color}">{_html.escape(r["date"][5:])}</text>')
                 if r['exit_index'] is not None:
-                    xi=px(r['exit_index']);yi=py(r['exit_price']);label='TP' if status=='CLOSED_TP' else 'TIME';ec='#14a44d' if status=='CLOSED_TP' else '#7c3aed'
+                    xi=px(r['exit_index']);yi=py(r['exit_price']);label='TP' if status=='CLOSED_TP' else ('SLOPE' if status=='CLOSED_SLOPE' else 'TIME');ec='#14a44d' if status=='CLOSED_TP' else ('#dc2626' if status=='CLOSED_SLOPE' else '#7c3aed')
                     parts.append(f'<line x1="{x:.2f}" y1="{y:.2f}" x2="{xi:.2f}" y2="{yi:.2f}" stroke="{ec}" stroke-width="2"/><circle cx="{xi:.2f}" cy="{yi:.2f}" r="5.5" fill="{ec}" stroke="#fff"/><text x="{xi:.2f}" y="{min(height-6,yi+16):.2f}" text-anchor="middle" font-size="10" fill="{ec}">{label}</text>')
                 else:
                     x2=px(len(data)-1);y2=py(data[-1]['ac'])
@@ -566,9 +588,9 @@ def create_app(db=None,test_config=None):
             args=request.args.to_dict();args['scope']='market';args['chart_symbol']=row['symbol'];args.pop('symbol',None)
             return url_for('egx_lab',**args)
 
-        return render_template('egx_lab.html',scope=scope,symbol=symbol,chart_symbol=chart_symbol,r2_min=r2_min,slope_min=slope_min,cooldown=cooldown,tp_pct=tp_pct,
+        return render_template('egx_lab.html',scope=scope,symbol=symbol,chart_symbol=chart_symbol,r2_min=r2_min,slope_min=slope_min,slope_max=slope_max,cooldown=cooldown,tp_pct=tp_pct,
             confirm=confirm,rows=rows,error=error,latest_date=latest_date,bars_count=bars_count,summary=summary,company=company,chart_svg=chart_svg,
-            exit_mode=exit_mode,time_exit_sessions=time_exit_sessions,market_symbols=market_symbols,market_errors=market_errors,chart_link=chart_link)
+            exit_mode=exit_mode,time_exit_sessions=time_exit_sessions,exit_slope=exit_slope,exit_slope_op=exit_slope_op,market_symbols=market_symbols,market_errors=market_errors,chart_link=chart_link)
 
 
     @app.get('/stocks/<int:plan_id>')
