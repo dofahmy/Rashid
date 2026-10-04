@@ -7,7 +7,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 from sqlalchemy import select, delete, func, case, text
 from core import database, now
-from .models import Stock, Candle, Plan, Scan, OPEN, EgxSignal
+from .models import Stock, Candle, Plan, Scan, OPEN, EgxSignal, EgxOpenSignal
 from .engine import new_plan, advance, policy
 from .strategy import clean, local, CONFIG, COMMODITY_MARKETS, evaluate
 from .provider import YahooProvider, TwelveDataCommodityProvider, FeedError
@@ -109,26 +109,28 @@ def _egx_linreg(values,end_idx,window=EGX_LOOKBACK):
     slope_pct=100*(b*(window-1))/ym
     return slope_pct,r2
 
-def _egx_live_signal(rows):
-    if len(rows)<EGX_LOOKBACK+21:return None
+def _egx_analyze_signals(rows):
+    """Rebuild independent historical signals and return the ones still OPEN now.
+
+    OPEN here means the +50% target has never been touched since the signal.
+    Performance uses adjusted prices so corporate actions do not mechanically
+    distort the return calculation; the displayed entry/current prices remain raw.
+    """
+    if len(rows)<EGX_LOOKBACK+21:
+        return {'open':[], 'latest_activation':None}
     ac=[r['ac'] for r in rows]
-    valid=[]
-    rule=[]
-    metrics=[]
+    rule=[];metrics=[]
     for i,r in enumerate(rows):
         slope,r2=_egx_linreg(ac,i)
         metrics.append((slope,r2))
-        ok=bool(slope is not None and r2 is not None and r2>=EGX_R2_MIN and slope>=EGX_SLOPE_MIN)
-        rule.append(ok)
+        rule.append(bool(slope is not None and r2 is not None and r2>=EGX_R2_MIN and slope>=EGX_SLOPE_MIN))
     new_rule=[rule[i] and (i==0 or not rule[i-1]) for i in range(len(rule))]
-    last_kept=-10**9
-    kept=[]
+    last_kept=-10**9;kept=[]
     for i,is_new in enumerate(new_rule):
         if not is_new:continue
         if i-last_kept<EGX_COOLDOWN:continue
         r=rows[i]
-        if r['c']<EGX_MIN_PRICE:continue
-        if i<21:continue
+        if r['c']<EGX_MIN_PRICE or i<21:continue
         prior=rows[i-20:i]
         adv20=sum(x['c']*x['v'] for x in prior)/20
         avgvol20=sum(x['v'] for x in prior)/20
@@ -136,18 +138,37 @@ def _egx_live_signal(rows):
         last_kept=i
         slope,r2=metrics[i]
         kept.append((i,adv20,avgvol20,slope,r2))
-    if not kept:return None
-    i,adv20,avgvol20,slope,r2=kept[-1]
-    # Live scanner only inserts when the newest completed daily bar itself is the kept activation bar.
-    if i!=len(rows)-1:return None
-    r=rows[i]
-    return {
-        'symbol_date':r['date'],'signal_ts':r['ts'],'signal_price':r['c'],
-        'r2':r2,'slope':slope,'adv20':adv20,'avgvol20':avgvol20,
-    }
+
+    open_rows=[]
+    latest=rows[-1]
+    for i,adv20,avgvol20,slope,r2 in kept:
+        sig=rows[i];entry_adj=float(sig['ac'])
+        if entry_adj<=0:continue
+        future=rows[i:]
+        hit50=any(float(x['ah']) >= entry_adj*1.50 for x in future)
+        if hit50:continue
+        open_rows.append({
+            'signal_date':sig['date'],'signal_ts':sig['ts'],
+            'signal_price':sig['c'],'signal_adj_price':entry_adj,
+            'r2':r2,'slope':slope,'adv20':adv20,'avgvol20':avgvol20,
+            'latest_date':latest['date'],'current_price':latest['c'],
+            'current_return_pct':100*(float(latest['ac'])/entry_adj-1),
+            'max_gain_pct':100*(max(float(x['ah']) for x in future)/entry_adj-1),
+            'max_drawdown_pct':100*(min(float(x['al']) for x in future)/entry_adj-1),
+            'age_sessions':len(rows)-1-i,
+        })
+
+    latest_activation=None
+    if kept and kept[-1][0]==len(rows)-1:
+        i,adv20,avgvol20,slope,r2=kept[-1];r=rows[i]
+        latest_activation={
+            'symbol_date':r['date'],'signal_ts':r['ts'],'signal_price':r['c'],
+            'r2':r2,'slope':slope,'adv20':adv20,'avgvol20':avgvol20,
+        }
+    return {'open':open_rows,'latest_activation':latest_activation}
 
 async def scan_egx_daily(DB,clock):
-    """Daily Egypt scanner. Saves backend rows only; never queues Telegram messages."""
+    """Daily Egypt scan + historical OPEN backfill for the backend page."""
     boundary=int(clock)//86400*86400
     with DB.begin() as s:
         scan=Scan(market='EG',boundary=boundary,status='running');s.add(scan);s.flush();scan_id=scan.id
@@ -159,19 +180,35 @@ async def scan_egx_daily(DB,clock):
             async with sem:
                 try:
                     rows=await asyncio.to_thread(_egx_daily_sync,symbol)
-                    return symbol,company,_egx_live_signal(rows),None
+                    return symbol,company,_egx_analyze_signals(rows),None
                 except Exception as exc:
                     return symbol,company,None,type(exc).__name__
         tasks=[asyncio.create_task(one(item)) for item in symbols]
         counts={'total':len(tasks),'ok':0,'errors':0,'new_plans':0,'transitions':0}
+        open_total=0
         for n,task in enumerate(asyncio.as_completed(tasks),1):
-            symbol,company,signal,error=await task
+            symbol,company,analysis,error=await task
             if error:
                 counts['errors']+=1
             else:
                 counts['ok']+=1
-                if signal:
-                    with DB.begin() as s:
+                opens=analysis['open']
+                open_total+=len(opens)
+                with DB.begin() as s:
+                    # Rebuild this symbol's current OPEN rows every scan.
+                    s.execute(delete(EgxOpenSignal).where(EgxOpenSignal.symbol==symbol))
+                    for e in opens:
+                        s.add(EgxOpenSignal(
+                            symbol=symbol,company=company,signal_date=e['signal_date'],
+                            signal_ts=e['signal_ts'],signal_price=e['signal_price'],
+                            signal_adj_price=e['signal_adj_price'],pre_trend_r2=e['r2'],
+                            pre_trend_slope_pct=e['slope'],adv20=e['adv20'],avgvol20=e['avgvol20'],
+                            latest_date=e['latest_date'],current_price=e['current_price'],
+                            current_return_pct=e['current_return_pct'],max_gain_pct=e['max_gain_pct'],
+                            max_drawdown_pct=e['max_drawdown_pct'],age_sessions=e['age_sessions'],updated_at=now()))
+
+                    signal=analysis['latest_activation']
+                    if signal:
                         exists=s.scalar(select(func.count()).select_from(EgxSignal).where(
                             EgxSignal.symbol==symbol,EgxSignal.signal_date==signal['symbol_date']))
                         if not exists:
@@ -181,14 +218,14 @@ async def scan_egx_daily(DB,clock):
                                 pre_trend_r2=signal['r2'],pre_trend_slope_pct=signal['slope'],
                                 adv20=signal['adv20'],avgvol20=signal['avgvol20']))
                             counts['new_plans']+=1
-            if n%50==0:log.info('EGX daily progress %s/%s',n,len(tasks))
+            if n%25==0:log.info('EGX daily progress %s/%s open=%s',n,len(tasks),open_total)
         with DB.begin() as s:
             scan=s.get(Scan,scan_id)
             for k,v in counts.items():setattr(scan,k,v)
             scan.status='partial' if counts['errors'] else 'complete'
             scan.finished_at=now()
-            scan.summary_json=json.dumps({'scanner':'EGX_R2_SLOPE_DAILY','new_signals':counts['new_plans']})
-        log.info('EGX daily scan %s',counts)
+            scan.summary_json=json.dumps({'scanner':'EGX_R2_SLOPE_DAILY','new_signals':counts['new_plans'],'open_signals':open_total})
+        log.info('EGX daily scan %s open_signals=%s',counts,open_total)
     except Exception as exc:
         with DB.begin() as s:
             scan=s.get(Scan,scan_id)
@@ -204,6 +241,7 @@ def egx_due(clock):
 
 def initialize(DB):
     EgxSignal.__table__.create(bind=DB.kw['bind'],checkfirst=True)
+    EgxOpenSignal.__table__.create(bind=DB.kw['bind'],checkfirst=True)
     universe=json.loads((DATA/'universe.json').read_text(encoding='utf-8'))
     counts={m:sum(r['market_key']==m for r in universe) for m in ('SA','US')}
     if counts!={'SA':375,'US':5691} or len({r['symbol'] for r in universe})!=6066:
