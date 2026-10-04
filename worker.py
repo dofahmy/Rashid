@@ -1,12 +1,13 @@
 """Railway worker: python -m monitor.worker [--init-only|--once]."""
-import argparse, asyncio, contextlib, json, logging, os, time
+import argparse, asyncio, contextlib, json, logging, os, time, math
+import urllib.request, urllib.error
 from collections import Counter, defaultdict
 from pathlib import Path
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from sqlalchemy import select, delete, func, case, text
 from core import database, now
-from .models import Stock, Candle, Plan, Scan, OPEN
+from .models import Stock, Candle, Plan, Scan, OPEN, EgxSignal
 from .engine import new_plan, advance, policy
 from .strategy import clean, local, CONFIG, COMMODITY_MARKETS, evaluate
 from .provider import YahooProvider, TwelveDataCommodityProvider, FeedError
@@ -15,9 +16,194 @@ log=logging.getLogger('rajih.monitor')
 DATA=Path(__file__).parent/'data'
 LOCK_KEY=72617368696415
 
-COMMODITY_NAMES={'XA':'gold/XAUUSD','XS':'silver/XAGUSD','XO':'oil/WTIUSD'}
+COMMODITY_NAMES={'XA':'gold/XAUUSD'}
+
+# Egypt daily standalone R2+Slope scanner (backend only; no Telegram queueing).
+EGX_R2_MIN=0.791694
+EGX_SLOPE_MIN=67.5062
+EGX_LOOKBACK=126
+EGX_COOLDOWN=126
+EGX_MIN_PRICE=1.0
+EGX_MIN_ADV20=1_000_000.0
+EGX_MIN_AVGVOL20=10_000.0
+EGX_TZ='Africa/Cairo'
+EGX_SCAN_HOUR=15  # after the normal EGX close; startup scan also runs once.
+
+def _http_json(url,payload=None,headers=None,timeout=30):
+    body=None
+    hdr={'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/154 Safari/537.36'}
+    if headers:hdr.update(headers)
+    if payload is not None:
+        body=json.dumps(payload).encode('utf-8')
+        hdr['Content-Type']='application/json'
+    req=urllib.request.Request(url,data=body,headers=hdr,method='POST' if body is not None else 'GET')
+    with urllib.request.urlopen(req,timeout=timeout) as r:
+        return json.loads(r.read().decode('utf-8'))
+
+def _egx_discover_sync():
+    payload={
+        'filter':[{'left':'type','operation':'equal','right':'stock'}],
+        'options':{'lang':'en'},
+        'markets':['egypt'],
+        'symbols':{'query':{'types':[]},'tickers':[]},
+        'columns':['name','description','exchange'],
+        'sort':{'sortBy':'name','sortOrder':'asc'},
+        'range':[0,1000],
+    }
+    obj=_http_json('https://scanner.tradingview.com/egypt/scan',payload)
+    out=[];seen=set()
+    for item in obj.get('data',[]):
+        full=item.get('s','');symbol=full.split(':',1)[1] if ':' in full else full
+        vals=item.get('d') or []
+        company=(vals[1] if len(vals)>1 and vals[1] else (vals[0] if vals else symbol))
+        if symbol and symbol not in seen:
+            seen.add(symbol);out.append((symbol,str(company or symbol)))
+    return out
+
+def _egx_daily_sync(symbol):
+    start=int(datetime(2019,1,1,tzinfo=ZoneInfo('UTC')).timestamp())
+    end=int(time.time())+86400
+    url=(f'https://query1.finance.yahoo.com/v8/finance/chart/{symbol}.CA'
+         f'?period1={start}&period2={end}&interval=1d&events=div%2Csplits&includeAdjustedClose=true')
+    obj=_http_json(url)
+    res=((obj.get('chart') or {}).get('result') or [])
+    if not res:return []
+    z=res[0];ts=z.get('timestamp') or []
+    q=(((z.get('indicators') or {}).get('quote') or [{}])[0])
+    adj=((z.get('indicators') or {}).get('adjclose') or [{}])[0].get('adjclose') or []
+    opens=q.get('open') or [];highs=q.get('high') or [];lows=q.get('low') or []
+    closes=q.get('close') or [];vols=q.get('volume') or []
+    n=min(len(ts),len(opens),len(highs),len(lows),len(closes),len(vols))
+    rows=[]
+    for i in range(n):
+        vals=(opens[i],highs[i],lows[i],closes[i])
+        if any(v is None for v in vals):continue
+        try:o,h,l,c=map(float,vals);v=float(vols[i] or 0)
+        except (TypeError,ValueError):continue
+        if min(o,h,l,c)<=0:continue
+        ac=float(adj[i]) if i<len(adj) and adj[i] not in (None,0) else c
+        factor=ac/c if c else 1.0
+        rows.append({
+            'ts':int(ts[i]),'o':o,'h':h,'l':l,'c':c,'v':v,
+            'ac':ac,'ah':h*factor,'al':l*factor,
+            'date':datetime.fromtimestamp(int(ts[i]),ZoneInfo(EGX_TZ)).date().isoformat(),
+        })
+    rows.sort(key=lambda r:r['ts'])
+    # de-duplicate by local date, keep last
+    dedup={}
+    for r in rows:dedup[r['date']]=r
+    return list(dedup.values())
+
+def _egx_linreg(values,end_idx,window=EGX_LOOKBACK):
+    # Previous window only; current bar excluded, exactly like the research script.
+    if end_idx<window:return None,None
+    y=values[end_idx-window:end_idx]
+    if len(y)!=window or any(not math.isfinite(v) for v in y):return None,None
+    xm=(window-1)/2.0;ym=sum(y)/window
+    if ym==0:return None,None
+    xss=sum((x-xm)**2 for x in range(window))
+    b=sum((x-xm)*(y[x]-ym) for x in range(window))/xss
+    sst=sum((v-ym)**2 for v in y)
+    ssr=sum((y[x]-(ym+b*(x-xm)))**2 for x in range(window))
+    r2=1-ssr/sst if sst>0 else 0.0
+    slope_pct=100*(b*(window-1))/ym
+    return slope_pct,r2
+
+def _egx_live_signal(rows):
+    if len(rows)<EGX_LOOKBACK+21:return None
+    ac=[r['ac'] for r in rows]
+    valid=[]
+    rule=[]
+    metrics=[]
+    for i,r in enumerate(rows):
+        slope,r2=_egx_linreg(ac,i)
+        metrics.append((slope,r2))
+        ok=bool(slope is not None and r2 is not None and r2>=EGX_R2_MIN and slope>=EGX_SLOPE_MIN)
+        rule.append(ok)
+    new_rule=[rule[i] and (i==0 or not rule[i-1]) for i in range(len(rule))]
+    last_kept=-10**9
+    kept=[]
+    for i,is_new in enumerate(new_rule):
+        if not is_new:continue
+        if i-last_kept<EGX_COOLDOWN:continue
+        r=rows[i]
+        if r['c']<EGX_MIN_PRICE:continue
+        if i<21:continue
+        prior=rows[i-20:i]
+        adv20=sum(x['c']*x['v'] for x in prior)/20
+        avgvol20=sum(x['v'] for x in prior)/20
+        if adv20<EGX_MIN_ADV20 or avgvol20<EGX_MIN_AVGVOL20:continue
+        last_kept=i
+        slope,r2=metrics[i]
+        kept.append((i,adv20,avgvol20,slope,r2))
+    if not kept:return None
+    i,adv20,avgvol20,slope,r2=kept[-1]
+    # Live scanner only inserts when the newest completed daily bar itself is the kept activation bar.
+    if i!=len(rows)-1:return None
+    r=rows[i]
+    return {
+        'symbol_date':r['date'],'signal_ts':r['ts'],'signal_price':r['c'],
+        'r2':r2,'slope':slope,'adv20':adv20,'avgvol20':avgvol20,
+    }
+
+async def scan_egx_daily(DB,clock):
+    """Daily Egypt scanner. Saves backend rows only; never queues Telegram messages."""
+    boundary=int(clock)//86400*86400
+    with DB.begin() as s:
+        scan=Scan(market='EG',boundary=boundary,status='running');s.add(scan);s.flush();scan_id=scan.id
+    try:
+        symbols=await asyncio.to_thread(_egx_discover_sync)
+        sem=asyncio.Semaphore(max(2,min(16,int(os.getenv('EGX_SCAN_CONCURRENCY','8')))))
+        async def one(item):
+            symbol,company=item
+            async with sem:
+                try:
+                    rows=await asyncio.to_thread(_egx_daily_sync,symbol)
+                    return symbol,company,_egx_live_signal(rows),None
+                except Exception as exc:
+                    return symbol,company,None,type(exc).__name__
+        tasks=[asyncio.create_task(one(item)) for item in symbols]
+        counts={'total':len(tasks),'ok':0,'errors':0,'new_plans':0,'transitions':0}
+        for n,task in enumerate(asyncio.as_completed(tasks),1):
+            symbol,company,signal,error=await task
+            if error:
+                counts['errors']+=1
+            else:
+                counts['ok']+=1
+                if signal:
+                    with DB.begin() as s:
+                        exists=s.scalar(select(func.count()).select_from(EgxSignal).where(
+                            EgxSignal.symbol==symbol,EgxSignal.signal_date==signal['symbol_date']))
+                        if not exists:
+                            s.add(EgxSignal(
+                                symbol=symbol,company=company,signal_date=signal['symbol_date'],
+                                signal_ts=signal['signal_ts'],signal_price=signal['signal_price'],
+                                pre_trend_r2=signal['r2'],pre_trend_slope_pct=signal['slope'],
+                                adv20=signal['adv20'],avgvol20=signal['avgvol20']))
+                            counts['new_plans']+=1
+            if n%50==0:log.info('EGX daily progress %s/%s',n,len(tasks))
+        with DB.begin() as s:
+            scan=s.get(Scan,scan_id)
+            for k,v in counts.items():setattr(scan,k,v)
+            scan.status='partial' if counts['errors'] else 'complete'
+            scan.finished_at=now()
+            scan.summary_json=json.dumps({'scanner':'EGX_R2_SLOPE_DAILY','new_signals':counts['new_plans']})
+        log.info('EGX daily scan %s',counts)
+    except Exception as exc:
+        with DB.begin() as s:
+            scan=s.get(Scan,scan_id)
+            scan.status='waiting_feed';scan.finished_at=now()
+            scan.summary_json=json.dumps({'scanner':'EGX_R2_SLOPE_DAILY','reason':type(exc).__name__})
+        log.exception('EGX daily scanner failed')
+
+def egx_due(clock):
+    dt=datetime.fromtimestamp(clock,ZoneInfo(EGX_TZ))
+    # Sunday-Thursday, after close. Worker keeps a once-per-date guard.
+    return dt.weekday() in (6,0,1,2,3) and dt.hour>=EGX_SCAN_HOUR
+
 
 def initialize(DB):
+    EgxSignal.__table__.create(bind=DB.kw['bind'],checkfirst=True)
     universe=json.loads((DATA/'universe.json').read_text(encoding='utf-8'))
     counts={m:sum(r['market_key']==m for r in universe) for m in ('SA','US')}
     if counts!={'SA':375,'US':5691} or len({r['symbol'] for r in universe})!=6066:
@@ -35,8 +221,6 @@ def initialize(DB):
         # Spot commodities are separate single-instrument markets sourced from Twelve Data.
         commodities=[
             ('XAUUSD','XA','الذهب مقابل الدولار الأمريكي','Gold / US Dollar','disabled_for_spot_commodity_v2'),
-            ('XAGUSD','XS','الفضة مقابل الدولار الأمريكي','Silver / US Dollar','disabled_for_spot_commodity_v2'),
-            ('WTIUSD','XO','بترول خام غرب تكساس مقابل الدولار','WTI Crude Oil / US Dollar','disabled_for_spot_commodity_v2'),
         ]
         for symbol,market,name_ar,name,version in commodities:
             row=s.get(Stock,symbol)
@@ -51,8 +235,8 @@ def initialize(DB):
                 row.last_bar=0;row.error='';row.checked_at=None
                 log.info('%s spot commodity volume rule disabled; watermark reset for one full re-evaluation',market)
             row.metadata_json=json.dumps(meta,ensure_ascii=False)
-    CONFIG['XA']['ref']='XAUUSD';CONFIG['XS']['ref']='XAGUSD';CONFIG['XO']['ref']='WTIUSD'
-    return {'US':counts['US'],'XA':1,'XS':1,'XO':1}
+    CONFIG['XA']['ref']='XAUUSD'
+    return {'US':counts['US'],'XA':1}
 
 @contextlib.contextmanager
 def exclusive(DB,lock_key=LOCK_KEY):
@@ -330,6 +514,7 @@ async def run(DB,once=False):
     # candle can create a plan. Set MONITOR_FORCE_STARTUP_SCAN=0 to disable later.
     force_startup=os.getenv('MONITOR_FORCE_STARTUP_SCAN','1').strip().lower() not in {'0','false','no','off'}
     startup_done=False
+    egx_last_date=None
     async with YahooProvider(concurrency) as us_provider, TwelveDataCommodityProvider() as commodity_provider:
         while True:
             clock=time.time();boundary=int(clock)//900*900;offset=int(clock)-boundary
@@ -338,8 +523,10 @@ async def run(DB,once=False):
                 with exclusive(DB) as locked:
                     if locked:
                         log.info('Startup diagnostic scan forced outside normal market-window rules')
-                        for m in ('XA','XS','XO','US'):
+                        for m in ('XA','US'):
                             await scan_market(DB,commodity_provider if m in COMMODITY_MARKETS else us_provider,m,clock,settings)
+                        await scan_egx_daily(DB,clock)
+                        egx_last_date=datetime.fromtimestamp(clock,ZoneInfo(EGX_TZ)).date().isoformat()
                 startup_done=True
                 if once:return
                 # Mark the current retry key so we do not immediately duplicate this scan.
@@ -353,9 +540,15 @@ async def run(DB,once=False):
             if once or (offset>=delay and key!=last_attempt):
                 with exclusive(DB) as locked:
                     if locked:
-                        for m in ('XA','XS','XO','US'):
+                        for m in ('XA','US'):
                             if due(m,clock):await scan_market(DB,commodity_provider if m in COMMODITY_MARKETS else us_provider,m,clock,settings)
                 last_attempt=key
+            egx_today=datetime.fromtimestamp(clock,ZoneInfo(EGX_TZ)).date().isoformat()
+            if egx_due(clock) and egx_last_date!=egx_today:
+                with exclusive(DB) as locked:
+                    if locked:
+                        await scan_egx_daily(DB,clock)
+                        egx_last_date=egx_today
             if once:return
             await asyncio.sleep(10)
 
