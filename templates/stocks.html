@@ -1,5 +1,51 @@
 {% extends 'base.html' %}{% block content %}
 <h1>متابعة الأسهم · ربع الساعة</h1>
+<div class="panel">
+  <div class="actions">
+    <h2 style="margin:0">تحديث بيانات الأسواق يدويًا</h2>
+
+    <form method="post" action="{{url_for('refresh_market_data',market='EG')}}" style="margin:0">
+      <input type="hidden" name="csrf" value="{{csrf()}}">
+      <button {% if refresh_jobs.get('EG',{}).get('status')=='running' %}disabled{% endif %}>
+        🇪🇬 تحديث بيانات السوق المصري
+      </button>
+    </form>
+
+    <form method="post" action="{{url_for('refresh_market_data',market='US')}}" style="margin:0">
+      <input type="hidden" name="csrf" value="{{csrf()}}">
+      <button {% if refresh_jobs.get('US',{}).get('status')=='running' %}disabled{% endif %}>
+        🇺🇸 تحديث بيانات السوق الأمريكي
+      </button>
+    </form>
+  </div>
+
+  <div class="cards" style="margin-top:12px">
+    <div>
+      <strong>مصر:</strong>
+      {% set egjob=refresh_jobs.get('EG',{}) %}
+      {% if egjob.get('status')=='running' %}<span>جارٍ التحديث…</span>
+      {% elif egjob.get('status')=='done' %}<span style="color:#15803d">تم التحديث</span>
+      {% elif egjob.get('status')=='error' %}<span style="color:#b91c1c">خطأ</span>
+      {% else %}<span class="muted">جاهز</span>{% endif %}
+      {% if egjob.get('message') %}<div class="muted">{{egjob.get('message')}}</div>{% endif %}
+    </div>
+
+    <div>
+      <strong>أمريكا:</strong>
+      {% set usjob=refresh_jobs.get('US',{}) %}
+      {% if usjob.get('status')=='running' %}<span>جارٍ التحديث…</span>
+      {% elif usjob.get('status')=='done' %}<span style="color:#15803d">تم التحديث</span>
+      {% elif usjob.get('status')=='error' %}<span style="color:#b91c1c">خطأ</span>
+      {% else %}<span class="muted">جاهز</span>{% endif %}
+      {% if usjob.get('message') %}<div class="muted">{{usjob.get('message')}}</div>{% endif %}
+    </div>
+  </div>
+
+  <p class="muted" style="margin-bottom:0">
+    التحديث يعمل في الخلفية. مصر تعيد فحص EGX اليومي وبناء الإشارات الحالية. أمريكا تشغّل فحص بيانات 15 دقيقة من Yahoo على نفس قواعد الـMonitor.
+    لو الـMonitor نفسه بيعمل Scan في نفس اللحظة، الزر لن يشغّل فحصًا ثانيًا بالتوازي.
+  </p>
+</div>
 <div class="panel"><h2>بدء سجل تطوير جديد</h2><p>يمسح جميع الخطط القديمة والمفتوحة والنتائج وطابور تنبيهات الأسهم وروابط الجداول القديمة. يحتفظ بالعملاء وحدودهم والإعدادات وبيانات الأسعار. أوقفي البوت وMonitor مؤقتًا قبل التصفير ثم شغّليهما بعده. الرسائل التي وصلت لتليجرام سابقًا لا تُحذف.</p><form method="post" action="{{url_for('reset_stock_history')}}"><input type="hidden" name="csrf" value="{{csrf()}}"><button>تصفير سجل التطوير</button></form></div>
 <div class="panel"><h2>إعدادات إرسال توصيات الأمريكي</h2>
 <form method="post" action="{{url_for('stock_settings')}}">
