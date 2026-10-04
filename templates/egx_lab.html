@@ -1,4 +1,45 @@
 {% extends 'base.html' %}{% block content %}
+<style>
+.egx-results-wide{
+  position:relative;
+  left:50%;
+  width:calc(100vw - 12px);
+  margin-left:calc(-50vw + 6px);
+  box-sizing:border-box;
+  max-width:none !important;
+  padding:12px 14px;
+  overflow-x:auto;
+  border-radius:0;
+}
+.egx-results-wide table{
+  width:100%;
+  min-width:2050px;
+  table-layout:auto;
+  border-collapse:collapse;
+}
+.egx-results-wide th,.egx-results-wide td{
+  white-space:nowrap;
+  padding:10px 12px;
+  vertical-align:middle;
+}
+.egx-results-wide thead th{
+  position:sticky;
+  top:0;
+  z-index:2;
+  background:#f4f7fb;
+}
+.egx-results-wide th a{
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  gap:5px;
+  color:inherit;
+  text-decoration:none;
+  font-weight:700;
+}
+.egx-results-wide th a:hover{text-decoration:underline}
+.egx-sort-mark{font-size:10px;color:#0f766e}
+</style>
 <div class="actions"><a class="button secondary" href="{{url_for('stocks')}}">← رجوع لمتابعة الأسهم</a><h1 style="margin:0">مختبر إشارات بورصة مصر</h1></div>
 <div class="panel">
 <form class="filters" method="get">
@@ -34,8 +75,30 @@
 </div>
 {% if scope=='market' and chart_symbol %}<div class="panel"><div class="actions"><strong>شارت {{chart_symbol}}</strong><span class="muted">تم اختياره من جدول إشارات السوق</span></div><div style="overflow:auto">{{chart_svg|safe}}</div></div>{% elif scope=='symbol' and chart_svg %}<div class="panel"><div class="actions"><strong>شارت {{symbol}} مع الإشارات</strong></div><div style="overflow:auto">{{chart_svg|safe}}</div></div>{% endif %}
 <div class="panel"><div class="actions"><span>متوسط 3M: {{'%+.2f'|format(summary.get('avg3m',0) or 0)}}%</span><span>متوسط 6M: {{'%+.2f'|format(summary.get('avg6m',0) or 0)}}%</span><span>متوسط 1Y: {{'%+.2f'|format(summary.get('avg1y',0) or 0)}}%</span>{% if summary.get('exit_win_pct') is not none %}<span>Win rate: {{'%.1f'|format(summary.get('exit_win_pct'))}}%</span>{% endif %}</div></div>
-<div class="panel tablewrap"><table>
-<thead><tr>{% if scope=='market' %}<th>الشارت</th><th>السهم</th><th>الشركة</th>{% endif %}<th>الحالة</th><th>تاريخ الإشارة</th><th>تاريخ الخروج</th><th>عائد الخروج</th><th>سعر الخروج</th><th>Slope عند الخروج</th><th>سعر الإشارة</th><th>R²</th><th>Slope %</th><th>الأداء الحالي</th><th>أقصى صعود</th><th>أقصى هبوط</th><th>+20%</th><th>+50%</th><th>+100%</th><th>العمر</th></tr></thead>
+<div class="panel tablewrap egx-results-wide"><table>
+<thead><tr>
+{% if scope=='market' %}
+<th>الشارت</th>
+<th><a href="{{sort_link('symbol')}}">السهم <span class="egx-sort-mark">{{sort_mark('symbol')}}</span></a></th>
+<th><a href="{{sort_link('company')}}">الشركة <span class="egx-sort-mark">{{sort_mark('company')}}</span></a></th>
+{% endif %}
+<th><a href="{{sort_link('status')}}">الحالة <span class="egx-sort-mark">{{sort_mark('status')}}</span></a></th>
+<th><a href="{{sort_link('date')}}">تاريخ الإشارة <span class="egx-sort-mark">{{sort_mark('date')}}</span></a></th>
+<th><a href="{{sort_link('exit_date')}}">تاريخ الخروج <span class="egx-sort-mark">{{sort_mark('exit_date')}}</span></a></th>
+<th><a href="{{sort_link('exit_return')}}">عائد الخروج <span class="egx-sort-mark">{{sort_mark('exit_return')}}</span></a></th>
+<th><a href="{{sort_link('exit_price')}}">سعر الخروج <span class="egx-sort-mark">{{sort_mark('exit_price')}}</span></a></th>
+<th><a href="{{sort_link('exit_slope')}}">Slope عند الخروج <span class="egx-sort-mark">{{sort_mark('exit_slope')}}</span></a></th>
+<th><a href="{{sort_link('price')}}">سعر الإشارة <span class="egx-sort-mark">{{sort_mark('price')}}</span></a></th>
+<th><a href="{{sort_link('r2')}}">R² <span class="egx-sort-mark">{{sort_mark('r2')}}</span></a></th>
+<th><a href="{{sort_link('slope')}}">Slope % <span class="egx-sort-mark">{{sort_mark('slope')}}</span></a></th>
+<th><a href="{{sort_link('current_return')}}">الأداء الحالي <span class="egx-sort-mark">{{sort_mark('current_return')}}</span></a></th>
+<th><a href="{{sort_link('max_gain')}}">أقصى صعود <span class="egx-sort-mark">{{sort_mark('max_gain')}}</span></a></th>
+<th><a href="{{sort_link('max_dd')}}">أقصى هبوط <span class="egx-sort-mark">{{sort_mark('max_dd')}}</span></a></th>
+<th><a href="{{sort_link('hit20')}}">+20% <span class="egx-sort-mark">{{sort_mark('hit20')}}</span></a></th>
+<th><a href="{{sort_link('hit50')}}">+50% <span class="egx-sort-mark">{{sort_mark('hit50')}}</span></a></th>
+<th><a href="{{sort_link('hit100')}}">+100% <span class="egx-sort-mark">{{sort_mark('hit100')}}</span></a></th>
+<th><a href="{{sort_link('age')}}">العمر <span class="egx-sort-mark">{{sort_mark('age')}}</span></a></th>
+</tr></thead>
 <tbody>{% for x in rows %}<tr>
 {% if scope=='market' %}<td><a class="button secondary" href="{{chart_link(x)}}">عرض الشارت</a></td><td dir="ltr"><strong>{{x.symbol}}</strong></td><td>{{x.company}}</td>{% endif %}
 <td>{% if x.status=='OPEN' %}<strong style="color:#d97706">مفتوحة</strong>{% elif x.status=='CLOSED_TIME' %}<strong style="color:#7c3aed">Time Exit</strong>{% elif x.status=='CLOSED_SLOPE' %}<strong style="color:#dc2626">Slope Exit</strong>{% else %}<strong style="color:#15803d">TP</strong>{% endif %}</td>
