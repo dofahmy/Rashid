@@ -584,13 +584,57 @@ def create_app(db=None,test_config=None):
         except Exception as exc:
             error=f'{type(exc).__name__}: {exc}'
 
+        # Sort the results by any visible data column. Sorting is server-side so
+        # it works without JavaScript and preserves all current lab filters.
+        sort_key=request.args.get('sort','date').strip().lower()
+        sort_dir=request.args.get('dir','desc').strip().lower()
+        if sort_dir not in ('asc','desc'): sort_dir='desc'
+        sort_fields={
+            'symbol':lambda x:(x.get('symbol') or '').upper(),
+            'company':lambda x:(x.get('company') or '').upper(),
+            'status':lambda x:x.get('status') or '',
+            'date':lambda x:x.get('date') or '',
+            'exit_date':lambda x:x.get('exit_date') or '',
+            'exit_return':lambda x:x.get('exit_return'),
+            'exit_price':lambda x:x.get('exit_price'),
+            'exit_slope':lambda x:x.get('exit_slope_value'),
+            'price':lambda x:x.get('price'),
+            'r2':lambda x:x.get('r2'),
+            'slope':lambda x:x.get('slope'),
+            'current_return':lambda x:x.get('current_return'),
+            'max_gain':lambda x:x.get('max_gain'),
+            'max_dd':lambda x:x.get('max_dd'),
+            'hit20':lambda x:x.get('hit20'),
+            'hit50':lambda x:x.get('hit50'),
+            'hit100':lambda x:x.get('hit100'),
+            'age':lambda x:x.get('age'),
+        }
+        if rows and sort_key in sort_fields:
+            keyfn=sort_fields[sort_key]
+            nonempty=[x for x in rows if keyfn(x) is not None]
+            empty=[x for x in rows if keyfn(x) is None]
+            nonempty.sort(key=keyfn,reverse=(sort_dir=='desc'))
+            rows=nonempty+empty
+
+        def sort_link(key):
+            args=request.args.to_dict()
+            current=args.get('sort','date')
+            current_dir=args.get('dir','desc')
+            args['sort']=key
+            args['dir']='asc' if current==key and current_dir=='desc' else 'desc'
+            return url_for('egx_lab',**args)
+
+        def sort_mark(key):
+            if sort_key!=key:return ''
+            return '▲' if sort_dir=='asc' else '▼'
+
         def chart_link(row):
             args=request.args.to_dict();args['scope']='market';args['chart_symbol']=row['symbol'];args.pop('symbol',None)
             return url_for('egx_lab',**args)
 
         return render_template('egx_lab.html',scope=scope,symbol=symbol,chart_symbol=chart_symbol,r2_min=r2_min,slope_min=slope_min,slope_max=slope_max,cooldown=cooldown,tp_pct=tp_pct,
             confirm=confirm,rows=rows,error=error,latest_date=latest_date,bars_count=bars_count,summary=summary,company=company,chart_svg=chart_svg,
-            exit_mode=exit_mode,time_exit_sessions=time_exit_sessions,exit_slope=exit_slope,exit_slope_op=exit_slope_op,market_symbols=market_symbols,market_errors=market_errors,chart_link=chart_link)
+            exit_mode=exit_mode,time_exit_sessions=time_exit_sessions,exit_slope=exit_slope,exit_slope_op=exit_slope_op,market_symbols=market_symbols,market_errors=market_errors,chart_link=chart_link,sort_link=sort_link,sort_mark=sort_mark,sort_key=sort_key,sort_dir=sort_dir)
 
 
     @app.get('/stocks/<int:plan_id>')
