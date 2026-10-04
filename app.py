@@ -629,6 +629,7 @@ def create_app(db=None,test_config=None):
 
             # 10 independent capital slots, each worth 10 at inception.
             slots=[{'cash':10.0,'pos':None} for _ in range(10)]
+            banked_profit=0.0
             by_entry={}
             by_exit={}
             for r in signals:
@@ -647,14 +648,23 @@ def create_app(db=None,test_config=None):
             action_marks=[]
 
             def close_slot(slot, d, price, reason):
-                nonlocal forced_rotations,natural_exits,winners
+                nonlocal forced_rotations,natural_exits,winners,banked_profit
                 pos=slot.get('pos')
                 if not pos:
                     return
                 value=pos['shares']*price
                 ret=100*(price/pos['entry_price']-1)
-                slot['cash']=value
+
+                # Position sizing rule:
+                # - never compound profits into the next trade;
+                # - next trade can use at most 10% of ORIGINAL capital (= 10 units);
+                # - if the slot lost money, the next trade uses the smaller remaining amount.
+                reusable=min(value,10.0)
+                realized_profit=max(0.0,value-10.0)
+                banked_profit+=realized_profit
+                slot['cash']=reusable
                 slot['pos']=None
+
                 closed_returns.append(ret)
                 if ret>0:winners+=1
                 if reason=='FORCED_ROTATION':forced_rotations+=1
@@ -662,7 +672,8 @@ def create_app(db=None,test_config=None):
                 rec=pos['ledger']
                 rec.update({
                     'exit_date':d,'exit_price':price,'exit_return':ret,
-                    'exit_reason':reason,'status':'CLOSED','exit_value':value
+                    'exit_reason':reason,'status':'CLOSED','exit_value':value,
+                    'banked_profit':realized_profit,'next_entry_capital':reusable
                 })
                 action_marks.append((d,'EXIT',rec['trade_id'],pos['symbol']))
 
@@ -715,7 +726,7 @@ def create_app(db=None,test_config=None):
                     }
                     portfolio_trades+=1
 
-                equity=0.0
+                equity=banked_profit
                 for slot in slots:
                     if slot['pos'] is None:
                         equity+=slot['cash']
@@ -752,6 +763,7 @@ def create_app(db=None,test_config=None):
                 'max_dd':max_dd,'trades':portfolio_trades,'forced_rotations':forced_rotations,
                 'natural_exits':natural_exits,'open_positions':open_positions,
                 'closed_trades':len(closed_returns),
+                'banked_profit':banked_profit,
                 'win_rate':(100*winners/len(closed_returns)) if closed_returns else None,
                 'avg_closed_return':(sum(closed_returns)/len(closed_returns)) if closed_returns else None,
             }
