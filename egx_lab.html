@@ -1,0 +1,186 @@
+{% extends 'base.html' %}{% block content %}
+<style>
+/* Full-page results without pulling the table off-screen. */
+.egx-results-wide{
+  box-sizing:border-box;
+  width:auto !important;
+  max-width:none !important;
+  margin-left:calc(50% - 50vw + 12px) !important;
+  margin-right:calc(50% - 50vw + 12px) !important;
+  padding:10px 12px;
+  overflow-x:auto;
+  overflow-y:visible;
+  border-radius:12px;
+  direction:rtl;
+}
+.egx-results-wide table{
+  width:max-content;
+  min-width:calc(100vw - 48px);
+  table-layout:auto;
+  border-collapse:collapse;
+  direction:rtl;
+  font-size:13px;
+}
+.egx-results-wide th,.egx-results-wide td{
+  white-space:nowrap;
+  padding:10px 11px;
+  vertical-align:middle;
+  text-align:center;
+}
+.egx-results-wide thead th{
+  position:sticky;
+  top:0;
+  z-index:3;
+  background:#f4f7fb;
+}
+.egx-results-wide th a{
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  gap:5px;
+  color:inherit;
+  text-decoration:none;
+  font-weight:700;
+}
+.egx-results-wide th a:hover{text-decoration:underline}
+.egx-sort-mark{font-size:10px;color:#0f766e}
+/* Keep identity columns easy to read while scrolling. */
+.egx-results-wide td:nth-child(1), .egx-results-wide th:nth-child(1){
+  position:sticky;
+  right:0;
+  z-index:2;
+  background:#fff;
+}
+.egx-results-wide thead th:nth-child(1){z-index:4;background:#f4f7fb}
+@media (max-width:900px){
+  .egx-results-wide{margin-left:calc(50% - 50vw + 4px)!important;margin-right:calc(50% - 50vw + 4px)!important;padding:8px 4px}
+  .egx-results-wide table{font-size:12px;min-width:1800px}
+  .egx-results-wide th,.egx-results-wide td{padding:8px 9px}
+}
+</style>
+<div class="actions"><a class="button secondary" href="{{url_for('stocks')}}">← رجوع لمتابعة الأسهم</a><h1 style="margin:0">مختبر إشارات بورصة مصر</h1></div>
+<div class="panel">
+<form class="filters" method="get">
+<label>نطاق التحليل<select name="scope"><option value="symbol" {{'selected' if scope=='symbol' else ''}}>سهم واحد</option><option value="market" {{'selected' if scope=='market' else ''}}>السوق المصري كله</option></select></label>
+<label>فترة التحليل<select name="year">
+<option value="all" {{'selected' if analysis_year is none else ''}}>كل التاريخ</option>
+{% for y in analysis_years %}<option value="{{y}}" {{'selected' if analysis_year==y else ''}}>{{y}}</option>{% endfor %}
+</select></label>
+<label>كود السهم<input name="symbol" dir="ltr" placeholder="SEIG" value="{{symbol}}"></label>
+<label>R² ≥<input name="r2" type="number" step="0.000001" value="{{r2_min}}" required></label>
+<label>Slope ≥<input name="slope_min" type="number" step="0.0001" value="{{slope_min}}" required></label>
+<label>Slope ≤<input name="slope_max" type="number" step="0.0001" value="{{slope_max}}" required></label>
+<label>Cooldown جلسة<input name="cooldown" type="number" min="0" max="1000" step="1" value="{{cooldown}}" required></label>
+<label>طريقة الخروج<select name="exit_mode">
+<option value="tp" {{'selected' if exit_mode=='tp' else ''}}>Target %</option>
+<option value="time" {{'selected' if exit_mode=='time' else ''}}>Time Exit</option>
+<option value="both" {{'selected' if exit_mode=='both' else ''}}>TP أو Time Exit</option>
+<option value="slope" {{'selected' if exit_mode=='slope' else ''}}>Slope Exit</option>
+<option value="all" {{'selected' if exit_mode=='all' else ''}}>TP أو Time أو Slope</option>
+</select></label>
+<label>TP %<input name="tp" type="number" min="0.1" max="1000" step="0.1" value="{{tp_pct}}" required></label>
+<label>Time Exit جلسة<input name="time_exit" type="number" min="1" max="2000" step="1" value="{{time_exit_sessions}}" required></label>
+<label>شرط Slope للخروج<select name="exit_slope_op"><option value="gte" {{'selected' if exit_slope_op=='gte' else ''}}>Slope ≥</option><option value="lte" {{'selected' if exit_slope_op=='lte' else ''}}>Slope ≤</option></select></label>
+<label>قيمة Slope Exit<input name="exit_slope" type="number" step="0.0001" value="{{exit_slope}}" required></label>
+<label style="display:flex;gap:8px;align-items:center"><input name="confirm" type="checkbox" value="1" {{'checked' if confirm else ''}}>طبّق شروط الشمعة الحالية</label>{% if not confirm %}<input type="hidden" name="confirm" value="0">{% endif %}
+<button>حلّل التاريخ</button>
+</form>
+<p class="muted">اختاري «سهم واحد» لتحليل سهم ورسم الشارت مباشرة، أو «السوق المصري كله» لاستخراج كل الإشارات بنفس القيم. في وضع السوق كله لا يُرسم شارت تلقائيًا؛ اضغطي «عرض الشارت» على أي إشارة وسيظهر شارت سهمها وكل إشاراته بنفس إعدادات الاختبار. شرط الدخول الآن يستخدم نطاق Slope من الحد الأدنى إلى الحد الأقصى. ويمكن الخروج بـ TP أو Time أو Slope أو أول واحد منهم حسب الاختيار. لا تُفتح توصية جديدة على نفس السهم أثناء وجود توصية مفتوحة. عند اختيار سنة معينة، تظهر فقط الإشارات التي بدأ دخولها داخل هذه السنة؛ وأداء المحفظة يُحسب داخل نفس السنة حتى آخر جلسة تداول فيها. أما «كل التاريخ» فيستخدم كل الإشارات وكل الفترة المتاحة.</p>
+</div>
+{% if error %}<div class="panel warning"><strong>تعذر التحليل:</strong> {{error}}</div>{% endif %}
+{% if scope=='market' and market_scan_status in ('starting','running') %}
+<div class="panel" style="border:1px solid #d8e2ef">
+  <div class="actions">
+    <strong>فحص السوق يعمل في الخلفية</strong>
+    <span>{{market_scan_progress}} / {{market_symbols if market_symbols else '...' }} سهم</span>
+    <a class="button secondary" href="{{request.full_path}}">تحديث النتائج</a>
+  </div>
+  <p class="muted" style="margin-bottom:0">الصفحة لم تعد تنتظر اكتمال كل السوق. اضغطي «تحديث النتائج» بعد قليل؛ النتائج الجزئية تظهر أثناء الفحص، وبعد اكتماله الترتيب وفتح الشارت يصبحان فوريين من الكاش.</p>
+</div>
+{% elif scope=='market' and market_scan_status=='error' %}
+<div class="panel warning"><strong>خطأ في فحص السوق:</strong> {{market_scan_error}}</div>
+{% elif scope=='market' and market_scan_status=='done' %}
+<div class="panel">
+  <div class="actions">
+    <span>اكتمل فحص {{market_symbols}} سهم · أخطاء {{market_errors}}</span>
+    <a class="button secondary" href="{{url_for('egx_lab', **dict(request.args, force_scan='1'))}}">إعادة فحص السوق</a>
+    {% if not show_portfolio %}
+    <a class="button" href="{{url_for('egx_lab', **dict(request.args, portfolio='1'))}}">أداء المحفظة</a>
+    {% else %}
+    <a class="button secondary" href="{{url_for('egx_lab', **dict(request.args, portfolio=None))}}">إخفاء أداء المحفظة</a>
+    {% endif %}
+  </div>
+</div>
+{% endif %}
+{% if not error and ((scope=='symbol' and symbol) or scope=='market') %}
+{% if scope=='market' and rows %}
+<div class="panel" style="border:2px solid #0f8f8a">
+  <div class="actions">
+    <strong>نتائج السوق جاهزة: {{rows|length}} إشارة</strong>
+    {% if not show_portfolio %}
+      <a class="button" style="font-size:16px;font-weight:700" href="{{url_for('egx_lab', **dict(request.args, portfolio='1'))}}">📈 أداء المحفظة</a>
+    {% else %}
+      <a class="button secondary" href="{{url_for('egx_lab', **dict(request.args, portfolio=None))}}">إخفاء أداء المحفظة</a>
+    {% endif %}
+  </div>
+</div>
+{% endif %}
+{% if scope=='market' and show_portfolio and portfolio_svg %}
+<div class="panel">
+  <div class="actions">
+    <strong>أداء المحفظة · {{analysis_year if analysis_year else 'كل التاريخ'}} · 10 مراكز بحد أقصى</strong>
+    <span class="muted">المحفظة تبدأ من 100، مقسمة إلى 10 خانات متساوية. كل توصية تشغل خانة؛ وعند امتلاء الـ10، التوصية الجديدة تغلق أعلى مركز قائم من حيث الربح الحالي وتستخدم نفس الخانة.</span>
+  </div>
+</div>
+<div class="cards">
+  <div class="panel accent"><div class="muted">قيمة البداية</div><div class="metric">{{'%.2f'|format(portfolio_summary.get('start_value',100))}}</div></div>
+  <div class="panel accent"><div class="muted">القيمة النهائية</div><div class="metric">{{'%.2f'|format(portfolio_summary.get('end_value',0))}}</div><div class="muted">{{'%+.2f'|format(portfolio_summary.get('total_return',0))}}%</div></div>
+  <div class="panel accent"><div class="muted">Max Drawdown</div><div class="metric">{{'%.2f'|format(portfolio_summary.get('max_dd',0))}}%</div></div>
+  <div class="panel accent"><div class="muted">Rotations إجبارية</div><div class="metric">{{portfolio_summary.get('forced_rotations',0)}}</div><div class="muted">مراكز مفتوحة الآن {{portfolio_summary.get('open_positions',0)}}</div></div>
+</div>
+<div class="panel">
+  <div class="actions">
+    <span>إجمالي الدخول: {{portfolio_summary.get('trades',0)}}</span>
+    <span>خروج طبيعي: {{portfolio_summary.get('natural_exits',0)}}</span>
+    {% if portfolio_summary.get('win_rate') is not none %}<span>Win rate للصفقات المغلقة: {{'%.1f'|format(portfolio_summary.get('win_rate'))}}%</span>{% endif %}
+    {% if portfolio_summary.get('avg_closed_return') is not none %}<span>متوسط عائد الصفقة المغلقة: {{'%+.2f'|format(portfolio_summary.get('avg_closed_return'))}}%</span>{% endif %}
+  </div>
+  <div style="margin-top:10px;overflow:auto">{{portfolio_svg|safe}}</div>
+</div>
+{% endif %}
+<div class="cards">
+<div class="panel accent"><div class="muted">النطاق</div><div class="metric" style="font-size:22px">{{symbol if scope=='symbol' else 'كل سوق مصر'}}</div><div class="muted">{{analysis_year if analysis_year else 'كل التاريخ'}}{% if scope=='market' %} · {{market_symbols}} رمز · أخطاء تحميل {{market_errors}}{% endif %}</div></div>
+<div class="panel accent"><div class="muted">عدد الإشارات</div><div class="metric">{{summary.get('count',0)}}</div></div>
+{% if exit_mode=='tp' %}<div class="panel accent"><div class="muted">وصلت TP +{{'%g'|format(tp_pct)}}%</div><div class="metric">{{'%.1f'|format(summary.get('hit_tp_pct',0))}}%</div></div>{% elif exit_mode=='time' %}<div class="panel accent"><div class="muted">متوسط Time Exit</div><div class="metric">{% if summary.get('time_avg_return') is not none %}{{'%+.2f'|format(summary.get('time_avg_return'))}}%{% else %}—{% endif %}</div></div>{% elif exit_mode=='slope' %}<div class="panel accent"><div class="muted">Slope Exit</div><div class="metric">{% if summary.get('exit_avg_return') is not none %}{{'%+.2f'|format(summary.get('exit_avg_return'))}}%{% else %}—{% endif %}</div><div class="muted">Slope exits {{summary.get('slope_exit_n',0)}}</div></div>{% else %}<div class="panel accent"><div class="muted">متوسط الخروج</div><div class="metric">{% if summary.get('exit_avg_return') is not none %}{{'%+.2f'|format(summary.get('exit_avg_return'))}}%{% else %}—{% endif %}</div><div class="muted">TP {{summary.get('tp_exit_n',0)}} · Time {{summary.get('time_exit_n',0)}} · Slope {{summary.get('slope_exit_n',0)}}</div></div>{% endif %}
+<div class="panel accent"><div class="muted">مفتوحة حاليًا</div><div class="metric">{{summary.get('open_n',0)}}</div><div class="muted">آخر بيانات {{latest_date}}</div></div>
+</div>
+{% if scope=='market' and chart_symbol %}<div class="panel"><div class="actions"><strong>شارت {{chart_symbol}}</strong><span class="muted">تم اختياره من جدول إشارات السوق</span></div><div style="overflow:auto">{{chart_svg|safe}}</div></div>{% elif scope=='symbol' and chart_svg %}<div class="panel"><div class="actions"><strong>شارت {{symbol}} مع الإشارات</strong></div><div style="overflow:auto">{{chart_svg|safe}}</div></div>{% endif %}
+<div class="panel"><div class="actions"><span>متوسط 3M: {{'%+.2f'|format(summary.get('avg3m',0) or 0)}}%</span><span>متوسط 6M: {{'%+.2f'|format(summary.get('avg6m',0) or 0)}}%</span><span>متوسط 1Y: {{'%+.2f'|format(summary.get('avg1y',0) or 0)}}%</span>{% if summary.get('exit_win_pct') is not none %}<span>Win rate: {{'%.1f'|format(summary.get('exit_win_pct'))}}%</span>{% endif %}</div></div>
+<div class="panel tablewrap egx-results-wide" dir="rtl"><table>
+<thead><tr>
+{% if scope=='market' %}
+<th>الشارت</th>
+<th><a href="{{sort_link('symbol')}}">السهم <span class="egx-sort-mark">{{sort_mark('symbol')}}</span></a></th>
+<th><a href="{{sort_link('company')}}">الشركة <span class="egx-sort-mark">{{sort_mark('company')}}</span></a></th>
+{% endif %}
+<th><a href="{{sort_link('status')}}">الحالة <span class="egx-sort-mark">{{sort_mark('status')}}</span></a></th>
+<th><a href="{{sort_link('date')}}">تاريخ الإشارة <span class="egx-sort-mark">{{sort_mark('date')}}</span></a></th>
+<th><a href="{{sort_link('exit_date')}}">تاريخ الخروج <span class="egx-sort-mark">{{sort_mark('exit_date')}}</span></a></th>
+<th><a href="{{sort_link('exit_return')}}">عائد الخروج <span class="egx-sort-mark">{{sort_mark('exit_return')}}</span></a></th>
+<th><a href="{{sort_link('trade_duration')}}">مدة الصفقة <span class="egx-sort-mark">{{sort_mark('trade_duration')}}</span></a></th>
+<th><a href="{{sort_link('exit_price')}}">سعر الخروج <span class="egx-sort-mark">{{sort_mark('exit_price')}}</span></a></th>
+<th><a href="{{sort_link('exit_slope')}}">Slope عند الخروج <span class="egx-sort-mark">{{sort_mark('exit_slope')}}</span></a></th>
+<th><a href="{{sort_link('price')}}">سعر الإشارة <span class="egx-sort-mark">{{sort_mark('price')}}</span></a></th>
+<th><a href="{{sort_link('r2')}}">R² <span class="egx-sort-mark">{{sort_mark('r2')}}</span></a></th>
+<th><a href="{{sort_link('slope')}}">Slope % <span class="egx-sort-mark">{{sort_mark('slope')}}</span></a></th>
+<th><a href="{{sort_link('current_return')}}">الأداء الحالي <span class="egx-sort-mark">{{sort_mark('current_return')}}</span></a></th>
+<th><a href="{{sort_link('max_gain')}}">أقصى صعود <span class="egx-sort-mark">{{sort_mark('max_gain')}}</span></a></th>
+<th><a href="{{sort_link('max_dd')}}">أقصى هبوط <span class="egx-sort-mark">{{sort_mark('max_dd')}}</span></a></th>
+</tr></thead>
+<tbody>{% for x in rows %}<tr>
+{% if scope=='market' %}<td><a class="button secondary" href="{{chart_link(x)}}">عرض الشارت</a></td><td dir="ltr"><strong>{{x.symbol}}</strong></td><td>{{x.company}}</td>{% endif %}
+<td>{% if x.status=='OPEN' %}<strong style="color:#d97706">مفتوحة</strong>{% elif x.status=='CLOSED_TIME' %}<strong style="color:#7c3aed">Time Exit</strong>{% elif x.status=='CLOSED_SLOPE' %}<strong style="color:#dc2626">Slope Exit</strong>{% else %}<strong style="color:#15803d">TP</strong>{% endif %}</td>
+<td dir="ltr">{{x.date}}</td><td dir="ltr">{{x.exit_date or '—'}}</td><td>{% if x.exit_return is not none %}<strong style="color:{{'#15803d' if x.exit_return>=0 else '#b91c1c'}}">{{'%+.2f%%'|format(x.exit_return)}}</strong>{% else %}—{% endif %}</td><td><strong>{{x.trade_duration}}</strong> جلسة</td><td>{{('%.2f'|format(x.exit_price)) if x.exit_price is not none else '—'}}</td><td>{{('%.2f'|format(x.exit_slope_value)) if x.exit_slope_value is not none else '—'}}</td><td>{{'%.2f'|format(x.price)}}</td><td>{{'%.4f'|format(x.r2)}}</td><td>{{'%.2f'|format(x.slope)}}</td><td>{% if x.status=='OPEN' %}<strong>{{'%+.2f%%'|format(x.current_return)}}</strong>{% else %}—{% endif %}</td><td>{{'%+.2f%%'|format(x.max_gain)}}</td><td>{{'%+.2f%%'|format(x.max_dd)}}</td>
+</tr>{% else %}<tr><td colspan="{{14 if scope=='market' else 11}}">لا توجد إشارات بهذه القيم.</td></tr>{% endfor %}</tbody></table></div>
+{% endif %}
+{% endblock %}
