@@ -129,7 +129,7 @@
 <div class="panel">
   <div class="actions">
     <strong>أداء المحفظة · {{analysis_year if analysis_year else 'كل التاريخ'}} · 10 مراكز بحد أقصى</strong>
-    <span class="muted">المحفظة تبدأ من 100، مقسمة إلى 10 خانات متساوية. كل توصية تشغل خانة؛ وعند امتلاء الـ10، التوصية الجديدة تغلق أعلى مركز قائم من حيث الربح الحالي وتستخدم نفس الخانة.</span>
+    <span class="muted">المحفظة تبدأ من 100، مقسمة إلى 10 خانات متساوية، كل خانة أصلها 10. الأرباح لا تُعاد استثمارها: بعد إغلاق صفقة رابحة، الصفقة التالية في نفس الخانة تدخل بحد أقصى 10 فقط، والربح الزائد يُحجز كربح نقدي. لو الصفقة خاسرة، الصفقة التالية تدخل بالمبلغ الأقل المتبقي في الخانة. وعند امتلاء الـ10، التوصية الجديدة تغلق أعلى مركز قائم من حيث الربح الحالي وتستخدم نفس الخانة.</span>
   </div>
 </div>
 <div class="cards">
@@ -142,6 +142,7 @@
   <div class="actions">
     <span>إجمالي الدخول: {{portfolio_summary.get('trades',0)}}</span>
     <span>خروج طبيعي: {{portfolio_summary.get('natural_exits',0)}}</span>
+    <span>أرباح محجوزة غير معاد استثمارها: {{'%.2f'|format(portfolio_summary.get('banked_profit',0))}}</span>
     {% if portfolio_summary.get('win_rate') is not none %}<span>Win rate للصفقات المغلقة: {{'%.1f'|format(portfolio_summary.get('win_rate'))}}%</span>{% endif %}
     {% if portfolio_summary.get('avg_closed_return') is not none %}<span>متوسط عائد الصفقة المغلقة: {{'%+.2f'|format(portfolio_summary.get('avg_closed_return'))}}%</span>{% endif %}
   </div>
@@ -159,7 +160,7 @@
         <th>#</th><th>الخانة</th><th>السهم</th><th>الشركة</th>
         <th>تاريخ الفتح</th><th>سعر الفتح</th><th>قيمة الخانة عند الفتح</th>
         <th>الحالة</th><th>تاريخ الإغلاق</th><th>سعر الإغلاق</th>
-        <th>سبب الإغلاق</th><th>عائد الصفقة</th><th>قيمة الخانة عند الإغلاق/الآن</th>
+        <th>سبب الإغلاق</th><th>عائد الصفقة</th><th>قيمة الخانة عند الإغلاق/الآن</th><th>ربح محجوز</th><th>حجم الدخول التالي للخانة</th>
       </tr>
     </thead>
     <tbody>
@@ -204,9 +205,11 @@
           {% elif t.current_value is defined %}{{'%.2f'|format(t.current_value)}}
           {% else %}—{% endif %}
         </td>
+        <td>{% if t.banked_profit is defined %}{{'%.2f'|format(t.banked_profit)}}{% else %}—{% endif %}</td>
+        <td>{% if t.next_entry_capital is defined %}{{'%.2f'|format(t.next_entry_capital)}}{% else %}—{% endif %}</td>
       </tr>
     {% else %}
-      <tr><td colspan="13">لا توجد عمليات في المحفظة.</td></tr>
+      <tr><td colspan="15">لا توجد عمليات في المحفظة.</td></tr>
     {% endfor %}
     </tbody>
   </table>
