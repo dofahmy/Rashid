@@ -110,6 +110,16 @@ def _egx_linreg(values,end_idx,window=EGX_LOOKBACK):
     slope_pct=100*(b*(window-1))/ym
     return slope_pct,r2
 
+def _egx_price_confirm(rows, i):
+    if i <= 0:
+        return False
+    r=rows[i]; prev=rows[i-1]
+    return bool(
+        r['c'] > prev['h']
+        and r['c'] > r['o']
+        and (r['c'] - r['o']) > (r['h'] - r['c'])
+    )
+
 def _egx_trade_exit(rows, metrics, signal_idx):
     """Return the first approved exit after an EGX entry, or None if still open.
 
@@ -226,12 +236,7 @@ def _egx_analyze_signals(rows):
         # 2) today's candle must be positive (close > open);
         # 3) the real body must be larger than the upper wick:
         #    (close - open) > (high - close).
-        price_confirm = bool(
-            i > 0
-            and r['c'] > rows[i-1]['h']
-            and r['c'] > r['o']
-            and (r['c'] - r['o']) > (r['h'] - r['c'])
-        )
+        price_confirm = _egx_price_confirm(rows, i)
         rule.append(bool(
             slope is not None and r2 is not None
             and r2 >= EGX_R2_MIN and slope >= EGX_SLOPE_MIN
@@ -256,6 +261,10 @@ def _egx_analyze_signals(rows):
     latest=rows[-1]
     open_candidates=[]
     for i,adv20,avgvol20,slope,r2 in kept:
+        # Defensive revalidation: an OPEN row can never survive unless the
+        # signal candle itself still satisfies every price-confirmation rule.
+        if not _egx_price_confirm(rows, i):
+            continue
         exit_info=_egx_trade_exit(rows,metrics,i)
         if exit_info is not None:
             continue
@@ -278,7 +287,7 @@ def _egx_analyze_signals(rows):
     open_rows=[max(open_candidates,key=lambda x:x['signal_ts'])] if open_candidates else []
 
     latest_activation=None
-    if kept and kept[-1][0]==len(rows)-1:
+    if kept and kept[-1][0]==len(rows)-1 and _egx_price_confirm(rows, kept[-1][0]):
         i,adv20,avgvol20,slope,r2=kept[-1];r=rows[i]
         latest_activation={
             'symbol_date':r['date'],'signal_ts':r['ts'],'signal_price':r['c'],
@@ -291,6 +300,10 @@ async def scan_egx_daily(DB,clock):
     boundary=int(clock)//86400*86400
     with DB.begin() as s:
         scan=Scan(market='EG',boundary=boundary,status='running');s.add(scan);s.flush();scan_id=scan.id
+        # Clear stale rows immediately. The page stays empty while the fresh
+        # backfill runs rather than showing positions calculated by older rules.
+        s.execute(delete(EgxOpenSignal))
+    log.info('EGX v7 strict rebuild started; old open rows cleared')
     try:
         symbols=await asyncio.to_thread(_egx_discover_sync)
         sem=asyncio.Semaphore(max(2,min(16,int(os.getenv('EGX_SCAN_CONCURRENCY','8')))))
@@ -351,13 +364,13 @@ async def scan_egx_daily(DB,clock):
             for k,v in counts.items():setattr(scan,k,v)
             scan.status='partial' if counts['errors'] else 'complete'
             scan.finished_at=now()
-            scan.summary_json=json.dumps({'scanner':'EGX_R2_SLOPE_DAILY','new_signals':counts['new_plans'],'open_signals':open_total})
+            scan.summary_json=json.dumps({'scanner':'EGX_R2_SLOPE_DAILY_V7_STRICT_CANDLE','new_signals':counts['new_plans'],'open_signals':open_total})
         log.info('EGX daily scan %s open_signals=%s',counts,open_total)
     except Exception as exc:
         with DB.begin() as s:
             scan=s.get(Scan,scan_id)
             scan.status='waiting_feed';scan.finished_at=now()
-            scan.summary_json=json.dumps({'scanner':'EGX_R2_SLOPE_DAILY','reason':type(exc).__name__})
+            scan.summary_json=json.dumps({'scanner':'EGX_R2_SLOPE_DAILY_V7_STRICT_CANDLE','reason':type(exc).__name__})
         log.exception('EGX daily scanner failed')
 
 def egx_due(clock):
@@ -369,6 +382,10 @@ def egx_due(clock):
 def initialize(DB):
     EgxSignal.__table__.create(bind=DB.kw['bind'],checkfirst=True)
     EgxOpenSignal.__table__.create(bind=DB.kw['bind'],checkfirst=True)
+    # Never expose OPEN rows produced by an older filter after a worker restart.
+    with DB.begin() as s:
+        s.execute(delete(EgxOpenSignal))
+    log.info('EGX v7 startup purge complete; open table will be rebuilt')
     universe=json.loads((DATA/'universe.json').read_text(encoding='utf-8'))
     counts={m:sum(r['market_key']==m for r in universe) for m in ('SA','US')}
     if counts!={'SA':375,'US':5691} or len({r['symbol'] for r in universe})!=6066:
