@@ -1,61 +1,36 @@
 {% extends 'base.html' %}{% block content %}
 <div class="actions"><a class="button secondary" href="{{url_for('stocks')}}">← رجوع لمتابعة الأسهم</a><h1 style="margin:0">مختبر إشارات بورصة مصر</h1></div>
 <div class="panel">
-  <form class="filters" method="get">
-    <label>كود السهم<input name="symbol" dir="ltr" placeholder="SEIG" value="{{symbol}}" required></label>
-    <label>R² ≥<input name="r2" type="number" step="0.000001" value="{{r2_min}}" required></label>
-    <label>Slope ≥<input name="slope" type="number" step="0.0001" value="{{slope_min}}" required></label>
-    <label>Cooldown جلسة<input name="cooldown" type="number" min="0" max="1000" step="1" value="{{cooldown}}" required></label>
-    <label>طريقة الخروج<select name="exit_mode"><option value="tp" {{'selected' if exit_mode=='tp' else ''}}>Target %</option><option value="time" {{'selected' if exit_mode=='time' else ''}}>Time Exit</option><option value="both" {{'selected' if exit_mode=='both' else ''}}>Both: TP أو Time Exit</option></select></label>
-    <label>TP %<input name="tp" type="number" min="0.1" max="1000" step="0.1" value="{{tp_pct}}" required></label>
-    <label>Time Exit جلسة<input name="time_exit" type="number" min="1" max="2000" step="1" value="{{time_exit_sessions}}" required></label>
-    <label style="display:flex;gap:8px;align-items:center"><input name="confirm" type="checkbox" value="1" {{'checked' if confirm else ''}}>طبّق شروط الشمعة الحالية</label>
-    {% if not confirm %}<input type="hidden" name="confirm" value="0">{% endif %}
-    <button>حلّل التاريخ</button>
-  </form>
-  <p class="muted">R² وSlope محسوبان من 126 جلسة سابقة فقط، بدون استخدام شمعة الإشارة داخل الحساب. عند تفعيل شروط الشمعة: Close &gt; High أمس، Close &gt; Open، و(Close−Open) &gt; (High−Close). الإشارة تُحسب عند بداية تحقق الشروط ثم يُطبق الـCooldown. ولا تُفتح أي توصية جديدة على نفس السهم طالما توجد توصية سابقة مفتوحة. في Target Mode تغلق عند TP، وفي Time Exit تغلق عند إغلاق الجلسة المحددة. في Both تغلق عند أول حدث: لمس TP أو نهاية عدد الجلسات المحدد. لو TP اتلمس خلال جلسة الـTime Exit نفسها، نعتبر TP هو الأول لأنه حدث أثناء الجلسة قبل الإغلاق.</p>
+<form class="filters" method="get">
+<label>نطاق التحليل<select name="scope"><option value="symbol" {{'selected' if scope=='symbol' else ''}}>سهم واحد</option><option value="market" {{'selected' if scope=='market' else ''}}>السوق المصري كله</option></select></label>
+<label>كود السهم<input name="symbol" dir="ltr" placeholder="SEIG" value="{{symbol}}"></label>
+<label>R² ≥<input name="r2" type="number" step="0.000001" value="{{r2_min}}" required></label>
+<label>Slope ≥<input name="slope" type="number" step="0.0001" value="{{slope_min}}" required></label>
+<label>Cooldown جلسة<input name="cooldown" type="number" min="0" max="1000" step="1" value="{{cooldown}}" required></label>
+<label>طريقة الخروج<select name="exit_mode"><option value="tp" {{'selected' if exit_mode=='tp' else ''}}>Target %</option><option value="time" {{'selected' if exit_mode=='time' else ''}}>Time Exit</option><option value="both" {{'selected' if exit_mode=='both' else ''}}>Both: TP أو Time Exit</option></select></label>
+<label>TP %<input name="tp" type="number" min="0.1" max="1000" step="0.1" value="{{tp_pct}}" required></label>
+<label>Time Exit جلسة<input name="time_exit" type="number" min="1" max="2000" step="1" value="{{time_exit_sessions}}" required></label>
+<label style="display:flex;gap:8px;align-items:center"><input name="confirm" type="checkbox" value="1" {{'checked' if confirm else ''}}>طبّق شروط الشمعة الحالية</label>{% if not confirm %}<input type="hidden" name="confirm" value="0">{% endif %}
+<button>حلّل التاريخ</button>
+</form>
+<p class="muted">اختاري «سهم واحد» لتحليل سهم ورسم الشارت مباشرة، أو «السوق المصري كله» لاستخراج كل الإشارات بنفس القيم. في وضع السوق كله لا يُرسم شارت تلقائيًا؛ اضغطي «عرض الشارت» على أي إشارة وسيظهر شارت سهمها وكل إشاراته بنفس إعدادات الاختبار. لا تُفتح توصية جديدة على نفس السهم أثناء وجود توصية مفتوحة.</p>
 </div>
 {% if error %}<div class="panel warning"><strong>تعذر التحليل:</strong> {{error}}</div>{% endif %}
-{% if symbol and not error %}
+{% if not error and ((scope=='symbol' and symbol) or scope=='market') %}
 <div class="cards">
-  <div class="panel accent"><div class="muted">السهم</div><div class="metric" dir="ltr">{{symbol}}</div></div>
-  <div class="panel accent"><div class="muted">عدد الإشارات</div><div class="metric">{{summary.get('count',0)}}</div></div>
-  {% if exit_mode == 'tp' %}<div class="panel accent"><div class="muted">وصلت TP +{{'%g'|format(tp_pct)}}%</div><div class="metric">{{'%.1f'|format(summary.get('hit_tp_pct',0))}}%</div><div class="muted">{{summary.get('tp_hits',0)}} / {{summary.get('count',0)}} إشارة</div></div>{% elif exit_mode == 'time' %}<div class="panel accent"><div class="muted">متوسط عائد Time Exit بعد {{time_exit_sessions}} جلسة</div><div class="metric">{% if summary.get('time_avg_return') is not none %}{{'%+.2f'|format(summary.get('time_avg_return'))}}%{% else %}—{% endif %}</div><div class="muted">Win rate {% if summary.get('time_win_pct') is not none %}{{'%.1f'|format(summary.get('time_win_pct'))}}%{% else %}—{% endif %} · مغلقة {{summary.get('closed_n',0)}}</div></div>{% else %}<div class="panel accent"><div class="muted">Both · TP +{{'%g'|format(tp_pct)}}% أو {{time_exit_sessions}} جلسة</div><div class="metric">{% if summary.get('exit_avg_return') is not none %}{{'%+.2f'|format(summary.get('exit_avg_return'))}}%{% else %}—{% endif %}</div><div class="muted">TP: {{summary.get('tp_exit_n',0)}} · Time: {{summary.get('time_exit_n',0)}} · Win rate {% if summary.get('exit_win_pct') is not none %}{{'%.1f'|format(summary.get('exit_win_pct'))}}%{% else %}—{% endif %}</div></div>{% endif %}
-  <div class="panel accent"><div class="muted">إشارات مفتوحة</div><div class="metric">{{summary.get('open_n',0)}}</div><div class="muted">آخر بيانات {{latest_date}}</div></div>
+<div class="panel accent"><div class="muted">النطاق</div><div class="metric" style="font-size:22px">{{symbol if scope=='symbol' else 'كل سوق مصر'}}</div>{% if scope=='market' %}<div class="muted">{{market_symbols}} رمز · أخطاء تحميل {{market_errors}}</div>{% endif %}</div>
+<div class="panel accent"><div class="muted">عدد الإشارات</div><div class="metric">{{summary.get('count',0)}}</div></div>
+{% if exit_mode=='tp' %}<div class="panel accent"><div class="muted">وصلت TP +{{'%g'|format(tp_pct)}}%</div><div class="metric">{{'%.1f'|format(summary.get('hit_tp_pct',0))}}%</div></div>{% elif exit_mode=='time' %}<div class="panel accent"><div class="muted">متوسط Time Exit</div><div class="metric">{% if summary.get('time_avg_return') is not none %}{{'%+.2f'|format(summary.get('time_avg_return'))}}%{% else %}—{% endif %}</div></div>{% else %}<div class="panel accent"><div class="muted">متوسط Both</div><div class="metric">{% if summary.get('exit_avg_return') is not none %}{{'%+.2f'|format(summary.get('exit_avg_return'))}}%{% else %}—{% endif %}</div><div class="muted">TP {{summary.get('tp_exit_n',0)}} · Time {{summary.get('time_exit_n',0)}}</div></div>{% endif %}
+<div class="panel accent"><div class="muted">مفتوحة حاليًا</div><div class="metric">{{summary.get('open_n',0)}}</div><div class="muted">آخر بيانات {{latest_date}}</div></div>
 </div>
-{% if chart_svg %}
-<div class="panel">
-  <div class="actions"><strong>شارت السهم مع الإشارات</strong><span class="muted">{% if exit_mode == 'tp' %}الأخضر = إغلاق على TP{% elif exit_mode == 'time' %}البنفسجي = إغلاق زمني{% else %}الأخضر = TP · البنفسجي = Time Exit{% endif %} | البرتقالي = إشارة ما زالت مفتوحة</span></div>
-  <div style="margin-top:10px;overflow:auto">{{chart_svg|safe}}</div>
-</div>
-{% endif %}
-<div class="panel"><div class="actions">
-  <span>شموع يومية: {{bars_count}}</span>
-  <span>متوسط 3M: {{'%+.2f'|format(summary.get('avg3m',0) or 0)}}%</span>
-  <span>متوسط 6M: {{'%+.2f'|format(summary.get('avg6m',0) or 0)}}%</span>
-  <span>متوسط 1Y: {{'%+.2f'|format(summary.get('avg1y',0) or 0)}}%</span>
-  <span>{% if exit_mode == 'tp' %}Median للوصول إلى TP: {% if summary.get('tp_median_sessions') is not none %}{{summary.get('tp_median_sessions')}} جلسة{% else %}—{% endif %}{% elif exit_mode == 'time' %}Median عائد الخروج: {% if summary.get('time_median_return') is not none %}{{'%+.2f'|format(summary.get('time_median_return'))}}%{% else %}—{% endif %}{% else %}Median عائد Both: {% if summary.get('exit_median_return') is not none %}{{'%+.2f'|format(summary.get('exit_median_return'))}}%{% else %}—{% endif %}{% endif %}</span>
-</div></div>
-<div class="panel tablewrap">
-<table>
-<thead><tr><th>الحالة</th><th>تاريخ الإشارة</th><th>تاريخ الخروج</th><th>{% if exit_mode == 'time' %}أداء الإغلاق Time Exit{% else %}عائد الخروج{% endif %}</th><th>سعر الخروج</th><th>سعر الإشارة</th><th>R²</th><th>Slope %</th><th>الأداء الحالي</th><th>بعد 1M</th><th>بعد 3M</th><th>بعد 6M</th><th>بعد 1Y</th><th>أقصى صعود</th><th>أقصى هبوط</th><th>{% if exit_mode == 'time' %}هل لمس +{{'%g'|format(tp_pct)}}% قبل الخروج؟{% elif exit_mode == 'both' %}TP +{{'%g'|format(tp_pct)}}% قبل/عند الخروج{% else %}TP +{{'%g'|format(tp_pct)}}%{% endif %}</th><th>+20%</th><th>+50%</th><th>+100%</th><th>العمر</th></tr></thead>
-<tbody>
-{% for x in rows %}<tr>
-<td>{% if x.status == 'OPEN' %}<strong style="color:#d97706">مفتوحة</strong>{% elif x.status == 'CLOSED_TIME' %}<strong style="color:#7c3aed">Time Exit</strong>{% else %}<strong style="color:#15803d">أغلقت على TP</strong>{% endif %}</td>
-<td dir="ltr">{{x.date}}</td><td dir="ltr">{{x.exit_date or '—'}}</td><td>{% if x.exit_return is not none %}<strong style="color:{{'#15803d' if x.exit_return >= 0 else '#b91c1c'}}">{{'%+.2f%%'|format(x.exit_return)}}</strong>{% else %}—{% endif %}</td><td>{{('%.2f'|format(x.exit_price)) if x.exit_price is not none else '—'}}</td><td>{{'%.2f'|format(x.price)}}</td><td>{{'%.4f'|format(x.r2)}}</td><td>{{'%.2f'|format(x.slope)}}</td>
-<td>{% if x.status == 'OPEN' %}<strong>{{'%+.2f%%'|format(x.current_return)}}</strong>{% else %}—{% endif %}</td>
-<td>{{('%+.2f%%'|format(x.ret_1m)) if x.ret_1m is not none else '—'}}</td>
-<td>{{('%+.2f%%'|format(x.ret_3m)) if x.ret_3m is not none else '—'}}</td>
-<td>{{('%+.2f%%'|format(x.ret_6m)) if x.ret_6m is not none else '—'}}</td>
-<td>{{('%+.2f%%'|format(x.ret_1y)) if x.ret_1y is not none else '—'}}</td>
-<td>{{'%+.2f%%'|format(x.max_gain)}}</td><td>{{'%+.2f%%'|format(x.max_dd)}}</td>
-<td>{% if exit_mode in ['time','both'] %}{% if x.tp_before_exit %}<strong style="color:#15803d">نعم · {{x.tp_before_exit_sessions}} جلسة</strong><br><span class="muted">{{x.tp_before_exit_date}}</span>{% else %}لا{% endif %}{% else %}{% if x.hit_tp is not none %}<strong>{{x.hit_tp}} جلسة</strong><br><span class="muted">{{x.hit_tp_date}}</span>{% else %}<strong style="color:#d97706">مفتوحة</strong>{% endif %}{% endif %}</td>
-<td>{% if x.hit20 is not none %}{{x.hit20}} جلسة<br><span class="muted">{{x.hit20_date}}</span>{% else %}—{% endif %}</td>
-<td>{% if x.hit50 is not none %}<strong>{{x.hit50}} جلسة</strong><br><span class="muted">{{x.hit50_date}}</span>{% else %}—{% endif %}</td>
-<td>{% if x.hit100 is not none %}{{x.hit100}} جلسة<br><span class="muted">{{x.hit100_date}}</span>{% else %}—{% endif %}</td>
-<td>{{x.age}}</td>
-</tr>{% else %}<tr><td colspan="20">لا توجد إشارات تاريخية بهذه القيم.</td></tr>{% endfor %}
-</tbody></table>
-</div>
+{% if scope=='market' and chart_symbol %}<div class="panel"><div class="actions"><strong>شارت {{chart_symbol}}</strong><span class="muted">تم اختياره من جدول إشارات السوق</span></div><div style="overflow:auto">{{chart_svg|safe}}</div></div>{% elif scope=='symbol' and chart_svg %}<div class="panel"><div class="actions"><strong>شارت {{symbol}} مع الإشارات</strong></div><div style="overflow:auto">{{chart_svg|safe}}</div></div>{% endif %}
+<div class="panel"><div class="actions"><span>متوسط 3M: {{'%+.2f'|format(summary.get('avg3m',0) or 0)}}%</span><span>متوسط 6M: {{'%+.2f'|format(summary.get('avg6m',0) or 0)}}%</span><span>متوسط 1Y: {{'%+.2f'|format(summary.get('avg1y',0) or 0)}}%</span>{% if summary.get('exit_win_pct') is not none %}<span>Win rate: {{'%.1f'|format(summary.get('exit_win_pct'))}}%</span>{% endif %}</div></div>
+<div class="panel tablewrap"><table>
+<thead><tr>{% if scope=='market' %}<th>الشارت</th><th>السهم</th><th>الشركة</th>{% endif %}<th>الحالة</th><th>تاريخ الإشارة</th><th>تاريخ الخروج</th><th>عائد الخروج</th><th>سعر الخروج</th><th>سعر الإشارة</th><th>R²</th><th>Slope %</th><th>الأداء الحالي</th><th>أقصى صعود</th><th>أقصى هبوط</th><th>+20%</th><th>+50%</th><th>+100%</th><th>العمر</th></tr></thead>
+<tbody>{% for x in rows %}<tr>
+{% if scope=='market' %}<td><a class="button secondary" href="{{chart_link(x)}}">عرض الشارت</a></td><td dir="ltr"><strong>{{x.symbol}}</strong></td><td>{{x.company}}</td>{% endif %}
+<td>{% if x.status=='OPEN' %}<strong style="color:#d97706">مفتوحة</strong>{% elif x.status=='CLOSED_TIME' %}<strong style="color:#7c3aed">Time Exit</strong>{% else %}<strong style="color:#15803d">TP</strong>{% endif %}</td>
+<td dir="ltr">{{x.date}}</td><td dir="ltr">{{x.exit_date or '—'}}</td><td>{% if x.exit_return is not none %}<strong style="color:{{'#15803d' if x.exit_return>=0 else '#b91c1c'}}">{{'%+.2f%%'|format(x.exit_return)}}</strong>{% else %}—{% endif %}</td><td>{{('%.2f'|format(x.exit_price)) if x.exit_price is not none else '—'}}</td><td>{{'%.2f'|format(x.price)}}</td><td>{{'%.4f'|format(x.r2)}}</td><td>{{'%.2f'|format(x.slope)}}</td><td>{% if x.status=='OPEN' %}<strong>{{'%+.2f%%'|format(x.current_return)}}</strong>{% else %}—{% endif %}</td><td>{{'%+.2f%%'|format(x.max_gain)}}</td><td>{{'%+.2f%%'|format(x.max_dd)}}</td><td>{% if x.hit20 is not none %}{{x.hit20}} جلسة{% else %}—{% endif %}</td><td>{% if x.hit50 is not none %}{{x.hit50}} جلسة{% else %}—{% endif %}</td><td>{% if x.hit100 is not none %}{{x.hit100}} جلسة{% else %}—{% endif %}</td><td>{{x.age}}</td>
+</tr>{% else %}<tr><td colspan="20">لا توجد إشارات بهذه القيم.</td></tr>{% endfor %}</tbody></table></div>
 {% endif %}
 {% endblock %}
