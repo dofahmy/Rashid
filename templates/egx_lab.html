@@ -147,6 +147,70 @@
   </div>
   <div style="margin-top:10px;overflow:auto">{{portfolio_svg|safe}}</div>
 </div>
+
+<div class="panel tablewrap" style="margin-top:16px">
+  <div class="actions">
+    <strong>سجل تطور المحفظة بالتوصيات</strong>
+    <span class="muted">كل صف = توصية دخلت المحفظة. لو الصفقة مغلقة يظهر سعر وتاريخ وسبب الخروج؛ ولو مفتوحة يظهر السعر والعائد الحاليان.</span>
+  </div>
+  <table style="min-width:1450px">
+    <thead>
+      <tr>
+        <th>#</th><th>الخانة</th><th>السهم</th><th>الشركة</th>
+        <th>تاريخ الفتح</th><th>سعر الفتح</th><th>قيمة الخانة عند الفتح</th>
+        <th>الحالة</th><th>تاريخ الإغلاق</th><th>سعر الإغلاق</th>
+        <th>سبب الإغلاق</th><th>عائد الصفقة</th><th>قيمة الخانة عند الإغلاق/الآن</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for t in portfolio_ledger %}
+      <tr>
+        <td>{{t.trade_id}}</td>
+        <td>{{t.slot}}</td>
+        <td dir="ltr"><strong>{{t.symbol}}</strong></td>
+        <td>{{t.company}}</td>
+        <td dir="ltr">{{t.entry_date}}</td>
+        <td>{{'%.2f'|format(t.entry_price)}}</td>
+        <td>{{'%.2f'|format(t.entry_value)}}</td>
+        <td>
+          {% if t.status=='OPEN' %}
+            <strong style="color:#d97706">مفتوحة</strong>
+          {% else %}
+            <strong style="color:#15803d">مغلقة</strong>
+          {% endif %}
+        </td>
+        <td dir="ltr">{{t.exit_date or '—'}}</td>
+        <td>
+          {% if t.exit_price is not none %}{{'%.2f'|format(t.exit_price)}}
+          {% elif t.current_price is defined %}<span class="muted">الآن {{'%.2f'|format(t.current_price)}}</span>
+          {% else %}—{% endif %}
+        </td>
+        <td>
+          {% if t.exit_reason=='FORCED_ROTATION' %}Rotation · إغلاق أعلى رابح
+          {% elif t.exit_reason=='CLOSED_TP' %}TP
+          {% elif t.exit_reason=='CLOSED_TIME' %}Time Exit
+          {% elif t.exit_reason=='CLOSED_SLOPE' %}Slope Exit
+          {% elif t.status=='OPEN' %}—{% else %}{{t.exit_reason or '—'}}{% endif %}
+        </td>
+        <td>
+          {% if t.exit_return is not none %}
+            <strong style="color:{{'#15803d' if t.exit_return>=0 else '#b91c1c'}}">{{'%+.2f%%'|format(t.exit_return)}}</strong>
+          {% elif t.current_return is defined %}
+            <strong style="color:{{'#15803d' if t.current_return>=0 else '#b91c1c'}}">{{'%+.2f%%'|format(t.current_return)}}</strong>
+          {% else %}—{% endif %}
+        </td>
+        <td>
+          {% if t.exit_value is not none %}{{'%.2f'|format(t.exit_value)}}
+          {% elif t.current_value is defined %}{{'%.2f'|format(t.current_value)}}
+          {% else %}—{% endif %}
+        </td>
+      </tr>
+    {% else %}
+      <tr><td colspan="13">لا توجد عمليات في المحفظة.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
 {% endif %}
 <div class="cards">
 <div class="panel accent"><div class="muted">النطاق</div><div class="metric" style="font-size:22px">{{symbol if scope=='symbol' else 'كل سوق مصر'}}</div><div class="muted">{{analysis_year if analysis_year else 'كل التاريخ'}}{% if scope=='market' %} · {{market_symbols}} رمز · أخطاء تحميل {{market_errors}}{% endif %}</div></div>
