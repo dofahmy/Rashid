@@ -85,7 +85,7 @@
 <label style="display:flex;gap:8px;align-items:center"><input name="confirm" type="checkbox" value="1" {{'checked' if confirm else ''}}>طبّق شروط الشمعة الحالية</label>{% if not confirm %}<input type="hidden" name="confirm" value="0">{% endif %}
 <button>حلّل التاريخ</button>
 </form>
-<p class="muted">اختاري «سهم واحد» لتحليل سهم ورسم الشارت مباشرة، أو «السوق المصري كله» لاستخراج كل الإشارات بنفس القيم. في وضع السوق كله لا يُرسم شارت تلقائيًا؛ اضغطي «عرض الشارت» على أي إشارة وسيظهر شارت سهمها وكل إشاراته بنفس إعدادات الاختبار. شرط الدخول الآن يستخدم نطاق Slope من الحد الأدنى إلى الحد الأقصى. ويمكن الخروج بـ TP أو Time أو Slope أو أول واحد منهم حسب الاختيار. لا تُفتح توصية جديدة على نفس السهم أثناء وجود توصية مفتوحة. عند اختيار سنة معينة، تظهر فقط الإشارات التي بدأ دخولها داخل هذه السنة؛ وأداء المحفظة يُحسب داخل نفس السنة حتى آخر جلسة تداول فيها. أما «كل التاريخ» فيستخدم كل الإشارات وكل الفترة المتاحة.</p>
+<p class="muted">اختاري «سهم واحد» لتحليل سهم ورسم الشارت مباشرة، أو «السوق المصري كله» لاستخراج كل الإشارات بنفس القيم. في وضع السوق كله لا يُرسم شارت تلقائيًا؛ اضغطي «عرض الشارت» على أي إشارة وسيظهر شارت سهمها وكل إشاراته بنفس إعدادات الاختبار. شرط الدخول الآن يستخدم نطاق Slope من الحد الأدنى إلى الحد الأقصى. ويمكن الخروج بـ TP أو Time أو Slope أو أول واحد منهم حسب الاختيار. لا تُفتح توصية جديدة على نفس السهم أثناء وجود توصية مفتوحة. فلتر CCI اختياري: لو غير مفعّل لا يدخل في اختيار الإشارة، لكن قيمة CCI تظل محسوبة لكل توصية وتظهر وقت الشراء ووقت البيع. عند اختيار سنة معينة، تظهر فقط الإشارات التي بدأ دخولها داخل هذه السنة؛ وأداء المحفظة يُحسب داخل نفس السنة حتى آخر جلسة تداول فيها. أما «كل التاريخ» فيستخدم كل الإشارات وكل الفترة المتاحة.</p>
 </div>
 {% if error %}<div class="panel warning"><strong>تعذر التحليل:</strong> {{error}}</div>{% endif %}
 {% if scope=='market' and market_scan_status in ('starting','running') %}
@@ -237,9 +237,11 @@
 <th><a href="{{sort_link('trade_duration')}}">مدة الصفقة <span class="egx-sort-mark">{{sort_mark('trade_duration')}}</span></a></th>
 <th><a href="{{sort_link('exit_price')}}">سعر الخروج <span class="egx-sort-mark">{{sort_mark('exit_price')}}</span></a></th>
 <th><a href="{{sort_link('exit_slope')}}">Slope عند الخروج <span class="egx-sort-mark">{{sort_mark('exit_slope')}}</span></a></th>
+<th><a href="{{sort_link('exit_cci')}}">CCI عند البيع <span class="egx-sort-mark">{{sort_mark('exit_cci')}}</span></a></th>
 <th><a href="{{sort_link('price')}}">سعر الإشارة <span class="egx-sort-mark">{{sort_mark('price')}}</span></a></th>
 <th><a href="{{sort_link('r2')}}">R² <span class="egx-sort-mark">{{sort_mark('r2')}}</span></a></th>
 <th><a href="{{sort_link('slope')}}">Slope % <span class="egx-sort-mark">{{sort_mark('slope')}}</span></a></th>
+<th><a href="{{sort_link('entry_cci')}}">CCI عند الشراء <span class="egx-sort-mark">{{sort_mark('entry_cci')}}</span></a></th>
 <th><a href="{{sort_link('current_return')}}">الأداء الحالي <span class="egx-sort-mark">{{sort_mark('current_return')}}</span></a></th>
 <th><a href="{{sort_link('max_gain')}}">أقصى صعود <span class="egx-sort-mark">{{sort_mark('max_gain')}}</span></a></th>
 <th><a href="{{sort_link('max_dd')}}">أقصى هبوط <span class="egx-sort-mark">{{sort_mark('max_dd')}}</span></a></th>
@@ -247,7 +249,7 @@
 <tbody>{% for x in rows %}<tr>
 {% if scope=='market' %}<td><a class="button secondary" href="{{chart_link(x)}}">عرض الشارت</a></td><td dir="ltr"><strong>{{x.symbol}}</strong></td><td>{{x.company}}</td>{% endif %}
 <td>{% if x.status=='OPEN' %}<strong style="color:#d97706">مفتوحة</strong>{% elif x.status=='CLOSED_TIME' %}<strong style="color:#7c3aed">Time Exit</strong>{% elif x.status=='CLOSED_SLOPE' %}<strong style="color:#dc2626">Slope Exit</strong>{% else %}<strong style="color:#15803d">TP</strong>{% endif %}</td>
-<td dir="ltr">{{x.date}}</td><td dir="ltr">{{x.exit_date or '—'}}</td><td>{% if x.exit_return is not none %}<strong style="color:{{'#15803d' if x.exit_return>=0 else '#b91c1c'}}">{{'%+.2f%%'|format(x.exit_return)}}</strong>{% else %}—{% endif %}</td><td><strong>{{x.trade_duration}}</strong> جلسة</td><td>{{('%.2f'|format(x.exit_price)) if x.exit_price is not none else '—'}}</td><td>{{('%.2f'|format(x.exit_slope_value)) if x.exit_slope_value is not none else '—'}}</td><td>{{'%.2f'|format(x.price)}}</td><td>{{'%.4f'|format(x.r2)}}</td><td>{{'%.2f'|format(x.slope)}}</td><td>{% if x.status=='OPEN' %}<strong>{{'%+.2f%%'|format(x.current_return)}}</strong>{% else %}—{% endif %}</td><td>{{'%+.2f%%'|format(x.max_gain)}}</td><td>{{'%+.2f%%'|format(x.max_dd)}}</td>
-</tr>{% else %}<tr><td colspan="{{14 if scope=='market' else 11}}">لا توجد إشارات بهذه القيم.</td></tr>{% endfor %}</tbody></table></div>
+<td dir="ltr">{{x.date}}</td><td dir="ltr">{{x.exit_date or '—'}}</td><td>{% if x.exit_return is not none %}<strong style="color:{{'#15803d' if x.exit_return>=0 else '#b91c1c'}}">{{'%+.2f%%'|format(x.exit_return)}}</strong>{% else %}—{% endif %}</td><td><strong>{{x.trade_duration}}</strong> جلسة</td><td>{{('%.2f'|format(x.exit_price)) if x.exit_price is not none else '—'}}</td><td>{{('%.2f'|format(x.exit_slope_value)) if x.exit_slope_value is not none else '—'}}</td><td>{{('%.2f'|format(x.exit_cci)) if x.exit_cci is not none else '—'}}</td><td>{{'%.2f'|format(x.price)}}</td><td>{{'%.4f'|format(x.r2)}}</td><td>{{'%.2f'|format(x.slope)}}</td><td>{{('%.2f'|format(x.entry_cci)) if x.entry_cci is not none else '—'}}</td><td>{% if x.status=='OPEN' %}<strong>{{'%+.2f%%'|format(x.current_return)}}</strong>{% else %}—{% endif %}</td><td>{{'%+.2f%%'|format(x.max_gain)}}</td><td>{{'%+.2f%%'|format(x.max_dd)}}</td>
+</tr>{% else %}<tr><td colspan="{{16 if scope=='market' else 13}}">لا توجد إشارات بهذه القيم.</td></tr>{% endfor %}</tbody></table></div>
 {% endif %}
 {% endblock %}
