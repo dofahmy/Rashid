@@ -17,6 +17,13 @@ def create_app(db=None,test_config=None):
     # deployment, so this avoids re-downloading ~300 symbols on every sort/click.
     egx_market_cache={}
     egx_market_lock=threading.Lock()
+
+    # Manual data-refresh jobs launched from the backend.
+    refresh_jobs={
+        'EG':{'status':'idle','message':'','started_at':'','finished_at':''},
+        'US':{'status':'idle','message':'','started_at':'','finished_at':''},
+    }
+    refresh_jobs_lock=threading.Lock()
     def csrf():
         if 'csrf' not in session: session['csrf']=secrets.token_urlsafe(32)
         return session['csrf']
@@ -268,6 +275,72 @@ def create_app(db=None,test_config=None):
         flash(f'تم حفظ الحد الأدنى لإرسال توصيات الأمريكي: {threshold:g}/100')
         return redirect(url_for('stocks'))
 
+
+    @app.post('/stocks/refresh-data/<market>')
+    @auth
+    def refresh_market_data(market):
+        market=market.upper()
+        if market not in ('EG','US'):
+            abort(404)
+
+        with refresh_jobs_lock:
+            if refresh_jobs[market]['status']=='running':
+                flash('التحديث شغال بالفعل لهذا السوق.')
+                return redirect(url_for('stocks'))
+            refresh_jobs[market]={
+                'status':'running',
+                'message':'بدأ التحديث...',
+                'started_at':datetime.now(timezone.utc).isoformat(),
+                'finished_at':'',
+            }
+
+        def job():
+            import asyncio
+            try:
+                from monitor.worker import exclusive, LOCK_KEY, scan_egx_daily, scan_market, policy
+                clock=time.time()
+
+                with exclusive(DB,LOCK_KEY) as locked:
+                    if not locked:
+                        raise RuntimeError('Monitor مشغول الآن بفحص آخر. جرّبي مرة أخرى بعد انتهاء الفحص.')
+
+                    if market=='EG':
+                        asyncio.run(scan_egx_daily(DB,clock))
+                        msg='تم تحديث بيانات السوق المصري وإعادة بناء إشارات EGX.'
+                    else:
+                        from monitor.provider import YahooProvider
+                        async def _run_us():
+                            concurrency=max(1,min(24,int(os.getenv('MONITOR_CONCURRENCY','12'))))
+                            async with YahooProvider(concurrency) as provider:
+                                await scan_market(DB,provider,'US',clock,policy())
+                        asyncio.run(_run_us())
+                        msg='انتهى طلب تحديث بيانات السوق الأمريكي. راجعي آخر عملية فحص للتفاصيل.'
+
+                with refresh_jobs_lock:
+                    refresh_jobs[market]={
+                        'status':'done',
+                        'message':msg,
+                        'started_at':refresh_jobs[market].get('started_at',''),
+                        'finished_at':datetime.now(timezone.utc).isoformat(),
+                    }
+            except Exception as exc:
+                with refresh_jobs_lock:
+                    refresh_jobs[market]={
+                        'status':'error',
+                        'message':f'{type(exc).__name__}: {exc}',
+                        'started_at':refresh_jobs[market].get('started_at',''),
+                        'finished_at':datetime.now(timezone.utc).isoformat(),
+                    }
+
+        threading.Thread(
+            target=job,
+            daemon=True,
+            name=f'manual-refresh-{market.lower()}'
+        ).start()
+
+        flash('بدأ تحديث البيانات في الخلفية. تقدري تفضلي في الباك إند وتعملي Refresh للصفحة لمتابعة الحالة.')
+        return redirect(url_for('stocks'))
+
     @app.get('/stocks')
     @auth
     def stocks():
@@ -349,7 +422,9 @@ def create_app(db=None,test_config=None):
         return render_template('stocks.html',rows=rows,counts=counts,universe=universe,errors=errors,
             waiting_errors=waiting_errors,no_complete_bars=no_complete_bars,provider_errors=provider_errors,scans=scans,
             hold_days=hold_days,hold_min_profit=hold_min_profit,send_minimum_score=send_minimum_score,labels=LABELS,stock_map=stocks_by_symbol,order_map=order_map,
-            egx_signals=egx_signals,egx_total=egx_total,egx_positive=egx_positive,egx_avg_return=egx_avg_return,egx_scan=egx_scan,total=total,page=page,pages=pages,link=link,local=local)
+            egx_signals=egx_signals,egx_total=egx_total,egx_positive=egx_positive,egx_avg_return=egx_avg_return,egx_scan=egx_scan,
+            refresh_jobs={k:dict(v) for k,v in refresh_jobs.items()},
+            total=total,page=page,pages=pages,link=link,local=local)
 
 
     @app.get('/egx-lab')
