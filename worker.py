@@ -23,6 +23,7 @@ EGX_R2_MIN=0.791694
 EGX_SLOPE_MIN=67.5062
 EGX_LOOKBACK=126
 EGX_COOLDOWN=126
+EGX_MAX_HOLD_SESSIONS=int(os.getenv('EGX_MAX_HOLD_SESSIONS','252'))
 EGX_MIN_PRICE=1.0
 EGX_MIN_ADV20=1_000_000.0
 EGX_MIN_AVGVOL20=10_000.0
@@ -122,6 +123,7 @@ def _egx_trade_exit(rows, metrics, signal_idx):
        post-entry peak and R2 has fallen 0.04 from its post-entry peak;
        the setup stays armed for 30 sessions and exits when adjusted close
        breaks below the prior 5-session adjusted low.
+    4) Time Exit at EGX_MAX_HOLD_SESSIONS (default 252 sessions).
 
     Target is checked first on a day because a touched intraday target means
     the +50% objective was reached even if the same day's close later weakens.
@@ -195,6 +197,11 @@ def _egx_trade_exit(rows, metrics, signal_idx):
             if ac < prior5:
                 return {'idx':j,'reason':'PEAK_EXIT','date':row['date']}
 
+        # 4) Operational time exit: do not keep stale positions open forever.
+        # 252 sessions ~= one trading year and is configurable in Railway.
+        if held >= EGX_MAX_HOLD_SESSIONS:
+            return {'idx':j,'reason':'TIME_EXIT','date':row['date']}
+
     return None
 
 
@@ -214,7 +221,22 @@ def _egx_analyze_signals(rows):
     for i,r in enumerate(rows):
         slope,r2=_egx_linreg(ac,i)
         metrics.append((slope,r2))
-        rule.append(bool(slope is not None and r2 is not None and r2>=EGX_R2_MIN and slope>=EGX_SLOPE_MIN))
+        # Entry confirmation added to the standalone R2+Slope signal:
+        # 1) today's raw close must break above yesterday's raw high;
+        # 2) today's candle must be positive (close > open);
+        # 3) the real body must be larger than the upper wick:
+        #    (close - open) > (high - close).
+        price_confirm = bool(
+            i > 0
+            and r['c'] > rows[i-1]['h']
+            and r['c'] > r['o']
+            and (r['c'] - r['o']) > (r['h'] - r['c'])
+        )
+        rule.append(bool(
+            slope is not None and r2 is not None
+            and r2 >= EGX_R2_MIN and slope >= EGX_SLOPE_MIN
+            and price_confirm
+        ))
 
     new_rule=[rule[i] and (i==0 or not rule[i-1]) for i in range(len(rule))]
     last_kept=-10**9;kept=[]
@@ -283,6 +305,8 @@ async def scan_egx_daily(DB,clock):
         tasks=[asyncio.create_task(one(item)) for item in symbols]
         counts={'total':len(tasks),'ok':0,'errors':0,'new_plans':0,'transitions':0}
         open_total=0
+        rebuilt_open_rows=[]
+        latest_activations=[]
         for n,task in enumerate(asyncio.as_completed(tasks),1):
             symbol,company,analysis,error=await task
             if error:
@@ -291,31 +315,37 @@ async def scan_egx_daily(DB,clock):
                 counts['ok']+=1
                 opens=analysis['open']
                 open_total+=len(opens)
-                with DB.begin() as s:
-                    # Rebuild this symbol's current OPEN rows every scan.
-                    s.execute(delete(EgxOpenSignal).where(EgxOpenSignal.symbol==symbol))
-                    for e in opens:
-                        s.add(EgxOpenSignal(
-                            symbol=symbol,company=company,signal_date=e['signal_date'],
-                            signal_ts=e['signal_ts'],signal_price=e['signal_price'],
-                            signal_adj_price=e['signal_adj_price'],pre_trend_r2=e['r2'],
-                            pre_trend_slope_pct=e['slope'],adv20=e['adv20'],avgvol20=e['avgvol20'],
-                            latest_date=e['latest_date'],current_price=e['current_price'],
-                            current_return_pct=e['current_return_pct'],max_gain_pct=e['max_gain_pct'],
-                            max_drawdown_pct=e['max_drawdown_pct'],age_sessions=e['age_sessions'],updated_at=now()))
-
-                    signal=analysis['latest_activation']
-                    if signal:
-                        exists=s.scalar(select(func.count()).select_from(EgxSignal).where(
-                            EgxSignal.symbol==symbol,EgxSignal.signal_date==signal['symbol_date']))
-                        if not exists:
-                            s.add(EgxSignal(
-                                symbol=symbol,company=company,signal_date=signal['symbol_date'],
-                                signal_ts=signal['signal_ts'],signal_price=signal['signal_price'],
-                                pre_trend_r2=signal['r2'],pre_trend_slope_pct=signal['slope'],
-                                adv20=signal['adv20'],avgvol20=signal['avgvol20']))
-                            counts['new_plans']+=1
+                for e in opens:
+                    rebuilt_open_rows.append((symbol,company,e))
+                signal=analysis['latest_activation']
+                if signal:
+                    latest_activations.append((symbol,company,signal))
             if n%25==0:log.info('EGX daily progress %s/%s open=%s',n,len(tasks),open_total)
+
+        # Replace the OPEN table in one transaction. This also removes stale
+        # rows left by older code or symbols whose previous record no longer
+        # qualifies as a live position.
+        with DB.begin() as s:
+            s.execute(delete(EgxOpenSignal))
+            for symbol,company,e in rebuilt_open_rows:
+                s.add(EgxOpenSignal(
+                    symbol=symbol,company=company,signal_date=e['signal_date'],
+                    signal_ts=e['signal_ts'],signal_price=e['signal_price'],
+                    signal_adj_price=e['signal_adj_price'],pre_trend_r2=e['r2'],
+                    pre_trend_slope_pct=e['slope'],adv20=e['adv20'],avgvol20=e['avgvol20'],
+                    latest_date=e['latest_date'],current_price=e['current_price'],
+                    current_return_pct=e['current_return_pct'],max_gain_pct=e['max_gain_pct'],
+                    max_drawdown_pct=e['max_drawdown_pct'],age_sessions=e['age_sessions'],updated_at=now()))
+            for symbol,company,signal in latest_activations:
+                exists=s.scalar(select(func.count()).select_from(EgxSignal).where(
+                    EgxSignal.symbol==symbol,EgxSignal.signal_date==signal['symbol_date']))
+                if not exists:
+                    s.add(EgxSignal(
+                        symbol=symbol,company=company,signal_date=signal['symbol_date'],
+                        signal_ts=signal['signal_ts'],signal_price=signal['signal_price'],
+                        pre_trend_r2=signal['r2'],pre_trend_slope_pct=signal['slope'],
+                        adv20=signal['adv20'],avgvol20=signal['avgvol20']))
+                    counts['new_plans']+=1
         with DB.begin() as s:
             scan=s.get(Scan,scan_id)
             for k,v in counts.items():setattr(scan,k,v)
