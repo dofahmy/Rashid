@@ -82,3 +82,19 @@ LABELS = {'WAITING':'أمر شراء معلّق','RETEST':'أمر قديم با�
           'TIME_EXIT':'خروج بعد مدة الانتظار','TARGET':'وصل للهدف','STOPPED':'وقف خسارة','CANCELLED':'أُلغيت الخطة',
           'EXPIRED':'انتهت مهلة الخطة','MISSED':'تجاوز الهدف قبل الدخول','DATA_GAP':'فجوة بيانات — يحتاج مراجعة'}
 OPEN = ('WAITING','RETEST','ACTIVE')
+
+class EgxSignal(Base):
+    __tablename__ = 'egx_r2slope_signals'
+    id = Column(Integer, primary_key=True)
+    symbol = Column(String(40), nullable=False, index=True)
+    company = Column(String(250), default='')
+    signal_date = Column(String(10), nullable=False, index=True)
+    signal_ts = Column(BigInteger, nullable=False, index=True)
+    signal_price = Column(Float, nullable=False)
+    pre_trend_r2 = Column(Float, nullable=False)
+    pre_trend_slope_pct = Column(Float, nullable=False)
+    adv20 = Column(Float)
+    avgvol20 = Column(Float)
+    detected_at = Column(String(40), default=now)
+    __table_args__ = (UniqueConstraint('symbol','signal_date',name='uq_egx_signal_symbol_date'),)
+
