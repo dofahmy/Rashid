@@ -347,10 +347,12 @@ def create_app(db=None,test_config=None):
             hold_days=hold_days,hold_min_profit=hold_min_profit,send_minimum_score=send_minimum_score,labels=LABELS,stock_map=stocks_by_symbol,order_map=order_map,
             egx_signals=egx_signals,egx_total=egx_total,egx_positive=egx_positive,egx_avg_return=egx_avg_return,egx_scan=egx_scan,total=total,page=page,pages=pages,link=link,local=local)
 
+
     @app.get('/egx-lab')
     @auth
     def egx_lab():
         """Interactive historical EGX R²/Slope signal explorer for one symbol."""
+        import html as _html
         symbol=request.args.get('symbol','').strip().upper().replace('.CA','')[:20]
         try:r2_min=float(request.args.get('r2','0.791694'))
         except (TypeError,ValueError):r2_min=0.791694
@@ -362,8 +364,81 @@ def create_app(db=None,test_config=None):
         except (TypeError,ValueError):tp_pct=50.0
         tp_target=tp_pct/100.0
         confirm=request.args.get('confirm','1')!='0'
-        rows=[];error='';latest_date='';company='';bars_count=0
+        rows=[];error='';latest_date='';company='';bars_count=0;chart_svg=''
         summary={}
+
+        def _build_svg(data, rows, tp_pct):
+            if not data:
+                return ''
+            width=1180; height=360
+            ml=64; mr=20; mt=24; mb=40
+            pw=max(10,width-ml-mr); ph=max(10,height-mt-mb)
+            closes=[float(x['ac']) for x in data]
+            highs=[float(x['ah']) for x in data]
+            lows=[float(x['al']) for x in data]
+            pmin=min(lows); pmax=max(highs)
+            if pmax<=pmin:
+                pmax=pmin+1.0
+            n=max(1,len(data)-1)
+            def px(i): return ml + (i/n)*pw
+            def py(v): return mt + (pmax-float(v))/(pmax-pmin)*ph
+            path=' '.join(('M' if i==0 else 'L')+f'{px(i):.2f},{py(c):.2f}' for i,c in enumerate(closes))
+            parts=[]
+            parts.append(f'<svg viewBox="0 0 {width} {height}" width="100%" height="360" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="EGX signal chart">')
+            parts.append('<rect x="0" y="0" width="100%" height="100%" rx="12" fill="#ffffff"/>')
+            for frac in [0,0.25,0.50,0.75,1.0]:
+                y=mt+ph*frac
+                val=pmax-(pmax-pmin)*frac
+                parts.append(f'<line x1="{ml}" y1="{y:.2f}" x2="{width-mr}" y2="{y:.2f}" stroke="#e9edf5" stroke-width="1"/>')
+                parts.append(f'<text x="{ml-8}" y="{y+4:.2f}" text-anchor="end" font-size="11" fill="#60708a">{val:.2f}</text>')
+            parts.append(f'<path d="{path}" fill="none" stroke="#0b5ed7" stroke-width="2.2"/>')
+            # Mark signals
+            for r in rows:
+                i=r.get('index')
+                if i is None or i<0 or i>=len(data):
+                    continue
+                x=px(i); y=py(r['price'])
+                status=r.get('status')
+                entry_color='#0f9d58' if status=='CLOSED_TP' else '#ff8a00'
+                parts.append(f'<line x1="{x:.2f}" y1="{mt}" x2="{x:.2f}" y2="{mt+ph}" stroke="#cfd7e6" stroke-dasharray="3 4" stroke-width="1"/>')
+                parts.append(f'<circle cx="{x:.2f}" cy="{y:.2f}" r="5.5" fill="{entry_color}" stroke="#ffffff" stroke-width="1.5"/>')
+                parts.append(f'<text x="{x:.2f}" y="{max(14, y-10):.2f}" text-anchor="middle" font-size="10" font-weight="700" fill="{entry_color}">{_html.escape(r["date"][5:])}</text>')
+                if r.get('hit_tp') is not None and r.get('tp_index') is not None:
+                    xi=px(r['tp_index']); yi=py(r['price']*(1+tp_pct/100.0))
+                    parts.append(f'<line x1="{x:.2f}" y1="{y:.2f}" x2="{xi:.2f}" y2="{yi:.2f}" stroke="#14a44d" stroke-width="2"/>')
+                    parts.append(f'<circle cx="{xi:.2f}" cy="{yi:.2f}" r="5.5" fill="#14a44d" stroke="#ffffff" stroke-width="1.5"/>')
+                    parts.append(f'<text x="{xi:.2f}" y="{min(height-6, yi+16):.2f}" text-anchor="middle" font-size="10" fill="#14a44d">TP</text>')
+                else:
+                    li=len(data)-1
+                    x2=px(li); y2=py(float(data[-1]['ac']))
+                    parts.append(f'<line x1="{x:.2f}" y1="{y:.2f}" x2="{x2:.2f}" y2="{y2:.2f}" stroke="#ff8a00" stroke-width="2" stroke-dasharray="5 4"/>')
+                    parts.append(f'<circle cx="{x2:.2f}" cy="{y2:.2f}" r="5.5" fill="#ff8a00" stroke="#ffffff" stroke-width="1.5"/>')
+                    parts.append(f'<text x="{x2:.2f}" y="{max(14, y2-10):.2f}" text-anchor="middle" font-size="10" fill="#ff8a00">OPEN</text>')
+            # x-axis labels
+            wanted=min(6,len(data))
+            if wanted>1:
+                step=max(1,(len(data)-1)//(wanted-1))
+                idxs=list(range(0,len(data),step))
+                if idxs[-1]!=len(data)-1:
+                    idxs.append(len(data)-1)
+                idxs=idxs[:wanted-1]+[len(data)-1]
+                seen=[]
+                for i in idxs:
+                    if i in seen: continue
+                    seen.append(i)
+                    x=px(i)
+                    parts.append(f'<text x="{x:.2f}" y="{height-12}" text-anchor="middle" font-size="11" fill="#60708a">{_html.escape(str(data[i]["date"]))}</text>')
+            # legend
+            parts.append('<g font-size="11" font-weight="600">')
+            lx=ml; ly=18
+            for color,label in [('#0b5ed7','السعر'),('#14a44d','إشارة أغلقت على TP'),('#ff8a00','إشارة مفتوحة حتى الآن')]:
+                parts.append(f'<rect x="{lx}" y="{ly-8}" width="12" height="12" rx="2" fill="{color}"/>')
+                parts.append(f'<text x="{lx+18}" y="{ly+2}" fill="#203040">{label}</text>')
+                lx += 170 if label=='السعر' else 210
+            parts.append('</g>')
+            parts.append('</svg>')
+            return ''.join(parts)
+
         if symbol:
             try:
                 from monitor.worker import _egx_daily_sync, _egx_linreg, _egx_price_confirm
@@ -372,6 +447,7 @@ def create_app(db=None,test_config=None):
                 if not data:
                     raise RuntimeError('لم يرجع Yahoo تاريخًا يوميًا لهذا الرمز.')
                 latest_date=data[-1]['date']
+                company=data[-1].get('name','') if isinstance(data[-1],dict) else ''
                 ac=[float(x['ac']) for x in data]
                 metrics=[];rule=[]
                 for i in range(len(data)):
@@ -393,30 +469,36 @@ def create_app(db=None,test_config=None):
                     entry=float(data[i]['ac'])
                     for j in range(i+1,len(data)):
                         if float(data[j]['ah'])>=entry*(1+target):
-                            return j-i,data[j]['date']
-                    return None,None
+                            return j-i,data[j]['date'],j
+                    return None,None,None
                 for i in kept:
                     entry=float(data[i]['ac']);future=data[i:]
                     max_gain=100*(max(float(x['ah']) for x in future)/entry-1)
                     max_dd=100*(min(float(x['al']) for x in future)/entry-1)
-                    h20,d20=fmt_hit(i,.20);h50,d50=fmt_hit(i,.50);h100,d100=fmt_hit(i,1.00)
-                    htp,dtp=fmt_hit(i,tp_target)
+                    h20,d20,i20=fmt_hit(i,.20);h50,d50,i50=fmt_hit(i,.50);h100,d100,i100=fmt_hit(i,1.00)
+                    htp,dtp,itp=fmt_hit(i,tp_target)
                     slope,r2=metrics[i]
+                    current_return=100*(float(data[-1]['ac'])/entry-1)
+                    status='CLOSED_TP' if htp is not None else 'OPEN'
                     rows.append({
+                        'index':i,
                         'date':data[i]['date'],'price':entry,'r2':r2,'slope':slope,
                         'ret_1m':ret_at(i,21),'ret_3m':ret_at(i,63),'ret_6m':ret_at(i,126),'ret_1y':ret_at(i,252),
-                        'current_return':100*(float(data[-1]['ac'])/entry-1),
+                        'current_return':current_return,
                         'max_gain':max_gain,'max_dd':max_dd,
                         'hit20':h20,'hit20_date':d20,'hit50':h50,'hit50_date':d50,'hit100':h100,'hit100_date':d100,
-                        'hit_tp':htp,'hit_tp_date':dtp,
+                        'hit_tp':htp,'hit_tp_date':dtp,'tp_index':itp,
                         'age':len(data)-1-i,
                         'confirm':_egx_price_confirm(data,i),
+                        'status':status,
                     })
                 rows.reverse()
+                chart_svg=_build_svg(data, list(reversed(rows)), tp_pct)
                 n=len(rows)
                 if n:
                     hit50=sum(1 for x in rows if x['hit50'] is not None)
                     hit_tp=sum(1 for x in rows if x['hit_tp'] is not None)
+                    open_n=sum(1 for x in rows if x['status']=='OPEN')
                     tp_sessions=[x['hit_tp'] for x in rows if x['hit_tp'] is not None]
                     matured6=[x for x in rows if x['ret_6m'] is not None]
                     matured1y=[x for x in rows if x['ret_1y'] is not None]
@@ -425,6 +507,7 @@ def create_app(db=None,test_config=None):
                         'hit50_pct':100*hit50/n,
                         'hit_tp_pct':100*hit_tp/n,
                         'tp_hits':hit_tp,
+                        'open_n':open_n,
                         'tp_median_sessions':sorted(tp_sessions)[len(tp_sessions)//2] if tp_sessions else None,
                         'avg3m':sum(x['ret_3m'] for x in rows if x['ret_3m'] is not None)/max(1,sum(x['ret_3m'] is not None for x in rows)),
                         'avg6m':sum(x['ret_6m'] for x in matured6)/len(matured6) if matured6 else None,
@@ -433,7 +516,8 @@ def create_app(db=None,test_config=None):
             except Exception as exc:
                 error=f'{type(exc).__name__}: {exc}'
         return render_template('egx_lab.html',symbol=symbol,r2_min=r2_min,slope_min=slope_min,cooldown=cooldown,tp_pct=tp_pct,
-            confirm=confirm,rows=rows,error=error,latest_date=latest_date,bars_count=bars_count,summary=summary,company=company)
+            confirm=confirm,rows=rows,error=error,latest_date=latest_date,bars_count=bars_count,summary=summary,company=company,chart_svg=chart_svg)
+
 
     @app.get('/stocks/<int:plan_id>')
     @auth
