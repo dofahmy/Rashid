@@ -84,6 +84,25 @@
 <p class="muted">اختاري «سهم واحد» لتحليل سهم ورسم الشارت مباشرة، أو «السوق المصري كله» لاستخراج كل الإشارات بنفس القيم. في وضع السوق كله لا يُرسم شارت تلقائيًا؛ اضغطي «عرض الشارت» على أي إشارة وسيظهر شارت سهمها وكل إشاراته بنفس إعدادات الاختبار. شرط الدخول الآن يستخدم نطاق Slope من الحد الأدنى إلى الحد الأقصى. ويمكن الخروج بـ TP أو Time أو Slope أو أول واحد منهم حسب الاختيار. لا تُفتح توصية جديدة على نفس السهم أثناء وجود توصية مفتوحة.</p>
 </div>
 {% if error %}<div class="panel warning"><strong>تعذر التحليل:</strong> {{error}}</div>{% endif %}
+{% if scope=='market' and market_scan_status in ('starting','running') %}
+<div class="panel" style="border:1px solid #d8e2ef">
+  <div class="actions">
+    <strong>فحص السوق يعمل في الخلفية</strong>
+    <span>{{market_scan_progress}} / {{market_symbols if market_symbols else '...' }} سهم</span>
+    <a class="button secondary" href="{{request.full_path}}">تحديث النتائج</a>
+  </div>
+  <p class="muted" style="margin-bottom:0">الصفحة لم تعد تنتظر اكتمال كل السوق. اضغطي «تحديث النتائج» بعد قليل؛ النتائج الجزئية تظهر أثناء الفحص، وبعد اكتماله الترتيب وفتح الشارت يصبحان فوريين من الكاش.</p>
+</div>
+{% elif scope=='market' and market_scan_status=='error' %}
+<div class="panel warning"><strong>خطأ في فحص السوق:</strong> {{market_scan_error}}</div>
+{% elif scope=='market' and market_scan_status=='done' %}
+<div class="panel">
+  <div class="actions">
+    <span>اكتمل فحص {{market_symbols}} سهم · أخطاء {{market_errors}}</span>
+    <a class="button secondary" href="{{url_for('egx_lab', **dict(request.args, force_scan='1'))}}">إعادة فحص السوق</a>
+  </div>
+</div>
+{% endif %}
 {% if not error and ((scope=='symbol' and symbol) or scope=='market') %}
 <div class="cards">
 <div class="panel accent"><div class="muted">النطاق</div><div class="metric" style="font-size:22px">{{symbol if scope=='symbol' else 'كل سوق مصر'}}</div>{% if scope=='market' %}<div class="muted">{{market_symbols}} رمز · أخطاء تحميل {{market_errors}}</div>{% endif %}</div>
@@ -104,6 +123,7 @@
 <th><a href="{{sort_link('date')}}">تاريخ الإشارة <span class="egx-sort-mark">{{sort_mark('date')}}</span></a></th>
 <th><a href="{{sort_link('exit_date')}}">تاريخ الخروج <span class="egx-sort-mark">{{sort_mark('exit_date')}}</span></a></th>
 <th><a href="{{sort_link('exit_return')}}">عائد الخروج <span class="egx-sort-mark">{{sort_mark('exit_return')}}</span></a></th>
+<th><a href="{{sort_link('trade_duration')}}">مدة الصفقة <span class="egx-sort-mark">{{sort_mark('trade_duration')}}</span></a></th>
 <th><a href="{{sort_link('exit_price')}}">سعر الخروج <span class="egx-sort-mark">{{sort_mark('exit_price')}}</span></a></th>
 <th><a href="{{sort_link('exit_slope')}}">Slope عند الخروج <span class="egx-sort-mark">{{sort_mark('exit_slope')}}</span></a></th>
 <th><a href="{{sort_link('price')}}">سعر الإشارة <span class="egx-sort-mark">{{sort_mark('price')}}</span></a></th>
@@ -112,15 +132,11 @@
 <th><a href="{{sort_link('current_return')}}">الأداء الحالي <span class="egx-sort-mark">{{sort_mark('current_return')}}</span></a></th>
 <th><a href="{{sort_link('max_gain')}}">أقصى صعود <span class="egx-sort-mark">{{sort_mark('max_gain')}}</span></a></th>
 <th><a href="{{sort_link('max_dd')}}">أقصى هبوط <span class="egx-sort-mark">{{sort_mark('max_dd')}}</span></a></th>
-<th><a href="{{sort_link('hit20')}}">+20% <span class="egx-sort-mark">{{sort_mark('hit20')}}</span></a></th>
-<th><a href="{{sort_link('hit50')}}">+50% <span class="egx-sort-mark">{{sort_mark('hit50')}}</span></a></th>
-<th><a href="{{sort_link('hit100')}}">+100% <span class="egx-sort-mark">{{sort_mark('hit100')}}</span></a></th>
-<th><a href="{{sort_link('age')}}">العمر <span class="egx-sort-mark">{{sort_mark('age')}}</span></a></th>
 </tr></thead>
 <tbody>{% for x in rows %}<tr>
 {% if scope=='market' %}<td><a class="button secondary" href="{{chart_link(x)}}">عرض الشارت</a></td><td dir="ltr"><strong>{{x.symbol}}</strong></td><td>{{x.company}}</td>{% endif %}
 <td>{% if x.status=='OPEN' %}<strong style="color:#d97706">مفتوحة</strong>{% elif x.status=='CLOSED_TIME' %}<strong style="color:#7c3aed">Time Exit</strong>{% elif x.status=='CLOSED_SLOPE' %}<strong style="color:#dc2626">Slope Exit</strong>{% else %}<strong style="color:#15803d">TP</strong>{% endif %}</td>
-<td dir="ltr">{{x.date}}</td><td dir="ltr">{{x.exit_date or '—'}}</td><td>{% if x.exit_return is not none %}<strong style="color:{{'#15803d' if x.exit_return>=0 else '#b91c1c'}}">{{'%+.2f%%'|format(x.exit_return)}}</strong>{% else %}—{% endif %}</td><td>{{('%.2f'|format(x.exit_price)) if x.exit_price is not none else '—'}}</td><td>{{('%.2f'|format(x.exit_slope_value)) if x.exit_slope_value is not none else '—'}}</td><td>{{'%.2f'|format(x.price)}}</td><td>{{'%.4f'|format(x.r2)}}</td><td>{{'%.2f'|format(x.slope)}}</td><td>{% if x.status=='OPEN' %}<strong>{{'%+.2f%%'|format(x.current_return)}}</strong>{% else %}—{% endif %}</td><td>{{'%+.2f%%'|format(x.max_gain)}}</td><td>{{'%+.2f%%'|format(x.max_dd)}}</td><td>{% if x.hit20 is not none %}{{x.hit20}} جلسة{% else %}—{% endif %}</td><td>{% if x.hit50 is not none %}{{x.hit50}} جلسة{% else %}—{% endif %}</td><td>{% if x.hit100 is not none %}{{x.hit100}} جلسة{% else %}—{% endif %}</td><td>{{x.age}}</td>
-</tr>{% else %}<tr><td colspan="21">لا توجد إشارات بهذه القيم.</td></tr>{% endfor %}</tbody></table></div>
+<td dir="ltr">{{x.date}}</td><td dir="ltr">{{x.exit_date or '—'}}</td><td>{% if x.exit_return is not none %}<strong style="color:{{'#15803d' if x.exit_return>=0 else '#b91c1c'}}">{{'%+.2f%%'|format(x.exit_return)}}</strong>{% else %}—{% endif %}</td><td><strong>{{x.trade_duration}}</strong> جلسة</td><td>{{('%.2f'|format(x.exit_price)) if x.exit_price is not none else '—'}}</td><td>{{('%.2f'|format(x.exit_slope_value)) if x.exit_slope_value is not none else '—'}}</td><td>{{'%.2f'|format(x.price)}}</td><td>{{'%.4f'|format(x.r2)}}</td><td>{{'%.2f'|format(x.slope)}}</td><td>{% if x.status=='OPEN' %}<strong>{{'%+.2f%%'|format(x.current_return)}}</strong>{% else %}—{% endif %}</td><td>{{'%+.2f%%'|format(x.max_gain)}}</td><td>{{'%+.2f%%'|format(x.max_dd)}}</td>
+</tr>{% else %}<tr><td colspan="{{14 if scope=='market' else 11}}">لا توجد إشارات بهذه القيم.</td></tr>{% endfor %}</tbody></table></div>
 {% endif %}
 {% endblock %}
