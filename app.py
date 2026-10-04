@@ -397,7 +397,7 @@ def create_app(db=None,test_config=None):
         if exit_slope_op not in ('gte','lte'): exit_slope_op='gte'
         confirm=request.args.get('confirm','1')!='0'
         rows=[];error='';latest_date='';company='';bars_count=0;chart_svg='';market_errors=0;market_symbols=0;market_scan_status='';market_scan_progress=0;market_scan_error=''
-        summary={};show_portfolio=request.args.get('portfolio','0')=='1';portfolio_svg='';portfolio_summary={}
+        summary={};show_portfolio=request.args.get('portfolio','0')=='1';portfolio_svg='';portfolio_summary={};portfolio_ledger=[]
 
         from monitor.worker import _egx_daily_sync, _egx_price_confirm
         try:
@@ -586,7 +586,7 @@ def create_app(db=None,test_config=None):
             """
             import bisect
             if not signal_rows:
-                return {},''
+                return {},'',[]
 
             # One compact adjusted-close series per symbol.
             series={}
@@ -608,7 +608,7 @@ def create_app(db=None,test_config=None):
 
             signals=[x for x in signal_rows if x.get('symbol') in series]
             if not signals:
-                return {},''
+                return {},'',[]
 
             signals.sort(key=lambda x:(x['date'],x['symbol']))
             first_date=signals[0]['date']
@@ -620,7 +620,7 @@ def create_app(db=None,test_config=None):
                 last_date=min(last_date,year_end)
             calendar=sorted(d for d in date_union if first_date<=d<=last_date)
             if not calendar:
-                return {},''
+                return {},'',[]
 
             def mark(sym, d):
                 dates,prices=series[sym]
@@ -642,6 +642,9 @@ def create_app(db=None,test_config=None):
             natural_exits=0
             winners=0
             closed_returns=[]
+            ledger=[]
+            next_trade_id=1
+            action_marks=[]
 
             def close_slot(slot, d, price, reason):
                 nonlocal forced_rotations,natural_exits,winners
@@ -656,6 +659,12 @@ def create_app(db=None,test_config=None):
                 if ret>0:winners+=1
                 if reason=='FORCED_ROTATION':forced_rotations+=1
                 else:natural_exits+=1
+                rec=pos['ledger']
+                rec.update({
+                    'exit_date':d,'exit_price':price,'exit_return':ret,
+                    'exit_reason':reason,'status':'CLOSED','exit_value':value
+                })
+                action_marks.append((d,'EXIT',rec['trade_id'],pos['symbol']))
 
             for d in calendar:
                 # Natural exits first. Exit price follows the selected setup.
@@ -688,10 +697,21 @@ def create_app(db=None,test_config=None):
                     capital=float(empty['cash'])
                     if capital<=0:
                         continue
+                    slot_no=slots.index(empty)+1
+                    trade_id=next_trade_id
+                    next_trade_id+=1
+                    rec={
+                        'trade_id':trade_id,'slot':slot_no,'symbol':r['symbol'],
+                        'company':r.get('company',''),'entry_date':d,'entry_price':entry_price,
+                        'entry_value':capital,'exit_date':None,'exit_price':None,
+                        'exit_return':None,'exit_reason':None,'exit_value':None,'status':'OPEN'
+                    }
+                    ledger.append(rec)
+                    action_marks.append((d,'ENTRY',trade_id,r['symbol']))
                     empty['cash']=0.0
                     empty['pos']={
                         'symbol':r['symbol'],'entry_date':d,'entry_price':entry_price,
-                        'shares':capital/entry_price,'row':r
+                        'shares':capital/entry_price,'row':r,'ledger':rec
                     }
                     portfolio_trades+=1
 
@@ -715,6 +735,18 @@ def create_app(db=None,test_config=None):
                 if peak>0:
                     max_dd=min(max_dd,100*(v/peak-1))
             open_positions=sum(1 for s in slots if s['pos'] is not None)
+            final_date=equity_curve[-1][0]
+            for slot in slots:
+                pos=slot.get('pos')
+                if not pos:continue
+                cp=mark(pos['symbol'],final_date)
+                if cp is None:cp=pos['entry_price']
+                rec=pos['ledger']
+                rec.update({
+                    'current_date':final_date,'current_price':cp,
+                    'current_return':100*(cp/pos['entry_price']-1),
+                    'current_value':pos['shares']*cp
+                })
             summary={
                 'start_value':100.0,'end_value':end_value,'total_return':total_return,
                 'max_dd':max_dd,'trades':portfolio_trades,'forced_rotations':forced_rotations,
@@ -745,13 +777,31 @@ def create_app(db=None,test_config=None):
                 y0=py(100)
                 parts.append(f'<line x1="{ml}" y1="{y0:.2f}" x2="{width-mr}" y2="{y0:.2f}" stroke="#9aa8bb" stroke-dasharray="4 4"/>')
             parts.append(f'<path d="{path}" fill="none" stroke="#0b5ed7" stroke-width="2.5"/>')
+            eq_by_date={d:(i,v) for i,(d,v) in enumerate(equity_curve)}
+            # Mark portfolio transactions on the equity curve. The full detail is
+            # listed in the ledger below, while the chart shows numbered entry/exit points.
+            per_date={}
+            for d,kind,tid,sym in action_marks:
+                per_date.setdefault(d,[]).append((kind,tid,sym))
+            for d,marks in per_date.items():
+                iv=eq_by_date.get(d)
+                if not iv:continue
+                i,v=iv;x=px(i);y=py(v)
+                entries=sum(1 for k,_t,_s in marks if k=='ENTRY')
+                exits=sum(1 for k,_t,_s in marks if k=='EXIT')
+                if entries:
+                    parts.append(f'<circle cx="{x:.2f}" cy="{y:.2f}" r="5" fill="#0f9d58" stroke="#fff"/>')
+                if exits:
+                    parts.append(f'<circle cx="{x:.2f}" cy="{y+11:.2f}" r="5" fill="#dc2626" stroke="#fff"/>')
+                label=('+'+str(entries) if entries else '')+('/-'+str(exits) if exits else '')
+                parts.append(f'<text x="{x:.2f}" y="{max(12,y-9):.2f}" text-anchor="middle" font-size="9" font-weight="700" fill="#203040">{label}</text>')
             tick_idxs=sorted(set([0,len(equity_curve)//4,len(equity_curve)//2,(3*len(equity_curve))//4,len(equity_curve)-1]))
             for i in tick_idxs:
                 x=px(i);label=_html.escape(equity_curve[i][0])
                 parts.append(f'<text x="{x:.2f}" y="{height-14}" text-anchor="middle" font-size="11" fill="#60708a">{label}</text>')
             parts.append(f'<text x="{width-mr}" y="18" text-anchor="end" font-size="12" font-weight="700" fill="#203040">Portfolio value · start = 100</text>')
             parts.append('</svg>')
-            return summary,''.join(parts)
+            return summary,''.join(parts),ledger
 
         try:
             if scope=='symbol':
@@ -853,7 +903,7 @@ def create_app(db=None,test_config=None):
                 compact_data=dict(cached.get('data_map') or {})
                 summary=_summarize(rows)
                 if show_portfolio and rows:
-                    portfolio_summary,portfolio_svg=_portfolio_backtest(rows,compact_data,analysis_year)
+                    portfolio_summary,portfolio_svg,portfolio_ledger=_portfolio_backtest(rows,compact_data,analysis_year)
 
                 if chart_symbol:
                     cres=_analyse(chart_symbol,lookup.get(chart_symbol,chart_symbol))
@@ -916,7 +966,7 @@ def create_app(db=None,test_config=None):
         return render_template('egx_lab.html',scope=scope,symbol=symbol,chart_symbol=chart_symbol,r2_min=r2_min,slope_min=slope_min,slope_max=slope_max,cooldown=cooldown,tp_pct=tp_pct,
             analysis_year=analysis_year,analysis_years=analysis_years,
             confirm=confirm,rows=rows,error=error,latest_date=latest_date,bars_count=bars_count,summary=summary,company=company,chart_svg=chart_svg,
-            exit_mode=exit_mode,time_exit_sessions=time_exit_sessions,exit_slope=exit_slope,exit_slope_op=exit_slope_op,market_symbols=market_symbols,market_errors=market_errors,chart_link=chart_link,sort_link=sort_link,sort_mark=sort_mark,sort_key=sort_key,sort_dir=sort_dir,show_portfolio=show_portfolio,portfolio_svg=portfolio_svg,portfolio_summary=portfolio_summary)
+            exit_mode=exit_mode,time_exit_sessions=time_exit_sessions,exit_slope=exit_slope,exit_slope_op=exit_slope_op,market_symbols=market_symbols,market_errors=market_errors,chart_link=chart_link,sort_link=sort_link,sort_mark=sort_mark,sort_key=sort_key,sort_dir=sort_dir,show_portfolio=show_portfolio,portfolio_svg=portfolio_svg,portfolio_summary=portfolio_summary,portfolio_ledger=portfolio_ledger)
 
 
     @app.get('/stocks/<int:plan_id>')
