@@ -18,8 +18,8 @@
     <span class="button secondary" style="cursor:default">متوسط الأداء: {{"%.2f"|format(egx_avg_return or 0)}}%</span>
   </div>
   <p class="muted">
-    هذه الصفحة تعيد بناء إشارات R² + Slope التاريخية تلقائيًا، وليس فقط الإشارات التي ظهرت بعد تشغيل البوت.
-    «مفتوح» هنا يعني أن السهم لم يلمس هدف +50% منذ تاريخ الإشارة. الأداء محسوب حتى أحدث جلسة متاحة.
+    هذه الصفحة تعيد بناء إشارات R² + Slope التاريخية تلقائيًا، ثم تطبق مخارج النظام المعتمدة عليها.
+    «مفتوح» يعني أنه لم يحدث بعد أي من: هدف +50%، Failure Exit خلال أول 60 جلسة، أو Peak Exit. ويظهر مركز واحد مفتوح فقط لكل سهم.
   </p>
   {% if egx_scan %}
   <p class="muted">آخر فحص: {{egx_scan.finished_at or egx_scan.started_at}} · الحالة: {{egx_scan.status}} · أسهم فُحصت: {{egx_scan.ok}} / {{egx_scan.total}}</p>
