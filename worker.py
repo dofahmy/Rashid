@@ -7,7 +7,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 from sqlalchemy import select, delete, func, case, text
 from core import database, now
-from .models import Stock, Candle, Plan, Scan, OPEN, EgxSignal
+from .models import Stock, Candle, Plan, Scan, OPEN, EgxSignal, EgxOpenSignal
 from .engine import new_plan, advance, policy
 from .strategy import clean, local, CONFIG, COMMODITY_MARKETS, evaluate
 from .provider import YahooProvider, TwelveDataCommodityProvider, FeedError
@@ -109,26 +109,120 @@ def _egx_linreg(values,end_idx,window=EGX_LOOKBACK):
     slope_pct=100*(b*(window-1))/ym
     return slope_pct,r2
 
-def _egx_live_signal(rows):
-    if len(rows)<EGX_LOOKBACK+21:return None
+def _egx_trade_exit(rows, metrics, signal_idx):
+    """Return the first approved exit after an EGX entry, or None if still open.
+
+    Approved exits, in chronological order:
+    1) +50% target touched by adjusted daily high.
+    2) Failure Exit during first 60 sessions:
+       R2 <= entry R2 - 0.05, slope <= 45% of entry slope,
+       and adjusted close below the prior 10-session adjusted low.
+    3) Peak Exit after at least 10 sessions:
+       while near the post-entry high, slope has fallen 57.5% from its
+       post-entry peak and R2 has fallen 0.04 from its post-entry peak;
+       the setup stays armed for 30 sessions and exits when adjusted close
+       breaks below the prior 5-session adjusted low.
+
+    Target is checked first on a day because a touched intraday target means
+    the +50% objective was reached even if the same day's close later weakens.
+    """
+    entry=float(rows[signal_idx]['ac'])
+    if entry<=0:
+        return None
+    entry_slope,entry_r2=metrics[signal_idx]
+    if entry_slope is None or entry_r2 is None:
+        return None
+
+    peak_price=-math.inf
+    peak_slope=-math.inf
+    peak_r2=-math.inf
+    peak_armed=False
+    peak_armed_idx=None
+
+    last=len(rows)-1
+    fail_end=min(last,signal_idx+60)
+
+    for j in range(signal_idx+1,last+1):
+        held=j-signal_idx
+        row=rows[j]
+        s,r=metrics[j]
+        ah=float(row['ah']);al=float(row['al']);ac=float(row['ac'])
+
+        # 1) Fixed +50% target.
+        if ah >= entry*1.50:
+            return {'idx':j,'reason':'TARGET_50','date':row['date']}
+
+        # 2) Failure Exit: fixed research rule, only first 60 sessions.
+        if j<=fail_end and held>=5 and s is not None and r is not None:
+            r2_fail = r <= entry_r2 - 0.05
+            slope_fail = entry_slope>0 and s <= entry_slope*0.45
+            if j>=10:
+                prior10=min(float(x['al']) for x in rows[j-10:j])
+                if ac < prior10 and r2_fail and slope_fail:
+                    return {'idx':j,'reason':'FAILURE_EXIT','date':row['date']}
+
+        # 3) Peak Exit: fixed research rule.
+        if math.isfinite(ah):
+            peak_price=max(peak_price,ah)
+        if s is not None and math.isfinite(s):
+            peak_slope=max(peak_slope,s)
+        if r is not None and math.isfinite(r):
+            peak_r2=max(peak_r2,r)
+
+        if held<10:
+            continue
+
+        near_high = math.isfinite(peak_price) and ah >= 0.98*peak_price
+        slope_roll = (
+            s is not None and math.isfinite(s) and math.isfinite(peak_slope)
+            and peak_slope>0 and s <= peak_slope*0.425
+        )
+        r2_roll = (
+            r is not None and math.isfinite(r) and math.isfinite(peak_r2)
+            and r <= peak_r2-0.04
+        )
+
+        if (not peak_armed) and near_high and slope_roll and r2_roll:
+            peak_armed=True
+            peak_armed_idx=j
+
+        if peak_armed and j-peak_armed_idx>30:
+            peak_armed=False
+            peak_armed_idx=None
+
+        if peak_armed and j>=5:
+            prior5=min(float(x['al']) for x in rows[j-5:j])
+            if ac < prior5:
+                return {'idx':j,'reason':'PEAK_EXIT','date':row['date']}
+
+    return None
+
+
+def _egx_analyze_signals(rows):
+    """Rebuild historical R2+Slope entries and return positions open *now*.
+
+    A historical entry is not considered open merely because it missed +50%.
+    It is removed once any approved exit has happened: +50% target, Failure
+    Exit, or Peak Exit.  Only the latest still-open position per symbol is
+    returned to the backend table.
+    """
+    if len(rows)<EGX_LOOKBACK+21:
+        return {'open':[], 'latest_activation':None}
+
     ac=[r['ac'] for r in rows]
-    valid=[]
-    rule=[]
-    metrics=[]
+    rule=[];metrics=[]
     for i,r in enumerate(rows):
         slope,r2=_egx_linreg(ac,i)
         metrics.append((slope,r2))
-        ok=bool(slope is not None and r2 is not None and r2>=EGX_R2_MIN and slope>=EGX_SLOPE_MIN)
-        rule.append(ok)
+        rule.append(bool(slope is not None and r2 is not None and r2>=EGX_R2_MIN and slope>=EGX_SLOPE_MIN))
+
     new_rule=[rule[i] and (i==0 or not rule[i-1]) for i in range(len(rule))]
-    last_kept=-10**9
-    kept=[]
+    last_kept=-10**9;kept=[]
     for i,is_new in enumerate(new_rule):
         if not is_new:continue
         if i-last_kept<EGX_COOLDOWN:continue
         r=rows[i]
-        if r['c']<EGX_MIN_PRICE:continue
-        if i<21:continue
+        if r['c']<EGX_MIN_PRICE or i<21:continue
         prior=rows[i-20:i]
         adv20=sum(x['c']*x['v'] for x in prior)/20
         avgvol20=sum(x['v'] for x in prior)/20
@@ -136,18 +230,42 @@ def _egx_live_signal(rows):
         last_kept=i
         slope,r2=metrics[i]
         kept.append((i,adv20,avgvol20,slope,r2))
-    if not kept:return None
-    i,adv20,avgvol20,slope,r2=kept[-1]
-    # Live scanner only inserts when the newest completed daily bar itself is the kept activation bar.
-    if i!=len(rows)-1:return None
-    r=rows[i]
-    return {
-        'symbol_date':r['date'],'signal_ts':r['ts'],'signal_price':r['c'],
-        'r2':r2,'slope':slope,'adv20':adv20,'avgvol20':avgvol20,
-    }
+
+    latest=rows[-1]
+    open_candidates=[]
+    for i,adv20,avgvol20,slope,r2 in kept:
+        exit_info=_egx_trade_exit(rows,metrics,i)
+        if exit_info is not None:
+            continue
+
+        sig=rows[i];entry_adj=float(sig['ac'])
+        future=rows[i:]
+        open_candidates.append({
+            'signal_date':sig['date'],'signal_ts':sig['ts'],
+            'signal_price':sig['c'],'signal_adj_price':entry_adj,
+            'r2':r2,'slope':slope,'adv20':adv20,'avgvol20':avgvol20,
+            'latest_date':latest['date'],'current_price':latest['c'],
+            'current_return_pct':100*(float(latest['ac'])/entry_adj-1),
+            'max_gain_pct':100*(max(float(x['ah']) for x in future)/entry_adj-1),
+            'max_drawdown_pct':100*(min(float(x['al']) for x in future)/entry_adj-1),
+            'age_sessions':len(rows)-1-i,
+        })
+
+    # One current position per symbol. If independent historical cooldown logic
+    # produced more than one unresolved entry, show only the latest live one.
+    open_rows=[max(open_candidates,key=lambda x:x['signal_ts'])] if open_candidates else []
+
+    latest_activation=None
+    if kept and kept[-1][0]==len(rows)-1:
+        i,adv20,avgvol20,slope,r2=kept[-1];r=rows[i]
+        latest_activation={
+            'symbol_date':r['date'],'signal_ts':r['ts'],'signal_price':r['c'],
+            'r2':r2,'slope':slope,'adv20':adv20,'avgvol20':avgvol20,
+        }
+    return {'open':open_rows,'latest_activation':latest_activation}
 
 async def scan_egx_daily(DB,clock):
-    """Daily Egypt scanner. Saves backend rows only; never queues Telegram messages."""
+    """Daily Egypt scan + historical OPEN backfill for the backend page."""
     boundary=int(clock)//86400*86400
     with DB.begin() as s:
         scan=Scan(market='EG',boundary=boundary,status='running');s.add(scan);s.flush();scan_id=scan.id
@@ -159,19 +277,35 @@ async def scan_egx_daily(DB,clock):
             async with sem:
                 try:
                     rows=await asyncio.to_thread(_egx_daily_sync,symbol)
-                    return symbol,company,_egx_live_signal(rows),None
+                    return symbol,company,_egx_analyze_signals(rows),None
                 except Exception as exc:
                     return symbol,company,None,type(exc).__name__
         tasks=[asyncio.create_task(one(item)) for item in symbols]
         counts={'total':len(tasks),'ok':0,'errors':0,'new_plans':0,'transitions':0}
+        open_total=0
         for n,task in enumerate(asyncio.as_completed(tasks),1):
-            symbol,company,signal,error=await task
+            symbol,company,analysis,error=await task
             if error:
                 counts['errors']+=1
             else:
                 counts['ok']+=1
-                if signal:
-                    with DB.begin() as s:
+                opens=analysis['open']
+                open_total+=len(opens)
+                with DB.begin() as s:
+                    # Rebuild this symbol's current OPEN rows every scan.
+                    s.execute(delete(EgxOpenSignal).where(EgxOpenSignal.symbol==symbol))
+                    for e in opens:
+                        s.add(EgxOpenSignal(
+                            symbol=symbol,company=company,signal_date=e['signal_date'],
+                            signal_ts=e['signal_ts'],signal_price=e['signal_price'],
+                            signal_adj_price=e['signal_adj_price'],pre_trend_r2=e['r2'],
+                            pre_trend_slope_pct=e['slope'],adv20=e['adv20'],avgvol20=e['avgvol20'],
+                            latest_date=e['latest_date'],current_price=e['current_price'],
+                            current_return_pct=e['current_return_pct'],max_gain_pct=e['max_gain_pct'],
+                            max_drawdown_pct=e['max_drawdown_pct'],age_sessions=e['age_sessions'],updated_at=now()))
+
+                    signal=analysis['latest_activation']
+                    if signal:
                         exists=s.scalar(select(func.count()).select_from(EgxSignal).where(
                             EgxSignal.symbol==symbol,EgxSignal.signal_date==signal['symbol_date']))
                         if not exists:
@@ -181,14 +315,14 @@ async def scan_egx_daily(DB,clock):
                                 pre_trend_r2=signal['r2'],pre_trend_slope_pct=signal['slope'],
                                 adv20=signal['adv20'],avgvol20=signal['avgvol20']))
                             counts['new_plans']+=1
-            if n%50==0:log.info('EGX daily progress %s/%s',n,len(tasks))
+            if n%25==0:log.info('EGX daily progress %s/%s open=%s',n,len(tasks),open_total)
         with DB.begin() as s:
             scan=s.get(Scan,scan_id)
             for k,v in counts.items():setattr(scan,k,v)
             scan.status='partial' if counts['errors'] else 'complete'
             scan.finished_at=now()
-            scan.summary_json=json.dumps({'scanner':'EGX_R2_SLOPE_DAILY','new_signals':counts['new_plans']})
-        log.info('EGX daily scan %s',counts)
+            scan.summary_json=json.dumps({'scanner':'EGX_R2_SLOPE_DAILY','new_signals':counts['new_plans'],'open_signals':open_total})
+        log.info('EGX daily scan %s open_signals=%s',counts,open_total)
     except Exception as exc:
         with DB.begin() as s:
             scan=s.get(Scan,scan_id)
@@ -204,6 +338,7 @@ def egx_due(clock):
 
 def initialize(DB):
     EgxSignal.__table__.create(bind=DB.kw['bind'],checkfirst=True)
+    EgxOpenSignal.__table__.create(bind=DB.kw['bind'],checkfirst=True)
     universe=json.loads((DATA/'universe.json').read_text(encoding='utf-8'))
     counts={m:sum(r['market_key']==m for r in universe) for m in ('SA','US')}
     if counts!={'SA':375,'US':5691} or len({r['symbol'] for r in universe})!=6066:
