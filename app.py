@@ -267,7 +267,7 @@ def create_app(db=None,test_config=None):
     @app.get('/stocks')
     @auth
     def stocks():
-        from monitor.models import Stock, Plan, Scan, LABELS
+        from monitor.models import Stock, Plan, Scan, EgxSignal, LABELS
         from monitor.strategy import local
         from monitor.customer import minimum_score
         conditions=[]
@@ -279,6 +279,7 @@ def create_app(db=None,test_config=None):
         if symbol: conditions.append(Plan.symbol==symbol)
         try: page=max(1,int(request.args.get('page','1')))
         except ValueError: page=1
+        EgxSignal.__table__.create(bind=DB.kw['bind'],checkfirst=True)
         with DB() as s:
             from monitor.limits import holding_settings
             hold_days,hold_min_profit=holding_settings(s)
@@ -319,6 +320,12 @@ def create_app(db=None,test_config=None):
                 scan.no_complete_bars=int(_errs.get('no_complete_bars',0) or 0)
                 scan.provider_errors=max(0,int(scan.errors or 0)-scan.waiting_errors-scan.no_complete_bars)
             stocks_by_symbol={r.symbol:r for r in s.scalars(select(Stock).where(Stock.symbol.in_([p.symbol for p in rows])))}
+            egx_signals=s.scalars(
+                select(EgxSignal).order_by(EgxSignal.signal_date.desc(),EgxSignal.id.desc()).limit(100)
+            ).all()
+            egx_total=s.scalar(select(func.count()).select_from(EgxSignal)) or 0
+            egx_scan=s.scalar(select(Scan).where(Scan.market=='EG').order_by(Scan.id.desc()).limit(1))
+
             import json as _order_json
             order_map={}
             for _p in rows:
@@ -334,7 +341,8 @@ def create_app(db=None,test_config=None):
         def link(**kw): return url_for('stocks',**{**request.args.to_dict(),**kw})
         return render_template('stocks.html',rows=rows,counts=counts,universe=universe,errors=errors,
             waiting_errors=waiting_errors,no_complete_bars=no_complete_bars,provider_errors=provider_errors,scans=scans,
-            hold_days=hold_days,hold_min_profit=hold_min_profit,send_minimum_score=send_minimum_score,labels=LABELS,stock_map=stocks_by_symbol,order_map=order_map,total=total,page=page,pages=pages,link=link,local=local)
+            hold_days=hold_days,hold_min_profit=hold_min_profit,send_minimum_score=send_minimum_score,labels=LABELS,stock_map=stocks_by_symbol,order_map=order_map,
+            egx_signals=egx_signals,egx_total=egx_total,egx_scan=egx_scan,total=total,page=page,pages=pages,link=link,local=local)
 
     @app.get('/stocks/<int:plan_id>')
     @auth
