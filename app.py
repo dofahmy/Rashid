@@ -1,4 +1,4 @@
-import os, secrets, csv, io, math, time
+import os, secrets, csv, io, math, time, threading
 from functools import wraps
 from datetime import timedelta, datetime, timezone
 from urllib.parse import quote
@@ -13,6 +13,10 @@ def create_app(db=None,test_config=None):
     if test_config: app.config.update(test_config)
     if not app.config['SECRET_KEY'] or not app.config['ADMIN_PASSWORD_HASH']: raise RuntimeError('Set SECRET_KEY and ADMIN_PASSWORD_HASH before starting administration.')
     DB=db or database(); failures={}
+    # Whole-market EGX lab cache. The web service runs one gunicorn worker in this
+    # deployment, so this avoids re-downloading ~300 symbols on every sort/click.
+    egx_market_cache={}
+    egx_market_lock=threading.Lock()
     def csrf():
         if 'csrf' not in session: session['csrf']=secrets.token_urlsafe(32)
         return session['csrf']
@@ -381,7 +385,7 @@ def create_app(db=None,test_config=None):
         exit_slope_op=request.args.get('exit_slope_op','gte').strip().lower()
         if exit_slope_op not in ('gte','lte'): exit_slope_op='gte'
         confirm=request.args.get('confirm','1')!='0'
-        rows=[];error='';latest_date='';company='';bars_count=0;chart_svg='';market_errors=0;market_symbols=0
+        rows=[];error='';latest_date='';company='';bars_count=0;chart_svg='';market_errors=0;market_symbols=0;market_scan_status='';market_scan_progress=0;market_scan_error=''
         summary={}
 
         from monitor.worker import _egx_daily_sync, _egx_price_confirm
@@ -513,6 +517,7 @@ def create_app(db=None,test_config=None):
                     'exit_price':exit_price,'exit_return':exit_return,'tp_before_exit':tp_before_exit,
                     'exit_slope_value':(metrics[exit_index][0] if exit_index is not None and metrics[exit_index][0] is not None else None),
                     'tp_before_exit_sessions':tp_before_exit_sessions,'tp_before_exit_date':tp_before_exit_date,
+                    'trade_duration':(exit_index-i if exit_index is not None else len(data)-1-i),
                     'age':len(data)-1-i,'confirm':_egx_price_confirm(data,i),'status':status,
                 })
             return {'symbol':symbol_code,'company':company_name,'data':data,'rows':out}
@@ -567,20 +572,94 @@ def create_app(db=None,test_config=None):
                     res=_analyse(symbol,symbol);rows=list(reversed(res['rows']));bars_count=len(res['data']);latest_date=res['data'][-1]['date'] if res['data'] else '';summary=_summarize(rows);chart_svg=_build_svg(res['data'],res['rows'])
             else:
                 if _egx_discover_sync is None:raise RuntimeError('نسخة monitor/worker.py الحالية لا تحتوي على اكتشاف سوق مصر.')
-                universe=_egx_discover_sync();market_symbols=len(universe)
-                collected=[]
-                with ThreadPoolExecutor(max_workers=12) as pool:
-                    futs={pool.submit(_analyse,s,c):(s,c) for s,c in universe}
-                    for fut in as_completed(futs):
-                        try:
-                            res=fut.result();collected.extend(res['rows'])
-                            if res['data']:
-                                d=res['data'][-1]['date'];latest_date=max(latest_date,d) if latest_date else d
-                        except Exception:
-                            market_errors+=1
-                rows=sorted(collected,key=lambda x:(x['date'],x['symbol']),reverse=True);summary=_summarize(rows)
+
+                cache_key=(
+                    round(r2_min,8),round(slope_min,6),round(slope_max,6),cooldown,
+                    round(tp_pct,6),exit_mode,time_exit_sessions,round(exit_slope,6),
+                    exit_slope_op,bool(confirm)
+                )
+                force=request.args.get('force_scan','0')=='1'
+
+                def _market_scan_job(key):
+                    collected=[];errors=0;latest='';lookup={}
+                    try:
+                        universe=_egx_discover_sync()
+                        lookup=dict(universe)
+                        with egx_market_lock:
+                            e=egx_market_cache.get(key,{})
+                            e.update({'status':'running','total':len(universe),'progress':0,'errors':0,
+                                      'rows':[],'latest_date':'','lookup':lookup,'started_at':time.time()})
+                            egx_market_cache[key]=e
+                        with ThreadPoolExecutor(max_workers=20) as pool:
+                            futs={pool.submit(_analyse,s,c):(s,c) for s,c in universe}
+                            done=0
+                            for fut in as_completed(futs):
+                                done+=1
+                                try:
+                                    res=fut.result()
+                                    collected.extend(res['rows'])
+                                    if res['data']:
+                                        d=res['data'][-1]['date']
+                                        latest=max(latest,d) if latest else d
+                                except Exception:
+                                    errors+=1
+                                # publish partial results every few completions
+                                if done % 10 == 0 or done == len(universe):
+                                    partial=sorted(collected,key=lambda x:(x['date'],x['symbol']),reverse=True)
+                                    with egx_market_lock:
+                                        e=egx_market_cache.get(key,{})
+                                        e.update({'status':'running','total':len(universe),'progress':done,
+                                                  'errors':errors,'rows':partial,'latest_date':latest,
+                                                  'lookup':lookup})
+                                        egx_market_cache[key]=e
+                        final_rows=sorted(collected,key=lambda x:(x['date'],x['symbol']),reverse=True)
+                        with egx_market_lock:
+                            egx_market_cache[key]={
+                                'status':'done','total':len(universe),'progress':len(universe),
+                                'errors':errors,'rows':final_rows,'latest_date':latest,
+                                'lookup':lookup,'started_at':egx_market_cache.get(key,{}).get('started_at',time.time()),
+                                'finished_at':time.time()
+                            }
+                    except Exception as exc:
+                        with egx_market_lock:
+                            egx_market_cache[key]={
+                                'status':'error','total':0,'progress':0,'errors':1,'rows':[],
+                                'latest_date':'','lookup':{},'error':f'{type(exc).__name__}: {exc}',
+                                'finished_at':time.time()
+                            }
+
+                with egx_market_lock:
+                    cached=egx_market_cache.get(cache_key)
+                    # Expire completed results after 30 minutes; data is daily.
+                    if cached and cached.get('status')=='done' and time.time()-cached.get('finished_at',0)>1800:
+                        cached=None
+                        egx_market_cache.pop(cache_key,None)
+                    if force:
+                        cached=None
+                        egx_market_cache.pop(cache_key,None)
+                    if cached is None:
+                        egx_market_cache[cache_key]={'status':'starting','rows':[],'progress':0,'total':0,'errors':0,
+                                                     'latest_date':'','lookup':{},'started_at':time.time()}
+                        threading.Thread(target=_market_scan_job,args=(cache_key,),daemon=True,name='egx-lab-market-scan').start()
+                        cached=egx_market_cache[cache_key]
+
+                with egx_market_lock:
+                    cached=dict(egx_market_cache.get(cache_key,cached))
+                rows=list(cached.get('rows') or [])
+                market_symbols=int(cached.get('total') or 0)
+                market_errors=int(cached.get('errors') or 0)
+                latest_date=cached.get('latest_date') or ''
+                market_scan_status=cached.get('status','starting')
+                market_scan_progress=int(cached.get('progress') or 0)
+                market_scan_error=cached.get('error','')
+                lookup=dict(cached.get('lookup') or {})
+                summary=_summarize(rows)
+
                 if chart_symbol:
-                    lookup=dict(universe);cres=_analyse(chart_symbol,lookup.get(chart_symbol,chart_symbol));chart_svg=_build_svg(cres['data'],cres['rows']);bars_count=len(cres['data']);company=lookup.get(chart_symbol,'')
+                    cres=_analyse(chart_symbol,lookup.get(chart_symbol,chart_symbol))
+                    chart_svg=_build_svg(cres['data'],cres['rows'])
+                    bars_count=len(cres['data'])
+                    company=lookup.get(chart_symbol,chart_symbol)
         except Exception as exc:
             error=f'{type(exc).__name__}: {exc}'
 
@@ -607,6 +686,7 @@ def create_app(db=None,test_config=None):
             'hit20':lambda x:x.get('hit20'),
             'hit50':lambda x:x.get('hit50'),
             'hit100':lambda x:x.get('hit100'),
+            'trade_duration':lambda x:x.get('trade_duration'),
             'age':lambda x:x.get('age'),
         }
         if rows and sort_key in sort_fields:
