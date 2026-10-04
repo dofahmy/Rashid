@@ -223,8 +223,15 @@ def _egx_analyze_signals(rows):
         metrics.append((slope,r2))
         # Entry confirmation added to the standalone R2+Slope signal:
         # 1) today's raw close must break above yesterday's raw high;
-        # 2) today's candle must be positive (close > open).
-        price_confirm = bool(i > 0 and r['c'] > rows[i-1]['h'] and r['c'] > r['o'])
+        # 2) today's candle must be positive (close > open);
+        # 3) the real body must be larger than the upper wick:
+        #    (close - open) > (high - close).
+        price_confirm = bool(
+            i > 0
+            and r['c'] > rows[i-1]['h']
+            and r['c'] > r['o']
+            and (r['c'] - r['o']) > (r['h'] - r['c'])
+        )
         rule.append(bool(
             slope is not None and r2 is not None
             and r2 >= EGX_R2_MIN and slope >= EGX_SLOPE_MIN
