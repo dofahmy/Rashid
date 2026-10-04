@@ -221,7 +221,15 @@ def _egx_analyze_signals(rows):
     for i,r in enumerate(rows):
         slope,r2=_egx_linreg(ac,i)
         metrics.append((slope,r2))
-        rule.append(bool(slope is not None and r2 is not None and r2>=EGX_R2_MIN and slope>=EGX_SLOPE_MIN))
+        # Entry confirmation added to the standalone R2+Slope signal:
+        # 1) today's raw close must break above yesterday's raw high;
+        # 2) today's candle must be positive (close > open).
+        price_confirm = bool(i > 0 and r['c'] > rows[i-1]['h'] and r['c'] > r['o'])
+        rule.append(bool(
+            slope is not None and r2 is not None
+            and r2 >= EGX_R2_MIN and slope >= EGX_SLOPE_MIN
+            and price_confirm
+        ))
 
     new_rule=[rule[i] and (i==0 or not rule[i-1]) for i in range(len(rule))]
     last_kept=-10**9;kept=[]
