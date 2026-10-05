@@ -98,9 +98,28 @@
 <label>CCI ≥<input name="cci_min" type="number" step="0.1" value="{{cci_min}}"></label>
 <label>CCI ≤<input name="cci_max" type="number" step="0.1" value="{{cci_max}}"></label>
 
+<div style="width:100%;border-top:1px solid #dbe4ef;margin:6px 0"></div>
+
+<label style="display:flex;gap:8px;align-items:center">
+  <input name="early_fail_enabled" type="checkbox" value="1" {{'checked' if early_fail_enabled else ''}}>
+  فعّل Early Failure Exit
+</label>
+{% if not early_fail_enabled %}<input type="hidden" name="early_fail_enabled" value="0">{% endif %}
+<label>خلال أول N جلسات<input name="early_fail_sessions" type="number" min="1" max="252" step="1" value="{{early_fail_sessions}}"></label>
+<label>Max Gain أقل من %<input name="early_fail_max_gain" type="number" step="0.1" value="{{early_fail_max_gain}}"></label>
+<label>والعائد الحالي ≤ %<input name="early_fail_return" type="number" step="0.1" value="{{early_fail_return}}"></label>
+
+<label style="display:flex;gap:8px;align-items:center">
+  <input name="giveback_enabled" type="checkbox" value="1" {{'checked' if giveback_enabled else ''}}>
+  فعّل Giveback Exit
+</label>
+{% if not giveback_enabled %}<input type="hidden" name="giveback_enabled" value="0">{% endif %}
+<label>بعد ما يصل Max Gain إلى %<input name="giveback_peak" type="number" step="0.1" value="{{giveback_peak}}"></label>
+<label>اخرج لو العائد الحالي ≤ %<input name="giveback_return" type="number" step="0.1" value="{{giveback_return}}"></label>
+
 <button>حلّل التاريخ</button>
 </form>
-<p class="muted">السوق المختار حاليًا: <strong>{{market_label}}</strong>. اختاري «سهم واحد» لتحليل سهم ورسم الشارت مباشرة، أو «{{'السوق المصري كله' if lab_market=='EGX' else 'السوق الأمريكي كله'}}» لاستخراج كل الإشارات بنفس القيم. في وضع السوق كله لا يُرسم شارت تلقائيًا؛ اضغطي «عرض الشارت» على أي إشارة وسيظهر شارت سهمها وكل إشاراته بنفس إعدادات الاختبار. شرط الدخول الآن يستخدم نطاق Slope من الحد الأدنى إلى الحد الأقصى. ويمكن الخروج بـ TP أو Time أو Slope أو أول واحد منهم حسب الاختيار. لا تُفتح توصية جديدة على نفس السهم أثناء وجود توصية مفتوحة. فلتر CCI اختياري: لو غير مفعّل لا يدخل في اختيار الإشارة، لكن قيمة CCI تظل محسوبة لكل توصية وتظهر وقت الشراء ووقت البيع. عند اختيار سنة معينة، تظهر فقط الإشارات التي بدأ دخولها داخل هذه السنة؛ وأداء المحفظة يُحسب داخل نفس السنة حتى آخر جلسة تداول فيها. أما «كل التاريخ» فيستخدم كل الإشارات وكل الفترة المتاحة.</p>
+<p class="muted">السوق المختار حاليًا: <strong>{{market_label}}</strong>. اختاري «سهم واحد» لتحليل سهم ورسم الشارت مباشرة، أو «{{'السوق المصري كله' if lab_market=='EGX' else 'السوق الأمريكي كله'}}» لاستخراج كل الإشارات بنفس القيم. في وضع السوق كله لا يُرسم شارت تلقائيًا؛ اضغطي «عرض الشارت» على أي إشارة وسيظهر شارت سهمها وكل إشاراته بنفس إعدادات الاختبار. شرط الدخول الآن يستخدم نطاق Slope من الحد الأدنى إلى الحد الأقصى. ويمكن الخروج بـ TP أو Time أو Slope أو أول واحد منهم حسب الاختيار. لا تُفتح توصية جديدة على نفس السهم أثناء وجود توصية مفتوحة. فلتر CCI اختياري: لو غير مفعّل لا يدخل في اختيار الإشارة، لكن قيمة CCI تظل محسوبة لكل توصية وتظهر وقت الشراء ووقت البيع. Early Failure Exit يخرج الصفقة خلال أول عدد جلسات تحدديه إذا ظلت أقصى مكاسبها أقل من الحد وفي نفس الوقت هبط عائدها تحت الحد المحدد. Giveback Exit يخرج الصفقة إذا كانت وصلت إلى مكسب معين ثم رجعت إلى عائد أقل من أو يساوي القيمة المحددة. عند اختيار سنة معينة، تظهر فقط الإشارات التي بدأ دخولها داخل هذه السنة؛ وأداء المحفظة يُحسب داخل نفس السنة حتى آخر جلسة تداول فيها. أما «كل التاريخ» فيستخدم كل الإشارات وكل الفترة المتاحة.</p>
 </div>
 {% if error %}<div class="panel warning"><strong>تعذر التحليل:</strong> {{error}}</div>{% endif %}
 {% if scope=='market' and market_scan_status in ('starting','running') %}
@@ -233,7 +252,7 @@
 <div class="cards">
 <div class="panel accent"><div class="muted">النطاق</div><div class="metric" style="font-size:22px">{{symbol if scope=='symbol' else ('كل سوق مصر' if lab_market=='EGX' else 'كل سوق أمريكا')}}</div><div class="muted">{{market_label}} · {{analysis_year if analysis_year else 'كل التاريخ'}}{% if scope=='market' %} · {{market_symbols}} رمز · أخطاء تحميل {{market_errors}}{% endif %}</div></div>
 <div class="panel accent"><div class="muted">عدد الإشارات</div><div class="metric">{{summary.get('count',0)}}</div></div>
-{% if exit_mode=='tp' %}<div class="panel accent"><div class="muted">وصلت TP +{{'%g'|format(tp_pct)}}%</div><div class="metric">{{'%.1f'|format(summary.get('hit_tp_pct',0))}}%</div></div>{% elif exit_mode=='time' %}<div class="panel accent"><div class="muted">متوسط Time Exit</div><div class="metric">{% if summary.get('time_avg_return') is not none %}{{'%+.2f'|format(summary.get('time_avg_return'))}}%{% else %}—{% endif %}</div></div>{% elif exit_mode=='slope' %}<div class="panel accent"><div class="muted">Slope Exit</div><div class="metric">{% if summary.get('exit_avg_return') is not none %}{{'%+.2f'|format(summary.get('exit_avg_return'))}}%{% else %}—{% endif %}</div><div class="muted">Slope exits {{summary.get('slope_exit_n',0)}}</div></div>{% else %}<div class="panel accent"><div class="muted">متوسط الخروج</div><div class="metric">{% if summary.get('exit_avg_return') is not none %}{{'%+.2f'|format(summary.get('exit_avg_return'))}}%{% else %}—{% endif %}</div><div class="muted">TP {{summary.get('tp_exit_n',0)}} · Time {{summary.get('time_exit_n',0)}} · Slope {{summary.get('slope_exit_n',0)}}</div></div>{% endif %}
+{% if exit_mode=='tp' %}<div class="panel accent"><div class="muted">وصلت TP +{{'%g'|format(tp_pct)}}%</div><div class="metric">{{'%.1f'|format(summary.get('hit_tp_pct',0))}}%</div></div>{% elif exit_mode=='time' %}<div class="panel accent"><div class="muted">متوسط Time Exit</div><div class="metric">{% if summary.get('time_avg_return') is not none %}{{'%+.2f'|format(summary.get('time_avg_return'))}}%{% else %}—{% endif %}</div></div>{% elif exit_mode=='slope' %}<div class="panel accent"><div class="muted">Slope Exit</div><div class="metric">{% if summary.get('exit_avg_return') is not none %}{{'%+.2f'|format(summary.get('exit_avg_return'))}}%{% else %}—{% endif %}</div><div class="muted">Slope exits {{summary.get('slope_exit_n',0)}}</div></div>{% else %}<div class="panel accent"><div class="muted">متوسط الخروج</div><div class="metric">{% if summary.get('exit_avg_return') is not none %}{{'%+.2f'|format(summary.get('exit_avg_return'))}}%{% else %}—{% endif %}</div><div class="muted">TP {{summary.get('tp_exit_n',0)}} · Time {{summary.get('time_exit_n',0)}} · Slope {{summary.get('slope_exit_n',0)}} · Early {{summary.get('early_fail_n',0)}} · Giveback {{summary.get('giveback_n',0)}}</div></div>{% endif %}
 <div class="panel accent"><div class="muted">مفتوحة حاليًا</div><div class="metric">{{summary.get('open_n',0)}}</div><div class="muted">آخر بيانات {{latest_date}}</div></div>
 </div>
 {% if scope=='market' and chart_symbol %}<div class="panel"><div class="actions"><strong>شارت {{chart_symbol}}</strong><span class="muted">تم اختياره من جدول إشارات السوق</span></div><div style="overflow:auto">{{chart_svg|safe}}</div></div>{% elif scope=='symbol' and chart_svg %}<div class="panel"><div class="actions"><strong>شارت {{symbol}} مع الإشارات</strong></div><div style="overflow:auto">{{chart_svg|safe}}</div></div>{% endif %}
@@ -263,7 +282,10 @@
 </tr></thead>
 <tbody>{% for x in rows %}<tr>
 {% if scope=='market' %}<td><a class="button secondary" href="{{chart_link(x)}}">عرض الشارت</a></td><td dir="ltr"><strong>{{x.symbol}}</strong></td><td>{{x.company}}</td>{% endif %}
-<td>{% if x.status=='OPEN' %}<strong style="color:#d97706">مفتوحة</strong>{% elif x.status=='CLOSED_TIME' %}<strong style="color:#7c3aed">Time Exit</strong>{% elif x.status=='CLOSED_SLOPE' %}<strong style="color:#dc2626">Slope Exit</strong>{% else %}<strong style="color:#15803d">TP</strong>{% endif %}</td>
+<td>{% if x.status=='OPEN' %}<strong style="color:#d97706">مفتوحة</strong>{% elif x.status=='CLOSED_TIME' %}<strong style="color:#7c3aed">Time Exit</strong>{% elif x.status=='CLOSED_SLOPE' %}<strong style="color:#dc2626">Slope Exit</strong>
+{% elif x.status=='CLOSED_EARLY_FAIL' %}<strong style="color:#b91c1c">Early Failure</strong>
+{% elif x.status=='CLOSED_GIVEBACK' %}<strong style="color:#c2410c">Giveback Exit</strong>
+{% else %}<strong style="color:#15803d">TP</strong>{% endif %}</td>
 <td dir="ltr">{{x.date}}</td><td dir="ltr">{{x.exit_date or '—'}}</td><td>{% if x.exit_return is not none %}<strong style="color:{{'#15803d' if x.exit_return>=0 else '#b91c1c'}}">{{'%+.2f%%'|format(x.exit_return)}}</strong>{% else %}—{% endif %}</td><td><strong>{{x.trade_duration}}</strong> جلسة</td><td>{{('%.2f'|format(x.exit_price)) if x.exit_price is not none else '—'}}</td><td>{{('%.2f'|format(x.exit_slope_value)) if x.exit_slope_value is not none else '—'}}</td><td>{{('%.2f'|format(x.exit_cci)) if x.exit_cci is not none else '—'}}</td><td>{{'%.2f'|format(x.price)}}</td><td>{{'%.4f'|format(x.r2)}}</td><td>{{'%.2f'|format(x.slope)}}</td><td>{{('%.2f'|format(x.entry_cci)) if x.entry_cci is not none else '—'}}</td><td>{% if x.status=='OPEN' %}<strong>{{'%+.2f%%'|format(x.current_return)}}</strong>{% else %}—{% endif %}</td><td>{{'%+.2f%%'|format(x.max_gain)}}</td><td>{{'%+.2f%%'|format(x.max_dd)}}</td>
 </tr>{% else %}<tr><td colspan="{{16 if scope=='market' else 13}}">لا توجد إشارات بهذه القيم.</td></tr>{% endfor %}</tbody></table></div>
 {% endif %}
