@@ -13,8 +13,7 @@ def create_app(db=None,test_config=None):
     if test_config: app.config.update(test_config)
     if not app.config['SECRET_KEY'] or not app.config['ADMIN_PASSWORD_HASH']: raise RuntimeError('Set SECRET_KEY and ADMIN_PASSWORD_HASH before starting administration.')
     DB=db or database(); failures={}
-    # Whole-market EGX lab cache. The web service runs one gunicorn worker in this
-    # deployment, so this avoids re-downloading ~300 symbols on every sort/click.
+    # Whole-market lab cache for EGX/US. Avoids re-downloading the whole market on every sort/click.
     egx_market_cache={}
     egx_market_lock=threading.Lock()
 
@@ -427,12 +426,19 @@ def create_app(db=None,test_config=None):
             total=total,page=page,pages=pages,link=link,local=local)
 
 
+    @app.get('/market-lab')
     @app.get('/egx-lab')
     @auth
     def egx_lab():
-        """Interactive EGX signal lab: one stock or the whole Egyptian market."""
+        """Interactive exchange lab for Egypt and US markets."""
         import html as _html
         from concurrent.futures import ThreadPoolExecutor, as_completed
+        import json as _json
+        import urllib.request as _urlrequest
+
+        lab_market=request.args.get('lab_market','EGX').strip().upper()
+        if lab_market not in ('EGX','US'): lab_market='EGX'
+        market_label='بورصة مصر' if lab_market=='EGX' else 'بورصة أمريكا'
 
         scope=request.args.get('scope','symbol').strip().lower()
         if scope not in ('symbol','market'): scope='symbol'
@@ -447,8 +453,11 @@ def create_app(db=None,test_config=None):
                 analysis_year=None
         current_year=datetime.now(timezone.utc).year
         analysis_years=list(range(current_year,2018,-1))
-        symbol=request.args.get('symbol','').strip().upper().replace('.CA','')[:20]
-        chart_symbol=request.args.get('chart_symbol','').strip().upper().replace('.CA','')[:20]
+        symbol=request.args.get('symbol','').strip().upper()[:20]
+        chart_symbol=request.args.get('chart_symbol','').strip().upper()[:20]
+        if lab_market=='EGX':
+            symbol=symbol.replace('.CA','')
+            chart_symbol=chart_symbol.replace('.CA','')
         try:r2_min=float(request.args.get('r2','0.791694'))
         except (TypeError,ValueError):r2_min=0.791694
         try:slope_min=float(request.args.get('slope_min',request.args.get('slope','67.5062')))
@@ -484,11 +493,99 @@ def create_app(db=None,test_config=None):
         rows=[];error='';latest_date='';company='';bars_count=0;chart_svg='';market_errors=0;market_symbols=0;market_scan_status='';market_scan_progress=0;market_scan_error=''
         summary={};show_portfolio=request.args.get('portfolio','0')=='1';portfolio_svg='';portfolio_summary={};portfolio_ledger=[]
 
-        from monitor.worker import _egx_daily_sync, _egx_price_confirm
+        from monitor.worker import _egx_daily_sync
         try:
             from monitor.worker import _egx_discover_sync
         except ImportError:
             _egx_discover_sync=None
+
+        def _price_confirm(rows, i):
+            if i<=0:return False
+            r=rows[i];prev=rows[i-1]
+            return bool(
+                float(r['c'])>float(prev['h'])
+                and float(r['c'])>float(r['o'])
+                and (float(r['c'])-float(r['o']))>(float(r['h'])-float(r['c']))
+            )
+
+        def _us_daily_sync(symbol_code):
+            # Yahoo daily history, adjusted for splits/dividends by Adj Close factor.
+            yahoo_symbol=symbol_code.strip().upper().replace('.','-')
+            p1=int(datetime(2018,1,1,tzinfo=timezone.utc).timestamp())
+            p2=int(time.time())+86400
+            url=(
+                'https://query1.finance.yahoo.com/v8/finance/chart/'
+                + quote(yahoo_symbol,safe='')
+                + f'?period1={p1}&period2={p2}&interval=1d&events=div%2Csplits&includeAdjustedClose=true'
+            )
+            req=_urlrequest.Request(url,headers={'User-Agent':'Mozilla/5.0'})
+            with _urlrequest.urlopen(req,timeout=18) as resp:
+                obj=_json.loads(resp.read().decode('utf-8'))
+            result=((obj.get('chart') or {}).get('result') or [])
+            if not result:return []
+            z=result[0];ts=z.get('timestamp') or []
+            ind=z.get('indicators') or {}
+            q=((ind.get('quote') or [{}])[0])
+            adj=((ind.get('adjclose') or [{}])[0]).get('adjclose') or []
+            opens=q.get('open') or [];highs=q.get('high') or [];lows=q.get('low') or []
+            closes=q.get('close') or [];vols=q.get('volume') or []
+            n=min(len(ts),len(opens),len(highs),len(lows),len(closes),len(vols))
+            rows=[]
+            for i in range(n):
+                vals=(opens[i],highs[i],lows[i],closes[i])
+                if any(v is None for v in vals):continue
+                try:
+                    o,h,l,c=map(float,vals);v=float(vols[i] or 0)
+                    a=float(adj[i]) if i<len(adj) and adj[i] is not None else c
+                except (TypeError,ValueError,IndexError):
+                    continue
+                if min(o,h,l,c)<=0:continue
+                factor=(a/c) if c else 1.0
+                ao=o*factor;ah=h*factor;al=l*factor;ac=c*factor
+                rows.append({
+                    'ts':int(ts[i]),
+                    'date':datetime.fromtimestamp(int(ts[i]),timezone.utc).date().isoformat(),
+                    'o':ao,'h':ah,'l':al,'c':ac,'ac':ac,'ah':ah,'al':al,'v':v,
+                    'raw_o':o,'raw_h':h,'raw_l':l,'raw_c':c,
+                })
+            rows.sort(key=lambda r:r['ts'])
+            dedup={}
+            for r in rows:dedup[r['date']]=r
+            return list(dedup.values())
+
+        def _us_discover_sync():
+            # Use the same US universe already bundled with Rajih.
+            paths=(
+                '/app/monitor/data/universe.json',
+                '/app/universe.json',
+                os.path.join(os.getcwd(),'monitor','data','universe.json'),
+                os.path.join(os.getcwd(),'universe.json'),
+            )
+            data=None
+            for path in paths:
+                try:
+                    if os.path.exists(path):
+                        with open(path,'r',encoding='utf-8') as f:
+                            data=_json.load(f)
+                        break
+                except Exception:
+                    continue
+            if not isinstance(data,list):
+                raise RuntimeError('ملف universe.json الأمريكي غير موجود أو غير صالح.')
+            out=[]
+            seen=set()
+            for item in data:
+                if not isinstance(item,dict):continue
+                if str(item.get('market_key') or item.get('market') or '').upper()!='US':continue
+                sym=str(item.get('feed_symbol') or item.get('symbol') or '').strip().upper()
+                if not sym or sym in seen:continue
+                seen.add(sym)
+                name=str(item.get('name') or item.get('name_ar') or sym).strip()
+                out.append((sym,name))
+            return out
+
+        _daily_sync=_egx_daily_sync if lab_market=='EGX' else _us_daily_sync
+        _discover_sync=_egx_discover_sync if lab_market=='EGX' else _us_discover_sync
 
         def _fast_metrics(data, window=126):
             """Same previous-126-session linear regression as worker, but O(n)."""
@@ -528,14 +625,14 @@ def create_app(db=None,test_config=None):
             return vals
 
         def _analyse(symbol_code, company_name=''):
-            data=_egx_daily_sync(symbol_code)
+            data=_daily_sync(symbol_code)
             if not data:return {'symbol':symbol_code,'company':company_name,'data':[],'rows':[]}
             metrics=_fast_metrics(data)
             cci_values=_cci_series(data,cci_period)
             rule=[]
             for i,(slope,r2) in enumerate(metrics):
                 ok=(slope is not None and r2 is not None and r2>=r2_min and slope>=slope_min and slope<=slope_max)
-                if confirm:ok=ok and _egx_price_confirm(data,i)
+                if confirm:ok=ok and _price_confirm(data,i)
                 if cci_enabled:
                     cv=cci_values[i]
                     ok=ok and cv is not None and cci_min<=cv<=cci_max
@@ -633,7 +730,7 @@ def create_app(db=None,test_config=None):
                     'exit_slope_value':(metrics[exit_index][0] if exit_index is not None and metrics[exit_index][0] is not None else None),
                     'tp_before_exit_sessions':tp_before_exit_sessions,'tp_before_exit_date':tp_before_exit_date,
                     'trade_duration':(exit_index-i if exit_index is not None else len(data)-1-i),
-                    'age':len(data)-1-i,'confirm':_egx_price_confirm(data,i),'status':status,
+                    'age':len(data)-1-i,'confirm':_price_confirm(data,i),'status':status,
                 })
             return {'symbol':symbol_code,'company':company_name,'data':data,'rows':out}
 
@@ -701,7 +798,7 @@ def create_app(db=None,test_config=None):
                     continue
                 pts=compact_data.get(sym)
                 if not pts:
-                    raw=_egx_daily_sync(sym)
+                    raw=_daily_sync(sym)
                     pts=[(x['date'],float(x['ac'])) for x in raw]
                 pts=sorted((str(d),float(p)) for d,p in pts)
                 if not pts:
@@ -930,9 +1027,11 @@ def create_app(db=None,test_config=None):
                     summary=_summarize(rows)
                     chart_svg=_build_svg(res['data'],filtered_rows)
             else:
-                if _egx_discover_sync is None:raise RuntimeError('نسخة monitor/worker.py الحالية لا تحتوي على اكتشاف سوق مصر.')
+                if _discover_sync is None:
+                    raise RuntimeError('اكتشاف رموز السوق المختار غير متاح.')
 
                 cache_key=(
+                    lab_market,
                     round(r2_min,8),round(slope_min,6),round(slope_max,6),cooldown,
                     round(tp_pct,6),exit_mode,time_exit_sessions,round(exit_slope,6),
                     exit_slope_op,bool(confirm),bool(cci_enabled),cci_period,round(cci_min,6),round(cci_max,6)
@@ -942,7 +1041,7 @@ def create_app(db=None,test_config=None):
                 def _market_scan_job(key):
                     collected=[];errors=0;latest='';lookup={};data_map={}
                     try:
-                        universe=_egx_discover_sync()
+                        universe=_discover_sync()
                         lookup=dict(universe)
                         with egx_market_lock:
                             e=egx_market_cache.get(key,{})
@@ -1001,7 +1100,7 @@ def create_app(db=None,test_config=None):
                     if cached is None:
                         egx_market_cache[cache_key]={'status':'starting','rows':[],'progress':0,'total':0,'errors':0,
                                                      'latest_date':'','lookup':{},'data_map':{},'started_at':time.time()}
-                        threading.Thread(target=_market_scan_job,args=(cache_key,),daemon=True,name='egx-lab-market-scan').start()
+                        threading.Thread(target=_market_scan_job,args=(cache_key,),daemon=True,name=f'{lab_market.lower()}-lab-market-scan').start()
                         cached=egx_market_cache[cache_key]
 
                 with egx_market_lock:
@@ -1081,7 +1180,8 @@ def create_app(db=None,test_config=None):
             args=request.args.to_dict();args['scope']='market';args['chart_symbol']=row['symbol'];args.pop('symbol',None)
             return url_for('egx_lab',**args)
 
-        return render_template('egx_lab.html',scope=scope,symbol=symbol,chart_symbol=chart_symbol,r2_min=r2_min,slope_min=slope_min,slope_max=slope_max,cooldown=cooldown,tp_pct=tp_pct,
+        return render_template('egx_lab.html',scope=scope,symbol=symbol,chart_symbol=chart_symbol,lab_market=lab_market,market_label=market_label,
+            r2_min=r2_min,slope_min=slope_min,slope_max=slope_max,cooldown=cooldown,tp_pct=tp_pct,
             analysis_year=analysis_year,analysis_years=analysis_years,
             confirm=confirm,rows=rows,error=error,latest_date=latest_date,bars_count=bars_count,summary=summary,company=company,chart_svg=chart_svg,
             exit_mode=exit_mode,time_exit_sessions=time_exit_sessions,exit_slope=exit_slope,exit_slope_op=exit_slope_op,
