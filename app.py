@@ -489,6 +489,21 @@ def create_app(db=None,test_config=None):
         except (TypeError,ValueError):cci_max=200.0
         if cci_max < cci_min:
             cci_min,cci_max=cci_max,cci_min
+
+        # Optional failure exits
+        early_fail_enabled=request.args.get('early_fail_enabled','0')=='1'
+        try:early_fail_sessions=max(1,min(252,int(request.args.get('early_fail_sessions','5'))))
+        except (TypeError,ValueError):early_fail_sessions=5
+        try:early_fail_max_gain=float(request.args.get('early_fail_max_gain','3'))
+        except (TypeError,ValueError):early_fail_max_gain=3.0
+        try:early_fail_return=float(request.args.get('early_fail_return','-5'))
+        except (TypeError,ValueError):early_fail_return=-5.0
+
+        giveback_enabled=request.args.get('giveback_enabled','0')=='1'
+        try:giveback_peak=float(request.args.get('giveback_peak','10'))
+        except (TypeError,ValueError):giveback_peak=10.0
+        try:giveback_return=float(request.args.get('giveback_return','0'))
+        except (TypeError,ValueError):giveback_return=0.0
         confirm=request.args.get('confirm','1')!='0'
         rows=[];error='';latest_date='';company='';bars_count=0;chart_svg='';market_errors=0;market_symbols=0;market_scan_status='';market_scan_progress=0;market_scan_error=''
         summary={};show_portfolio=request.args.get('portfolio','0')=='1';portfolio_svg='';portfolio_summary={};portfolio_ledger=[]
@@ -651,16 +666,55 @@ def create_app(db=None,test_config=None):
                     if exit_slope_op=='gte' and sv>=exit_slope:return jj
                     if exit_slope_op=='lte' and sv<=exit_slope:return jj
                 return None
+
+            def first_early_fail_index(entry_i):
+                if not early_fail_enabled:
+                    return None
+                entry=float(data[entry_i]['ac'])
+                peak=0.0
+                end=min(len(data)-1,entry_i+early_fail_sessions)
+                for jj in range(entry_i+1,end+1):
+                    peak=max(peak,100*(float(data[jj]['ah'])/entry-1))
+                    cur=100*(float(data[jj]['ac'])/entry-1)
+                    if peak < early_fail_max_gain and cur <= early_fail_return:
+                        return jj
+                return None
+
+            def first_giveback_index(entry_i):
+                if not giveback_enabled:
+                    return None
+                entry=float(data[entry_i]['ac'])
+                peak=0.0
+                for jj in range(entry_i+1,len(data)):
+                    peak=max(peak,100*(float(data[jj]['ah'])/entry-1))
+                    cur=100*(float(data[jj]['ac'])/entry-1)
+                    if peak >= giveback_peak and cur <= giveback_return:
+                        return jj
+                return None
             def exit_candidates(entry_i):
                 tp_i=first_tp_index(entry_i)
                 time_i=entry_i+time_exit_sessions
                 time_i=time_i if time_i<len(data) else None
                 slope_i=first_slope_exit_index(entry_i)
-                if exit_mode=='tp':return [('tp',tp_i)]
-                if exit_mode=='time':return [('time',time_i)]
-                if exit_mode=='both':return [('tp',tp_i),('time',time_i)]
-                if exit_mode=='slope':return [('slope',slope_i)]
-                return [('tp',tp_i),('time',time_i),('slope',slope_i)]
+                early_i=first_early_fail_index(entry_i)
+                giveback_i=first_giveback_index(entry_i)
+
+                if exit_mode=='tp':
+                    base=[('tp',tp_i)]
+                elif exit_mode=='time':
+                    base=[('time',time_i)]
+                elif exit_mode=='both':
+                    base=[('tp',tp_i),('time',time_i)]
+                elif exit_mode=='slope':
+                    base=[('slope',slope_i)]
+                else:
+                    base=[('tp',tp_i),('time',time_i),('slope',slope_i)]
+
+                if early_fail_enabled:
+                    base.append(('early_fail',early_i))
+                if giveback_enabled:
+                    base.append(('giveback',giveback_i))
+                return base
             def exit_idx_for(entry_i):
                 vals=[idx for _kind,idx in exit_candidates(entry_i) if idx is not None]
                 return min(vals) if vals else None
@@ -699,7 +753,7 @@ def create_app(db=None,test_config=None):
                     # Earliest exit wins. If TP and another exit happen on the same
                     # daily bar, TP gets priority because intraday high can hit it
                     # before the close-based time/slope exit.
-                    priority={'tp':0,'slope':1,'time':2}
+                    priority={'tp':0,'early_fail':1,'giveback':2,'slope':3,'time':4}
                     chosen_kind,chosen_idx=min(valid,key=lambda kv:(kv[1],priority.get(kv[0],9)))
                 if chosen_kind=='tp':
                     status='CLOSED_TP';exit_index=chosen_idx;exit_date=data[chosen_idx]['date'];exit_price=entry*(1+tp_target);exit_return=tp_pct;trade_end=chosen_idx
@@ -707,6 +761,10 @@ def create_app(db=None,test_config=None):
                     status='CLOSED_TIME';exit_index=chosen_idx;exit_date=data[chosen_idx]['date'];exit_price=float(data[chosen_idx]['ac']);exit_return=100*(exit_price/entry-1);trade_end=chosen_idx
                 elif chosen_kind=='slope':
                     status='CLOSED_SLOPE';exit_index=chosen_idx;exit_date=data[chosen_idx]['date'];exit_price=float(data[chosen_idx]['ac']);exit_return=100*(exit_price/entry-1);trade_end=chosen_idx
+                elif chosen_kind=='early_fail':
+                    status='CLOSED_EARLY_FAIL';exit_index=chosen_idx;exit_date=data[chosen_idx]['date'];exit_price=float(data[chosen_idx]['ac']);exit_return=100*(exit_price/entry-1);trade_end=chosen_idx
+                elif chosen_kind=='giveback':
+                    status='CLOSED_GIVEBACK';exit_index=chosen_idx;exit_date=data[chosen_idx]['date'];exit_price=float(data[chosen_idx]['ac']);exit_return=100*(exit_price/entry-1);trade_end=chosen_idx
                 else:
                     status='OPEN';exit_index=None;exit_date=None;exit_price=None;exit_return=None;trade_end=len(data)-1
                 trade_window=data[i:trade_end+1]
@@ -742,12 +800,16 @@ def create_app(db=None,test_config=None):
             closed_time=[x for x in items if x['status']=='CLOSED_TIME' and x['exit_return'] is not None]
             closed_tp=[x for x in items if x['status']=='CLOSED_TP' and x['exit_return'] is not None]
             closed_slope=[x for x in items if x['status']=='CLOSED_SLOPE' and x['exit_return'] is not None]
+            closed_early=[x for x in items if x['status']=='CLOSED_EARLY_FAIL' and x['exit_return'] is not None]
+            closed_giveback=[x for x in items if x['status']=='CLOSED_GIVEBACK' and x['exit_return'] is not None]
             time_returns=[x['exit_return'] for x in closed_time];exit_returns=[x['exit_return'] for x in items if x['status']!='OPEN' and x['exit_return'] is not None]
             tp_sessions=[x['hit_tp'] for x in items if x['hit_tp'] is not None]
             r3=[x['ret_3m'] for x in items if x['ret_3m'] is not None];r6=[x['ret_6m'] for x in items if x['ret_6m'] is not None];r1=[x['ret_1y'] for x in items if x['ret_1y'] is not None]
             return {'count':n,'hit50_pct':100*hit50/n,'hit_tp_pct':100*hit_tp/n,'tp_hits':hit_tp,'closed_n':closed_n,'open_n':open_n,
                 'time_avg_return':sum(time_returns)/len(time_returns) if time_returns else None,'time_median_return':sorted(time_returns)[len(time_returns)//2] if time_returns else None,
-                'time_win_pct':100*sum(v>0 for v in time_returns)/len(time_returns) if time_returns else None,'tp_exit_n':len(closed_tp),'time_exit_n':len(closed_time),'slope_exit_n':len(closed_slope),
+                'time_win_pct':100*sum(v>0 for v in time_returns)/len(time_returns) if time_returns else None,
+                'tp_exit_n':len(closed_tp),'time_exit_n':len(closed_time),'slope_exit_n':len(closed_slope),
+                'early_fail_n':len(closed_early),'giveback_n':len(closed_giveback),
                 'exit_avg_return':sum(exit_returns)/len(exit_returns) if exit_returns else None,'exit_median_return':sorted(exit_returns)[len(exit_returns)//2] if exit_returns else None,
                 'exit_win_pct':100*sum(v>0 for v in exit_returns)/len(exit_returns) if exit_returns else None,'tp_median_sessions':sorted(tp_sessions)[len(tp_sessions)//2] if tp_sessions else None,
                 'avg3m':sum(r3)/len(r3) if r3 else None,'avg6m':sum(r6)/len(r6) if r6 else None,'avg1y':sum(r1)/len(r1) if r1 else None}
@@ -1034,7 +1096,9 @@ def create_app(db=None,test_config=None):
                     lab_market,
                     round(r2_min,8),round(slope_min,6),round(slope_max,6),cooldown,
                     round(tp_pct,6),exit_mode,time_exit_sessions,round(exit_slope,6),
-                    exit_slope_op,bool(confirm),bool(cci_enabled),cci_period,round(cci_min,6),round(cci_max,6)
+                    exit_slope_op,bool(confirm),bool(cci_enabled),cci_period,round(cci_min,6),round(cci_max,6),
+                    bool(early_fail_enabled),early_fail_sessions,round(early_fail_max_gain,4),round(early_fail_return,4),
+                    bool(giveback_enabled),round(giveback_peak,4),round(giveback_return,4)
                 )
                 force=request.args.get('force_scan','0')=='1'
 
@@ -1186,6 +1250,9 @@ def create_app(db=None,test_config=None):
             confirm=confirm,rows=rows,error=error,latest_date=latest_date,bars_count=bars_count,summary=summary,company=company,chart_svg=chart_svg,
             exit_mode=exit_mode,time_exit_sessions=time_exit_sessions,exit_slope=exit_slope,exit_slope_op=exit_slope_op,
             cci_enabled=cci_enabled,cci_period=cci_period,cci_min=cci_min,cci_max=cci_max,
+            early_fail_enabled=early_fail_enabled,early_fail_sessions=early_fail_sessions,
+            early_fail_max_gain=early_fail_max_gain,early_fail_return=early_fail_return,
+            giveback_enabled=giveback_enabled,giveback_peak=giveback_peak,giveback_return=giveback_return,
             market_symbols=market_symbols,market_errors=market_errors,chart_link=chart_link,sort_link=sort_link,sort_mark=sort_mark,sort_key=sort_key,sort_dir=sort_dir,show_portfolio=show_portfolio,portfolio_svg=portfolio_svg,portfolio_summary=portfolio_summary,portfolio_ledger=portfolio_ledger)
 
 
