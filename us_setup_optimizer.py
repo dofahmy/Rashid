@@ -350,6 +350,11 @@ def local_mutations(base, rng, count):
     return vals
 
 def evaluate(cfg, A, cost_pct, collect=False):
+    # Defensive normalization for configs loaded/mutated through pandas.
+    cfg=dict(cfg)
+    for k in ("cci_enabled","cci_period","time_exit","early_on","early_sessions","giveback_on"):
+        if k in cfg:
+            cfg[k]=int(round(float(cfg[k])))
     slope=A["slope"]; r2=A["r2"]; confirm=A["confirm"]
     d=A["date"]; years=A["year"]; h=A["h"]; c=A["c"]
     sym_id=A["sym_id"]; end_idx=A["end_idx"]
@@ -550,6 +555,13 @@ def run_search(A, cost, configs, stage2):
             "tp","time_exit","slope_exit","early_on","early_sessions","early_max_gain",
             "early_return","giveback_on","giveback_peak","giveback_return"
         ]}
+        # pandas upcasts mixed numeric rows to floats. Restore integer-like fields
+        # so keys such as cci20 remain cci20 instead of cci20.0.
+        for k in ("cci_enabled","cci_period","time_exit","early_on","early_sessions","giveback_on"):
+            base[k]=int(round(float(base[k])))
+        for k in ("r2_min","slope_min","slope_max","cci_min","cci_max","tp","slope_exit",
+                  "early_max_gain","early_return","giveback_peak","giveback_return"):
+            base[k]=float(base[k])
         local.extend(local_mutations(base,rng,max(1,stage2//max(1,len(seeds)))))
     local=local[:stage2]
 
