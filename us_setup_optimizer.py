@@ -134,13 +134,49 @@ def load_daily():
     del chunks
 
     df["symbol"] = df["symbol"].astype(str).str.upper().str.strip()
-    df["d"] = pd.to_datetime(df["d"], errors="coerce", utc=True).dt.tz_convert(None).dt.normalize()
+
+    # Robust date parsing. In market_candles_1d the date column may be stored
+    # as Unix seconds; plain pd.to_datetime(numeric) treats numbers as ns and
+    # collapses them into 1970-01-01.
+    raw_d = df["d"]
+    if pd.api.types.is_numeric_dtype(raw_d):
+        vals = pd.to_numeric(raw_d, errors="coerce")
+        sample = vals.dropna()
+        med = float(sample.median()) if len(sample) else float("nan")
+        if math.isfinite(med):
+            # YYYYMMDD integer, e.g. 20261002
+            if 19000101 <= med <= 21001231:
+                df["d"] = pd.to_datetime(vals.round().astype("Int64").astype(str),
+                                         format="%Y%m%d", errors="coerce", utc=True)
+            # Unix seconds
+            elif 1e8 <= abs(med) < 1e11:
+                df["d"] = pd.to_datetime(vals, unit="s", errors="coerce", utc=True)
+            # Unix milliseconds
+            elif 1e11 <= abs(med) < 1e14:
+                df["d"] = pd.to_datetime(vals, unit="ms", errors="coerce", utc=True)
+            # Unix microseconds
+            elif 1e14 <= abs(med) < 1e17:
+                df["d"] = pd.to_datetime(vals, unit="us", errors="coerce", utc=True)
+            else:
+                df["d"] = pd.to_datetime(vals, errors="coerce", utc=True)
+        else:
+            df["d"] = pd.NaT
+    else:
+        df["d"] = pd.to_datetime(raw_d, errors="coerce", utc=True)
+
+    df["d"] = df["d"].dt.tz_convert(None).dt.normalize()
+
     for c in ["o","h","l","c","v"]:
         df[c] = pd.to_numeric(df[c], errors="coerce")
     df = df.dropna(subset=["symbol","d","o","h","l","c"])
     df = df[(df["o"]>0)&(df["h"]>0)&(df["l"]>0)&(df["c"]>0)]
     df = df.drop_duplicates(["symbol","d"], keep="last").sort_values(["symbol","d"]).reset_index(drop=True)
-    print(f"[data] final rows={len(df):,} symbols={df.symbol.nunique():,} range={df.d.min().date()} -> {df.d.max().date()}", flush=True)
+    if df.empty:
+        raise RuntimeError("No usable daily rows after date parsing.")
+    dmin, dmax = df["d"].min(), df["d"].max()
+    if dmax.year < 2018 or dmin.year > 2030:
+        raise RuntimeError(f"Date parsing still looks wrong: {dmin} -> {dmax}")
+    print(f"[data] final rows={len(df):,} symbols={df.symbol.nunique():,} range={dmin.date()} -> {dmax.date()}", flush=True)
     return df
 
 def linreg_features(close):
@@ -498,8 +534,13 @@ def run_search(A, cost, configs, stage2):
         if k%25==0 or k==len(cfgs):
             elapsed=(time.time()-t0)/60
             print(f"[stage1] {k}/{len(cfgs)} configs | results={len(results)} | {elapsed:.1f} min", flush=True)
-            pd.DataFrame(results).sort_values(["qualified","score"],ascending=[False,False]).to_csv(RESULTS_CSV,index=False)
+            if results:
+                pd.DataFrame(results).sort_values(["qualified","score"],ascending=[False,False]).to_csv(RESULTS_CSV,index=False)
 
+    if not results:
+        raise RuntimeError(
+            "No configurations produced trades. Check the parsed date range and feature filters."
+        )
     df=pd.DataFrame(results).sort_values(["qualified","score"],ascending=[False,False]).reset_index(drop=True)
     seeds=df.head(min(12,len(df)))
     local=[]
