@@ -58,15 +58,19 @@
   .egx-results-wide th,.egx-results-wide td{padding:8px 9px}
 }
 </style>
-<div class="actions"><a class="button secondary" href="{{url_for('stocks')}}">← رجوع لمتابعة الأسهم</a><h1 style="margin:0">مختبر إشارات بورصة مصر</h1></div>
+<div class="actions"><a class="button secondary" href="{{url_for('stocks')}}">← رجوع لمتابعة الأسهم</a><h1 style="margin:0">مختبر البورصات</h1></div>
 <div class="panel">
 <form class="filters" method="get">
-<label>نطاق التحليل<select name="scope"><option value="symbol" {{'selected' if scope=='symbol' else ''}}>سهم واحد</option><option value="market" {{'selected' if scope=='market' else ''}}>السوق المصري كله</option></select></label>
+<label>السوق<select name="lab_market">
+<option value="EGX" {{'selected' if lab_market=='EGX' else ''}}>🇪🇬 بورصة مصر</option>
+<option value="US" {{'selected' if lab_market=='US' else ''}}>🇺🇸 بورصة أمريكا</option>
+</select></label>
+<label>نطاق التحليل<select name="scope"><option value="symbol" {{'selected' if scope=='symbol' else ''}}>سهم واحد</option><option value="market" {{'selected' if scope=='market' else ''}}>{{'السوق المصري كله' if lab_market=='EGX' else 'السوق الأمريكي كله'}}</option></select></label>
 <label>فترة التحليل<select name="year">
 <option value="all" {{'selected' if analysis_year is none else ''}}>كل التاريخ</option>
 {% for y in analysis_years %}<option value="{{y}}" {{'selected' if analysis_year==y else ''}}>{{y}}</option>{% endfor %}
 </select></label>
-<label>كود السهم<input name="symbol" dir="ltr" placeholder="SEIG" value="{{symbol}}"></label>
+<label>كود السهم<input name="symbol" dir="ltr" placeholder="{{'SEIG' if lab_market=='EGX' else 'AAPL'}}" value="{{symbol}}"></label>
 <label>R² ≥<input name="r2" type="number" step="0.000001" value="{{r2_min}}" required></label>
 <label>Slope ≥<input name="slope_min" type="number" step="0.0001" value="{{slope_min}}" required></label>
 <label>Slope ≤<input name="slope_max" type="number" step="0.0001" value="{{slope_max}}" required></label>
@@ -96,13 +100,13 @@
 
 <button>حلّل التاريخ</button>
 </form>
-<p class="muted">اختاري «سهم واحد» لتحليل سهم ورسم الشارت مباشرة، أو «السوق المصري كله» لاستخراج كل الإشارات بنفس القيم. في وضع السوق كله لا يُرسم شارت تلقائيًا؛ اضغطي «عرض الشارت» على أي إشارة وسيظهر شارت سهمها وكل إشاراته بنفس إعدادات الاختبار. شرط الدخول الآن يستخدم نطاق Slope من الحد الأدنى إلى الحد الأقصى. ويمكن الخروج بـ TP أو Time أو Slope أو أول واحد منهم حسب الاختيار. لا تُفتح توصية جديدة على نفس السهم أثناء وجود توصية مفتوحة. فلتر CCI اختياري: لو غير مفعّل لا يدخل في اختيار الإشارة، لكن قيمة CCI تظل محسوبة لكل توصية وتظهر وقت الشراء ووقت البيع. عند اختيار سنة معينة، تظهر فقط الإشارات التي بدأ دخولها داخل هذه السنة؛ وأداء المحفظة يُحسب داخل نفس السنة حتى آخر جلسة تداول فيها. أما «كل التاريخ» فيستخدم كل الإشارات وكل الفترة المتاحة.</p>
+<p class="muted">السوق المختار حاليًا: <strong>{{market_label}}</strong>. اختاري «سهم واحد» لتحليل سهم ورسم الشارت مباشرة، أو «{{'السوق المصري كله' if lab_market=='EGX' else 'السوق الأمريكي كله'}}» لاستخراج كل الإشارات بنفس القيم. في وضع السوق كله لا يُرسم شارت تلقائيًا؛ اضغطي «عرض الشارت» على أي إشارة وسيظهر شارت سهمها وكل إشاراته بنفس إعدادات الاختبار. شرط الدخول الآن يستخدم نطاق Slope من الحد الأدنى إلى الحد الأقصى. ويمكن الخروج بـ TP أو Time أو Slope أو أول واحد منهم حسب الاختيار. لا تُفتح توصية جديدة على نفس السهم أثناء وجود توصية مفتوحة. فلتر CCI اختياري: لو غير مفعّل لا يدخل في اختيار الإشارة، لكن قيمة CCI تظل محسوبة لكل توصية وتظهر وقت الشراء ووقت البيع. عند اختيار سنة معينة، تظهر فقط الإشارات التي بدأ دخولها داخل هذه السنة؛ وأداء المحفظة يُحسب داخل نفس السنة حتى آخر جلسة تداول فيها. أما «كل التاريخ» فيستخدم كل الإشارات وكل الفترة المتاحة.</p>
 </div>
 {% if error %}<div class="panel warning"><strong>تعذر التحليل:</strong> {{error}}</div>{% endif %}
 {% if scope=='market' and market_scan_status in ('starting','running') %}
 <div class="panel" style="border:1px solid #d8e2ef">
   <div class="actions">
-    <strong>فحص السوق يعمل في الخلفية</strong>
+    <strong>فحص {{market_label}} يعمل في الخلفية</strong>
     <span>{{market_scan_progress}} / {{market_symbols if market_symbols else '...' }} سهم</span>
     <a class="button secondary" href="{{request.full_path}}">تحديث النتائج</a>
   </div>
@@ -113,7 +117,7 @@
 {% elif scope=='market' and market_scan_status=='done' %}
 <div class="panel">
   <div class="actions">
-    <span>اكتمل فحص {{market_symbols}} سهم · أخطاء {{market_errors}}</span>
+    <span>اكتمل فحص {{market_label}} · {{market_symbols}} سهم · أخطاء {{market_errors}}</span>
     <a class="button secondary" href="{{url_for('egx_lab', **dict(request.args, force_scan='1'))}}">إعادة فحص السوق</a>
     {% if not show_portfolio %}
     <a class="button" href="{{url_for('egx_lab', **dict(request.args, portfolio='1'))}}">أداء المحفظة</a>
@@ -227,7 +231,7 @@
 </div>
 {% endif %}
 <div class="cards">
-<div class="panel accent"><div class="muted">النطاق</div><div class="metric" style="font-size:22px">{{symbol if scope=='symbol' else 'كل سوق مصر'}}</div><div class="muted">{{analysis_year if analysis_year else 'كل التاريخ'}}{% if scope=='market' %} · {{market_symbols}} رمز · أخطاء تحميل {{market_errors}}{% endif %}</div></div>
+<div class="panel accent"><div class="muted">النطاق</div><div class="metric" style="font-size:22px">{{symbol if scope=='symbol' else ('كل سوق مصر' if lab_market=='EGX' else 'كل سوق أمريكا')}}</div><div class="muted">{{market_label}} · {{analysis_year if analysis_year else 'كل التاريخ'}}{% if scope=='market' %} · {{market_symbols}} رمز · أخطاء تحميل {{market_errors}}{% endif %}</div></div>
 <div class="panel accent"><div class="muted">عدد الإشارات</div><div class="metric">{{summary.get('count',0)}}</div></div>
 {% if exit_mode=='tp' %}<div class="panel accent"><div class="muted">وصلت TP +{{'%g'|format(tp_pct)}}%</div><div class="metric">{{'%.1f'|format(summary.get('hit_tp_pct',0))}}%</div></div>{% elif exit_mode=='time' %}<div class="panel accent"><div class="muted">متوسط Time Exit</div><div class="metric">{% if summary.get('time_avg_return') is not none %}{{'%+.2f'|format(summary.get('time_avg_return'))}}%{% else %}—{% endif %}</div></div>{% elif exit_mode=='slope' %}<div class="panel accent"><div class="muted">Slope Exit</div><div class="metric">{% if summary.get('exit_avg_return') is not none %}{{'%+.2f'|format(summary.get('exit_avg_return'))}}%{% else %}—{% endif %}</div><div class="muted">Slope exits {{summary.get('slope_exit_n',0)}}</div></div>{% else %}<div class="panel accent"><div class="muted">متوسط الخروج</div><div class="metric">{% if summary.get('exit_avg_return') is not none %}{{'%+.2f'|format(summary.get('exit_avg_return'))}}%{% else %}—{% endif %}</div><div class="muted">TP {{summary.get('tp_exit_n',0)}} · Time {{summary.get('time_exit_n',0)}} · Slope {{summary.get('slope_exit_n',0)}}</div></div>{% endif %}
 <div class="panel accent"><div class="muted">مفتوحة حاليًا</div><div class="metric">{{summary.get('open_n',0)}}</div><div class="muted">آخر بيانات {{latest_date}}</div></div>
