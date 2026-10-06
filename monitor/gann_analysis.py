@@ -200,156 +200,262 @@ def strength_color(v):
     v=int(v or 0)
     return "#b91c1c" if v>=90 else "#ea580c" if v>=80 else "#ca8a04" if v>=70 else "#2563eb" if v>=60 else "#64748b"
 
+def _main_level_score(x):
+    """Decision score for already-clustered levels.
 
-def _historical_expected_turns(df, pivots, chart_start):
+    Confluence/strength dominates. Distance is only a mild penalty so a strong
+    level is not discarded just because it is not the nearest raw line.
     """
-    Build the latest historical Gann forecasts using information available
-    from each completed pivot anchor.
+    strength=float(x.get("strength") or 0)
+    count=max(1,int(x.get("count") or 1))
+    methods=len(x.get("methods") or [])
+    dist=abs(float(x.get("distance_pct") or 0))
+    return strength + min(12,3*methods+1.5*(count-1)) - min(18,dist*0.25)
 
-    Low pivot  -> expected TOP using upward SQ9/Master price levels + future time cluster.
-    High pivot -> expected LOW using downward SQ9/Master price levels + future time cluster.
+def select_main_price_levels(pc,current,side,limit=2):
+    """Return only the principal decision levels on one side of current price."""
+    if side=="resistance":
+        xs=[x for x in pc if x["level"]>current]
+    else:
+        xs=[x for x in pc if x["level"]<current]
 
-    These are forecast markers, not labels taken from future realized highs/lows.
+    # Avoid extremely remote raw geometry overwhelming the decision view.
+    # If enough candidates exist within 50%, use those; otherwise fall back to all.
+    near=[x for x in xs if abs(float(x.get("distance_pct") or 0))<=50]
+    if len(near)>=limit:
+        xs=near
+
+    ranked=sorted(xs,key=lambda x:(-_main_level_score(x),abs(float(x.get("distance_pct") or 0))))
+    picked=[]
+    for x in ranked:
+        # Keep principal levels materially separated from each other.
+        if any(abs(x["level"]/p["level"]-1)*100 < 1.5 for p in picked if p["level"]) :
+            continue
+        picked.append(x)
+        if len(picked)>=limit:
+            break
+
+    # Present tops ascending and supports descending for intuitive reading.
+    if side=="resistance":
+        picked.sort(key=lambda x:x["level"])
+    else:
+        picked.sort(key=lambda x:x["level"],reverse=True)
+    return picked
+
+def _nearest_session_index(df,target_date):
+    if df.empty:
+        return None
+    dates=list(df["d"])
+    best=min(range(len(dates)),key=lambda i:abs((dates[i]-target_date).days))
+    return best
+
+def evaluate_historical_forecast(df,forecast,wide_sessions=10,price_tol_pct=3.0,partial_price_tol_pct=6.0,
+                                 time_tol_sessions=3,partial_time_tol_sessions=7):
+    """Compare a past forecast with what price actually did around its date.
+
+    TOP: actual comparison point is the highest high in ±wide_sessions.
+    LOW: actual comparison point is the lowest low in ±wide_sessions.
+
+    تحقق:
+      price error <= 3% AND time error <= 3 sessions.
+    تحقق جزئي:
+      (price error <= 3% AND time <= 7 sessions) OR
+      (price error <= 6% AND time <= 3 sessions).
+    Otherwise: لم يتحقق.
+
+    This is a descriptive validation rule, not a claim of predictive probability.
+    """
+    d=forecast.get("date")
+    target=float(forecast.get("price") or 0)
+    if not d or target<=0 or df.empty:
+        return {**forecast,"status":"غير قابل للتقييم","status_key":"na",
+                "actual_price":None,"actual_date":None,"price_error_pct":None,"time_error_sessions":None}
+
+    center=_nearest_session_index(df,d)
+    if center is None:
+        return {**forecast,"status":"غير قابل للتقييم","status_key":"na",
+                "actual_price":None,"actual_date":None,"price_error_pct":None,"time_error_sessions":None}
+
+    lo=max(0,center-wide_sessions)
+    hi=min(len(df)-1,center+wide_sessions)
+    w=df.iloc[lo:hi+1]
+    if w.empty:
+        return {**forecast,"status":"غير قابل للتقييم","status_key":"na",
+                "actual_price":None,"actual_date":None,"price_error_pct":None,"time_error_sessions":None}
+
+    if forecast.get("type")=="TOP":
+        rel=int(np.nanargmax(w["h"].to_numpy(float)))
+        actual_price=float(w.iloc[rel]["h"])
+    else:
+        rel=int(np.nanargmin(w["l"].to_numpy(float)))
+        actual_price=float(w.iloc[rel]["l"])
+
+    actual_i=lo+rel
+    actual_date=df.iloc[actual_i]["d"]
+    price_error=abs(actual_price/target-1)*100
+    time_error=abs(actual_i-center)
+
+    if price_error<=price_tol_pct and time_error<=time_tol_sessions:
+        status,status_key="تحقق","hit"
+    elif ((price_error<=price_tol_pct and time_error<=partial_time_tol_sessions) or
+          (price_error<=partial_price_tol_pct and time_error<=time_tol_sessions)):
+        status,status_key="تحقق جزئي","partial"
+    else:
+        status,status_key="لم يتحقق","miss"
+
+    status_color={"hit":"#15803d","partial":"#d97706","miss":"#b91c1c","na":"#64748b"}[status_key]
+    return {
+        **forecast,
+        "status":status,
+        "status_key":status_key,
+        "status_color":status_color,
+        "actual_price":round(actual_price,4),
+        "actual_date":actual_date,
+        "price_error_pct":round(price_error,2),
+        "time_error_sessions":int(time_error),
+    }
+
+
+def _historical_expected_turns(df, pivots, chart_start, wing=7):
+    """Build latest historical forecasts and evaluate them later.
+
+    Pivot forecasts only become eligible after pivot confirmation (`wing`
+    sessions later), avoiding the misleading impression that the exact pivot
+    was known on its own day.
     """
     if not pivots:
         return [], []
 
-    today = date.today()
-    hist_tops = []
-    hist_lows = []
+    today=date.today()
+    hist_tops=[]
+    hist_lows=[]
+    subset=pivots[-12:]
+    base_idx=max(0,len(pivots)-len(subset))
 
-    for idx, p in enumerate(pivots[-12:]):
-        anchor_date = p["date"]
-        anchor_price = float(p["price"])
+    for local_idx,p in enumerate(subset):
+        anchor_date=p["date"]
+        anchor_price=float(p["price"])
+        pivot_i=int(p.get("i",0))
+        confirm_i=min(len(df)-1,pivot_i+wing)
+        available_date=df.iloc[confirm_i]["d"]
 
-        # Price projections known at the pivot.
-        price_items = _sq9_levels(anchor_price, p["kind"], anchor_date) + _master_price_levels(p)
-        if idx > 0:
-            prev = pivots[max(0, len(pivots)-12)+idx-1] if len(pivots) > 12 else pivots[idx-1]
-            if prev:
-                rng = {
-                    "low": min(float(prev["price"]), anchor_price),
-                    "high": max(float(prev["price"]), anchor_price),
-                    "range": abs(anchor_price-float(prev["price"])),
-                    "anchor_date": anchor_date,
-                }
-                price_items += _range_ratio_levels(rng)
+        price_items=_sq9_levels(anchor_price,p["kind"],anchor_date)+_master_price_levels(p)
+        global_idx=base_idx+local_idx
+        if global_idx>0:
+            prev=pivots[global_idx-1]
+            rng={
+                "low":min(float(prev["price"]),anchor_price),
+                "high":max(float(prev["price"]),anchor_price),
+                "range":abs(anchor_price-float(prev["price"])),
+                "anchor_date":anchor_date,
+            }
+            price_items+=_range_ratio_levels(rng)
 
-        # Time projections known at the pivot. Here we intentionally keep past dates too.
-        time_items = []
-        unit = anchor_price
-        if unit > 0 and unit <= 5000:
-            for cycle in range(0, 5):
-                for frac, label, _ in IMPORTANT_RATIOS:
-                    off = (cycle + frac) * unit
-                    if off <= 0 or off > 2500:
+        # Cluster around the anchor, then keep only a principal level.
+        temp_pc=cluster_price_levels(price_items,anchor_price,_atr(df.iloc[:confirm_i+1]))
+        side="resistance" if p["kind"]=="L" else "support"
+        main=select_main_price_levels(temp_pc,anchor_price,side,limit=1)
+        if not main:
+            continue
+        price_pick=main[0]
+
+        time_items=[]
+        unit=anchor_price
+        if 0<unit<=5000:
+            for cycle in range(0,5):
+                for frac,label,_ in IMPORTANT_RATIOS:
+                    off=(cycle+frac)*unit
+                    if off<=0 or off>2500:
                         continue
-                    for mode in ("calendar", "trading"):
-                        d = _calendar_add(anchor_date, off) if mode=="calendar" else _business_add(anchor_date, int(round(off)))
-                        if d > anchor_date and d < today and d >= chart_start:
+                    for mode in ("calendar","trading"):
+                        d=_calendar_add(anchor_date,off) if mode=="calendar" else _business_add(anchor_date,int(round(off)))
+                        if d>available_date and d<today and d>=chart_start:
                             time_items.append({
-                                "method": "Gann Square Low" if p["kind"]=="L" else "Gann Square High",
-                                "submethod": f"{label} · {'تقويمي' if mode=='calendar' else 'جلسات'}",
-                                "date": d,
-                                "strength": _time_strength(label),
-                                "mode": mode,
+                                "method":"Gann Square Low" if p["kind"]=="L" else "Gann Square High",
+                                "submethod":f"{label} · {'تقويمي' if mode=='calendar' else 'جلسات'}",
+                                "date":d,"strength":_time_strength(label),"mode":mode,
                             })
 
-        for cycle in range(0, 5):
-            for n, strength in MASTER_144:
-                off = cycle*144+n
-                for mode in ("calendar", "trading"):
-                    d = _calendar_add(anchor_date, off) if mode=="calendar" else _business_add(anchor_date, off)
-                    if d > anchor_date and d < today and d >= chart_start:
+        for cycle in range(0,5):
+            for n,strength in MASTER_144:
+                off=cycle*144+n
+                for mode in ("calendar","trading"):
+                    d=_calendar_add(anchor_date,off) if mode=="calendar" else _business_add(anchor_date,off)
+                    if d>available_date and d<today and d>=chart_start:
                         time_items.append({
                             "method":"Master 144",
                             "submethod":f"{n} · {'تقويمي' if mode=='calendar' else 'جلسات'}",
-                            "date":d,
-                            "strength":strength,
-                            "mode":mode,
+                            "date":d,"strength":strength,"mode":mode,
                         })
 
         for n in MIKULA_225_CELL_COUNTS:
-            d = _business_add(anchor_date, n)
-            if d > anchor_date and d < today and d >= chart_start:
+            d=_business_add(anchor_date,n)
+            if d>available_date and d<today and d>=chart_start:
                 time_items.append({
-                    "method":"Mikula 225° Cells",
-                    "submethod":f"{n} bars",
-                    "date":d,
-                    "strength":min(96,78+int(math.log(max(n,9),3))*3),
-                    "mode":"trading",
+                    "method":"Mikula 225° Cells","submethod":f"{n} bars","date":d,
+                    "strength":min(96,78+int(math.log(max(n,9),3))*3),"mode":"trading",
                 })
 
-        time_clusters = cluster_time_dates(time_items)
-        if not time_clusters:
-            continue
-
-        # Use the first materially strong time cluster after the anchor.
-        strong_times = [x for x in time_clusters if x["strength"] >= 78]
+        strong_times=[x for x in cluster_time_dates(time_items) if x["strength"]>=78]
         if not strong_times:
             continue
 
-        if p["kind"] == "L":
-            candidates = [x for x in price_items if x["level"] > anchor_price]
-            if not candidates:
-                continue
-            candidates.sort(key=lambda x:(x["level"]-anchor_price, -x["strength"]))
-            price_pick = candidates[0]
-            for t in strong_times[:2]:
-                st = int(round(min(100, .62*price_pick["strength"] + .38*t["strength"] + 5)))
-                hist_tops.append({
-                    "type":"TOP",
-                    "price":round(float(price_pick["level"]),4),
-                    "date":t["date"],
-                    "strength":st,
-                    "methods":sorted(set([price_pick["method"]] + t["methods"])),
-                    "color":strength_color(st),
-                    "anchor_date":anchor_date,
-                    "anchor_price":round(anchor_price,4),
-                })
-        else:
-            candidates = [x for x in price_items if 0 < x["level"] < anchor_price]
-            if not candidates:
-                continue
-            candidates.sort(key=lambda x:(anchor_price-x["level"], -x["strength"]))
-            price_pick = candidates[0]
-            for t in strong_times[:2]:
-                st = int(round(min(100, .62*price_pick["strength"] + .38*t["strength"] + 5)))
-                hist_lows.append({
-                    "type":"LOW",
-                    "price":round(float(price_pick["level"]),4),
-                    "date":t["date"],
-                    "strength":st,
-                    "methods":sorted(set([price_pick["method"]] + t["methods"])),
-                    "color":strength_color(st),
-                    "anchor_date":anchor_date,
-                    "anchor_price":round(anchor_price,4),
-                })
+        for t in strong_times[:2]:
+            st=int(round(min(100,.62*price_pick["strength"]+.38*t["strength"]+5)))
+            item={
+                "type":"TOP" if p["kind"]=="L" else "LOW",
+                "price":round(float(price_pick["level"]),4),
+                "date":t["date"],
+                "strength":st,
+                "methods":sorted(set(price_pick["methods"]+t["methods"])),
+                "color":strength_color(st),
+                "anchor_date":anchor_date,
+                "anchor_price":round(anchor_price,4),
+                "available_date":available_date,
+            }
+            if p["kind"]=="L":
+                hist_tops.append(item)
+            else:
+                hist_lows.append(item)
 
-    # Deduplicate close dates and keep the strongest forecast.
     def compact(items):
-        items = sorted(items, key=lambda x:(x["date"], -x["strength"]))
+        items=sorted(items,key=lambda x:(x["date"],-x["strength"]))
         out=[]
         for it in items:
-            if out and abs((it["date"]-out[-1]["date"]).days) <= 2:
-                if it["strength"] > out[-1]["strength"]:
+            if out and abs((it["date"]-out[-1]["date"]).days)<=2:
+                if it["strength"]>out[-1]["strength"]:
                     out[-1]=it
             else:
                 out.append(it)
         return out[-2:]
 
-    return compact(hist_tops), compact(hist_lows)
+    tops=[evaluate_historical_forecast(df,x) for x in compact(hist_tops)]
+    lows=[evaluate_historical_forecast(df,x) for x in compact(hist_lows)]
+    return tops,lows
 
 def _pair_turns(pc,tc,current):
-    sups=sorted([x for x in pc if x["level"]<current],key=lambda x:(abs(x["distance_pct"]),-x["strength"]))[:2]
-    ress=sorted([x for x in pc if x["level"]>current],key=lambda x:(abs(x["distance_pct"]),-x["strength"]))[:2]
-    future=sorted([x for x in tc if x["date"]>=date.today()],key=lambda x:x["date"])[:4]
+    sups=select_main_price_levels(pc,current,"support",limit=2)
+    ress=select_main_price_levels(pc,current,"resistance",limit=2)
+
+    # Keep future time windows principal too: strongest near-term clusters,
+    # then sort them chronologically for display.
+    future=[x for x in tc if x["date"]>=date.today()]
+    future=sorted(future,key=lambda x:(-x["strength"],x["date"]))[:4]
+    future=sorted(future,key=lambda x:x["date"])
+
     def make(levels,typ):
         ans=[]
         for i,p in enumerate(levels):
             t=future[i] if i<len(future) else (future[-1] if future else None)
             st=int(round(p["strength"] if not t else min(100,.62*p["strength"]+.38*t["strength"]+5)))
-            ans.append({"type":typ,"price":p["level"],"date":t["date"] if t else None,"strength":st,"price_strength":p["strength"],"time_strength":t["strength"] if t else None,"methods":sorted(set(p["methods"]+(t["methods"] if t else []))),"color":strength_color(st)})
+            ans.append({
+                "type":typ,"price":p["level"],"date":t["date"] if t else None,
+                "strength":st,"price_strength":p["strength"],
+                "time_strength":t["strength"] if t else None,
+                "methods":sorted(set(p["methods"]+(t["methods"] if t else []))),
+                "color":strength_color(st),
+                "level_count":p.get("count",1),
+            })
         return ans
     return make(ress,"TOP"),make(sups,"LOW")
 
@@ -387,12 +493,14 @@ def analyze_symbol(DB,symbol,limit=900):
     if rng and rng["range"]>0: ti+=_repeat_square_dates(rng["anchor_date"],rng["range"],"Gann Square Range")
     tc=cluster_time_dates(ti); next_times=[x for x in tc if x["date"]>=date.today()][:6]
     tops,lows=_pair_turns(pc,tc,last)
-    ns=max([x for x in pc if x["level"]<last],key=lambda x:x["level"],default=None)
-    nr=min([x for x in pc if x["level"]>last],key=lambda x:x["level"],default=None)
+    main_sups=select_main_price_levels(pc,last,"support",limit=2)
+    main_ress=select_main_price_levels(pc,last,"resistance",limit=2)
+    ns=main_sups[0] if main_sups else None
+    nr=main_ress[0] if main_ress else None
     strengths=[x["strength"] for x in tops+lows]+[x["strength"] for x in next_times[:2]]
     candles=df.tail(220)
     chart_start=candles.iloc[0]["d"] if len(candles) else df.iloc[0]["d"]
-    previous_tops,previous_lows=_historical_expected_turns(df,piv,chart_start)
+    previous_tops,previous_lows=_historical_expected_turns(df,piv,chart_start,wing=7)
     return {"symbol":symbol.upper(),"last_price":round(last,4),"last_date":df.iloc[-1]["d"],"atr14":round(atr,4),"latest_low":low,"latest_high":high,"range":rng,"price_clusters":pc,"time_clusters":tc,"next_times":next_times,"nearest_support":ns,"nearest_resistance":nr,"tops":tops,"lows":lows,"previous_tops":previous_tops,"previous_lows":previous_lows,"overall_strength":max(strengths) if strengths else 0,"overall_color":strength_color(max(strengths) if strengths else 0),"chart":{"dates":[d.isoformat() for d in candles["d"]],"open":[round(float(x),4) for x in candles["o"]],"high":[round(float(x),4) for x in candles["h"]],"low":[round(float(x),4) for x in candles["l"]],"close":[round(float(x),4) for x in candles["c"]]},"method_rows":build_method_rows(last,pc,tc)}
 
 def market_page(DB,query="",page=1,per_page=100,market="US"):

@@ -19,8 +19,8 @@ def _svg_chart(a):
     if not C["dates"]:
         return '<div class="muted">لا توجد بيانات كافية للشارت.</div>'
 
-    W,H=1200,560
-    L,R,T,B=70,30,30,65
+    W,H=1200,580
+    L,R,T,B=70,55,35,70
     iw,ih=W-L-R,H-T-B
     highs=[float(x) for x in C["high"]]
     lows=[float(x) for x in C["low"]]
@@ -28,35 +28,38 @@ def _svg_chart(a):
     closes=[float(x) for x in C["close"]]
     dates=C["dates"]
 
-    extra=[x["price"] for x in a.get("tops",[])+a.get("lows",[])+a.get("previous_tops",[])+a.get("previous_lows",[]) if x.get("price")]
-    ymin=min(lows+extra) if extra else min(lows)
-    ymax=max(highs+extra) if extra else max(highs)
-    pad=max((ymax-ymin)*.08, max(ymax,1)*.01)
+    main_future=a.get("tops",[])+a.get("lows",[])
+    hist=a.get("previous_tops",[])+a.get("previous_lows",[])
+    extra=[float(x["price"]) for x in main_future+hist if x.get("price")]
+    actual=[float(x["actual_price"]) for x in hist if x.get("actual_price")]
+    all_extra=extra+actual
+    ymin=min(lows+all_extra) if all_extra else min(lows)
+    ymax=max(highs+all_extra) if all_extra else max(highs)
+    pad=max((ymax-ymin)*.08,max(ymax,1)*.01)
     ymin=max(0,ymin-pad); ymax=ymax+pad
     yr=max(ymax-ymin,1e-9)
 
     n=len(dates)
-    def x(i): return L + (i/(max(1,n-1)))*iw
-    def y(p): return T + (ymax-float(p))/yr*ih
-    def esc(s): 
+    def x(i): return L+(i/max(1,n-1))*iw
+    def y(p): return T+(ymax-float(p))/yr*ih
+    def esc(s):
         return str(s).replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
 
     parts=[f'<svg viewBox="0 0 {W} {H}" role="img" aria-label="Gann chart" style="width:100%;height:auto;background:#fff;border-radius:10px">']
-    # grid / labels
+
     for k in range(6):
         p=ymin+(ymax-ymin)*k/5
         yy=y(p)
         parts.append(f'<line x1="{L}" x2="{W-R}" y1="{yy:.1f}" y2="{yy:.1f}" stroke="#e5e7eb" stroke-width="1"/>')
         parts.append(f'<text x="{L-8}" y="{yy+4:.1f}" text-anchor="end" font-size="12" fill="#64748b">{p:.2f}</text>')
-    # x labels
+
     ticks=min(7,n)
     for k in range(ticks):
         i=round(k*(n-1)/max(1,ticks-1))
         xx=x(i)
         parts.append(f'<line x1="{xx:.1f}" x2="{xx:.1f}" y1="{T}" y2="{H-B}" stroke="#f1f5f9"/>')
-        parts.append(f'<text x="{xx:.1f}" y="{H-B+25}" text-anchor="middle" font-size="11" fill="#64748b">{esc(dates[i])}</text>')
+        parts.append(f'<text x="{xx:.1f}" y="{H-B+26}" text-anchor="middle" font-size="11" fill="#64748b">{esc(dates[i])}</text>')
 
-    # candles
     bw=max(1.5,min(6,iw/max(n,1)*.55))
     for i,(o,h,l,c) in enumerate(zip(opens,highs,lows,closes)):
         xx=x(i); col="#15803d" if c>=o else "#b91c1c"
@@ -64,33 +67,56 @@ def _svg_chart(a):
         yo,yc=y(o),y(c); top=min(yo,yc); height=max(1,abs(yc-yo))
         parts.append(f'<rect x="{xx-bw/2:.1f}" y="{top:.1f}" width="{bw:.1f}" height="{height:.1f}" fill="{col}" opacity=".82"/>')
 
-    # helper: date index nearest
     import bisect
     def date_index(ds):
-        pos=bisect.bisect_left(dates,str(ds))
+        ds=str(ds)
+        pos=bisect.bisect_left(dates,ds)
         if pos<=0:return 0
         if pos>=n:return n-1
-        return pos if abs(pos-(n-1)/2)<abs((pos-1)-(n-1)/2) else pos-1
+        d0=abs((__import__("datetime").date.fromisoformat(dates[pos-1])-__import__("datetime").date.fromisoformat(ds)).days)
+        d1=abs((__import__("datetime").date.fromisoformat(dates[pos])-__import__("datetime").date.fromisoformat(ds)).days)
+        return pos-1 if d0<=d1 else pos
 
-    def add_forecast(items,label,past=False):
-        for j,it in enumerate(items,1):
-            price=float(it["price"]); col=it.get("color","#2563eb")
-            yy=y(price)
-            dash="6,5" if past else "3,3"
-            parts.append(f'<line x1="{L}" x2="{W-R}" y1="{yy:.1f}" y2="{yy:.1f}" stroke="{col}" stroke-width="1.5" stroke-dasharray="{dash}" opacity=".85"/>')
-            if it.get("date"):
-                ii=date_index(it["date"]); xx=x(ii)
-                parts.append(f'<line x1="{xx:.1f}" x2="{xx:.1f}" y1="{T}" y2="{H-B}" stroke="{col}" stroke-width="1" stroke-dasharray="{dash}" opacity=".65"/>')
-                boxx=max(L+5,min(W-R-170,xx+6)); boxy=max(T+18,min(H-B-8,yy-8))
-                suffix=" سابقة" if past else ""
-                txt=f'{label}{suffix} {j} · {price:.2f} · {it["strength"]}%'
-                parts.append(f'<rect x="{boxx:.1f}" y="{boxy-16:.1f}" width="165" height="21" rx="4" fill="{col}" opacity=".90"/>')
-                parts.append(f'<text x="{boxx+5:.1f}" y="{boxy-2:.1f}" font-size="11" fill="#fff">{esc(txt)}</text>')
+    # Main future levels only: four dashed decision lines, labels at right edge.
+    for j,it in enumerate(a.get("tops",[]),1):
+        yy=y(it["price"]); col="#b91c1c"
+        parts.append(f'<line x1="{L}" x2="{W-R}" y1="{yy:.1f}" y2="{yy:.1f}" stroke="{col}" stroke-width="1.4" stroke-dasharray="6,5" opacity=".75"/>')
+        parts.append(f'<polygon points="{W-R-6},{yy:.1f} {W-R-18},{yy-7:.1f} {W-R-18},{yy+7:.1f}" fill="{col}"/>')
+        parts.append(f'<text x="{W-R-24}" y="{yy-8:.1f}" text-anchor="end" font-size="11" font-weight="700" fill="{col}">قمة {j} · {float(it["price"]):.2f} · {it["strength"]}%</text>')
 
-    add_forecast(a.get("previous_tops",[]),"قمة",True)
-    add_forecast(a.get("previous_lows",[]),"قاع",True)
-    add_forecast(a.get("tops",[]),"قمة",False)
-    add_forecast(a.get("lows",[]),"قاع",False)
+    for j,it in enumerate(a.get("lows",[]),1):
+        yy=y(it["price"]); col="#15803d"
+        parts.append(f'<line x1="{L}" x2="{W-R}" y1="{yy:.1f}" y2="{yy:.1f}" stroke="{col}" stroke-width="1.4" stroke-dasharray="6,5" opacity=".75"/>')
+        parts.append(f'<polygon points="{W-R-6},{yy:.1f} {W-R-18},{yy-7:.1f} {W-R-18},{yy+7:.1f}" fill="{col}"/>')
+        parts.append(f'<text x="{W-R-24}" y="{yy+18:.1f}" text-anchor="end" font-size="11" font-weight="700" fill="{col}">قاع {j} · {float(it["price"]):.2f} · {it["strength"]}%</text>')
+
+    # Historical forecasts: arrows only, no full horizontal lines.
+    def hist_arrow(it,is_top,index):
+        ii=date_index(it.get("actual_date") or it.get("date"))
+        xx=x(ii)
+        # Put the marker on the realized extreme when available; otherwise forecast price.
+        p=float(it.get("actual_price") or it["price"])
+        yy=y(p)
+        col=it.get("status_color","#64748b")
+        if is_top:
+            # Downward triangle positioned above the top.
+            ay=max(T+10,yy-20)
+            parts.append(f'<polygon points="{xx:.1f},{ay+12:.1f} {xx-8:.1f},{ay:.1f} {xx+8:.1f},{ay:.1f}" fill="{col}"/>')
+            ty=max(T+10,ay-5)
+            label=f'قمة سابقة {index} · {it.get("status","")}'
+            parts.append(f'<text x="{xx:.1f}" y="{ty:.1f}" text-anchor="middle" font-size="10" font-weight="700" fill="{col}">{esc(label)}</text>')
+        else:
+            # Upward triangle positioned below the low.
+            ay=min(H-B-10,yy+20)
+            parts.append(f'<polygon points="{xx:.1f},{ay-12:.1f} {xx-8:.1f},{ay:.1f} {xx+8:.1f},{ay:.1f}" fill="{col}"/>')
+            ty=min(H-B-2,ay+14)
+            label=f'قاع سابق {index} · {it.get("status","")}'
+            parts.append(f'<text x="{xx:.1f}" y="{ty:.1f}" text-anchor="middle" font-size="10" font-weight="700" fill="{col}">{esc(label)}</text>')
+
+    for j,it in enumerate(a.get("previous_tops",[]),1):
+        hist_arrow(it,True,j)
+    for j,it in enumerate(a.get("previous_lows",[]),1):
+        hist_arrow(it,False,j)
 
     parts.append('</svg>')
     return "".join(parts)
