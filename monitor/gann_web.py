@@ -82,13 +82,13 @@ def _svg_chart(a):
         yy=y(it["price"]); col="#b91c1c"
         parts.append(f'<line x1="{L}" x2="{W-R}" y1="{yy:.1f}" y2="{yy:.1f}" stroke="{col}" stroke-width="1.4" stroke-dasharray="6,5" opacity=".75"/>')
         parts.append(f'<polygon points="{W-R-6},{yy:.1f} {W-R-18},{yy-7:.1f} {W-R-18},{yy+7:.1f}" fill="{col}"/>')
-        parts.append(f'<text x="{W-R-24}" y="{yy-8:.1f}" text-anchor="end" font-size="11" font-weight="700" fill="{col}">قمة {j} · {float(it["price"]):.2f} · {it["strength"]}%</text>')
+        parts.append(f'<text x="{W-R-24}" y="{yy-8:.1f}" text-anchor="end" font-size="11" font-weight="700" fill="{col}">قمة {j} · {float(it["price"]):.2f} · قرار {it["strength"]}%</text>')
 
     for j,it in enumerate(a.get("lows",[]),1):
         yy=y(it["price"]); col="#15803d"
         parts.append(f'<line x1="{L}" x2="{W-R}" y1="{yy:.1f}" y2="{yy:.1f}" stroke="{col}" stroke-width="1.4" stroke-dasharray="6,5" opacity=".75"/>')
         parts.append(f'<polygon points="{W-R-6},{yy:.1f} {W-R-18},{yy-7:.1f} {W-R-18},{yy+7:.1f}" fill="{col}"/>')
-        parts.append(f'<text x="{W-R-24}" y="{yy+18:.1f}" text-anchor="end" font-size="11" font-weight="700" fill="{col}">قاع {j} · {float(it["price"]):.2f} · {it["strength"]}%</text>')
+        parts.append(f'<text x="{W-R-24}" y="{yy+18:.1f}" text-anchor="end" font-size="11" font-weight="700" fill="{col}">قاع {j} · {float(it["price"]):.2f} · قرار {it["strength"]}%</text>')
 
     # Historical forecasts: arrows only, no full horizontal lines.
     def hist_arrow(it,is_top,index):

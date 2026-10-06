@@ -34,6 +34,15 @@ EGX_FINAL_CONSENSUS_MIN_VOTES=3     # selected by at least 3 of 5 reasonable mod
 EGX_FINAL_MIN_GAP=15               # absolute safety floor between opposite pivots
 EGX_FINAL_MIN_TRANSITION_SWING=6.0 # only removes market noise, not a 'major' hard threshold
 
+GANN_ENGINE_VERSION="5.0 FINAL"
+FINAL_TIME_HORIZON_DAYS=270
+FINAL_TIME_WINDOW_DAYS=2
+FINAL_TIME_MIN_SEPARATION_DAYS=7
+FINAL_LEVEL_MIN_SEPARATION_PCT=1.75
+FINAL_BACKTEST_MIN_SAMPLES=3
+FINAL_HISTORY_LIMIT_EGX=2200
+FINAL_HISTORY_LIMIT_US=1400
+
 # Major/representative listed banks. Only symbols available in the database count.
 EGX_BANK_SYMBOLS={
     "COMI.CA","QNBA.CA","ADIB.CA","CIEB.CA","FAIT.CA",
@@ -590,9 +599,13 @@ def _map_market_pivots_to_stock(df,market_pivots,event_window=EGX_MARKET_EVENT_W
     """Use each major market date, then anchor to this stock's local extreme near it."""
     if df.empty:return []
     out=[]
+    dates=list(df["d"])
+    if not dates:return []
+    first_d,last_d=dates[0],dates[-1]
     for mp in market_pivots:
         d=mp["date"]
-        dates=list(df["d"])
+        if d < first_d-timedelta(days=7) or d > last_d+timedelta(days=7):
+            continue
         j=min(range(len(dates)),key=lambda k:abs((dates[k]-d).days))
         lo=max(0,j-event_window);hi=min(len(df)-1,j+event_window)
         w=df.iloc[lo:hi+1]
@@ -611,7 +624,7 @@ def _map_market_pivots_to_stock(df,market_pivots,event_window=EGX_MARKET_EVENT_W
             "date":df.iloc[ii]["d"],
             "market_date":mp["date"],
             "available_date":mp["available_date"],
-            "market_score":mp["score"],
+            "market_score":mp.get("final_score",mp.get("quality_balanced",mp.get("score",0))),
             "breadth_pct":mp["breadth_pct"],
             "leaders_pct":mp["leaders_pct"],
             "banks_pct":mp["banks_pct"],
@@ -737,7 +750,8 @@ def cluster_price_levels(items,current,atr):
         methods=sorted(set(i["method"] for i in c["items"])); base=max(i["strength"] for i in c["items"])
         bonus=min(18,7*(len(methods)-1)+3*(len(c["items"])-len(methods)))
         st=min(100,int(round(base+bonus)))
-        out.append({"level":round(c["level"],4),"strength":st,"methods":methods,"labels":[i["submethod"] for i in c["items"]],"side":"resistance" if c["level"]>current else "support","distance_pct":round(100*(c["level"]/current-1),2),"count":len(c["items"])})
+        anchor_kinds=sorted(set(str(i.get("pivot_kind","")) for i in c["items"] if i.get("pivot_kind")))
+        out.append({"level":round(c["level"],4),"strength":st,"methods":methods,"labels":[i["submethod"] for i in c["items"]],"side":"resistance" if c["level"]>current else "support","distance_pct":round(100*(c["level"]/current-1),2),"count":len(c["items"]),"anchor_kinds":anchor_kinds})
     return out
 
 def _time_strength(label):
@@ -783,7 +797,8 @@ def cluster_time_dates(items,window_days=2):
     for c in cs:
         methods=sorted(set(i["method"] for i in c["items"])); base=max(i["strength"] for i in c["items"])
         st=min(100,int(round(base+min(18,8*(len(methods)-1)+2*(len(c["items"])-len(methods))))))
-        out.append({"date":c["date"],"strength":st,"methods":methods,"labels":[i["submethod"] for i in c["items"]],"count":len(c["items"])})
+        anchor_kinds=sorted(set(str(i.get("anchor_kind","")) for i in c["items"] if i.get("anchor_kind")))
+        out.append({"date":c["date"],"strength":st,"methods":methods,"labels":[i["submethod"] for i in c["items"]],"count":len(c["items"]),"anchor_kinds":anchor_kinds})
     return out
 
 def strength_color(v):
@@ -791,263 +806,214 @@ def strength_color(v):
     return "#b91c1c" if v>=90 else "#ea580c" if v>=80 else "#ca8a04" if v>=70 else "#2563eb" if v>=60 else "#64748b"
 
 def _main_level_score(x):
-    """Decision score for already-clustered levels.
-
-    Confluence/strength dominates. Distance is only a mild penalty so a strong
-    level is not discarded just because it is not the nearest raw line.
-    """
+    """Geometry score for a clustered price level (not probability)."""
     strength=float(x.get("strength") or 0)
     count=max(1,int(x.get("count") or 1))
     methods=len(x.get("methods") or [])
     dist=abs(float(x.get("distance_pct") or 0))
-    return strength + min(12,3*methods+1.5*(count-1)) - min(18,dist*0.25)
+    diversity=min(12,3.0*methods+1.5*(count-1))
+    proximity_penalty=min(22,dist*0.32)
+    return strength+diversity-proximity_penalty
 
-def select_main_price_levels(pc,current,side,limit=2):
-    """Return only the principal decision levels on one side of current price."""
-    if side=="resistance":
-        xs=[x for x in pc if x["level"]>current]
-    else:
-        xs=[x for x in pc if x["level"]<current]
-
-    # Avoid extremely remote raw geometry overwhelming the decision view.
-    # If enough candidates exist within 50%, use those; otherwise fall back to all.
-    near=[x for x in xs if abs(float(x.get("distance_pct") or 0))<=50]
-    if len(near)>=limit:
-        xs=near
-
+def select_main_price_levels(pc,current,side,limit=2,atr=0.0):
+    """Sparse decision levels: strong, reasonably near, and materially separated."""
+    xs=[x for x in pc if (x["level"]>current if side=="resistance" else x["level"]<current)]
+    if not xs:return []
+    near=[x for x in xs if abs(float(x.get("distance_pct") or 0))<=45]
+    if len(near)>=limit:xs=near
     ranked=sorted(xs,key=lambda x:(-_main_level_score(x),abs(float(x.get("distance_pct") or 0))))
+    atr_pct=(100*atr/current) if current and atr else 0.0
+    min_sep=max(FINAL_LEVEL_MIN_SEPARATION_PCT,1.10*atr_pct)
     picked=[]
     for x in ranked:
-        # Keep principal levels materially separated from each other.
-        if any(abs(x["level"]/p["level"]-1)*100 < 1.5 for p in picked if p["level"]) :
+        if any(abs(x["level"]/q["level"]-1)*100<min_sep for q in picked if q.get("level")):
             continue
-        picked.append(x)
-        if len(picked)>=limit:
-            break
-
-    # Present tops ascending and supports descending for intuitive reading.
-    if side=="resistance":
-        picked.sort(key=lambda x:x["level"])
-    else:
-        picked.sort(key=lambda x:x["level"],reverse=True)
+        y=dict(x)
+        y["geometry_score"]=int(round(max(0,min(100,_main_level_score(x)))))
+        picked.append(y)
+        if len(picked)>=limit:break
+    picked.sort(key=lambda x:x["level"],reverse=(side!="resistance"))
     return picked
 
+def _tag_times(items,anchor_kind):
+    out=[]
+    for x in items:
+        y=dict(x);y["anchor_kind"]=anchor_kind;out.append(y)
+    return out
+
+def select_final_time_windows(tc,kind=None,limit=2,horizon_days=FINAL_TIME_HORIZON_DAYS):
+    """Strong near-term Gann time clusters, separated enough to be actionable."""
+    today=date.today();end=today+timedelta(days=horizon_days)
+    xs=[x for x in tc if today<=x["date"]<=end]
+    preferred="L" if kind=="TOP" else "H" if kind=="LOW" else None
+    def compat(x):
+        ks=set(x.get("anchor_kinds") or [])
+        if not preferred:return 0
+        if preferred in ks:return 2
+        if "RANGE" in ks:return 1
+        return 0
+    ranked=sorted(xs,key=lambda x:(-compat(x),-float(x.get("strength",0)),x["date"]))
+    picked=[]
+    for x in ranked:
+        if any(abs((x["date"]-q["date"]).days)<FINAL_TIME_MIN_SEPARATION_DAYS for q in picked):
+            continue
+        y=dict(x)
+        y["window_start"]=x["date"]-timedelta(days=FINAL_TIME_WINDOW_DAYS)
+        y["window_end"]=x["date"]+timedelta(days=FINAL_TIME_WINDOW_DAYS)
+        y["direction_compatibility"]=compat(x)
+        picked.append(y)
+        if len(picked)>=limit:break
+    return sorted(picked,key=lambda x:x["date"])
+
 def _nearest_session_index(df,target_date):
-    if df.empty:
-        return None
+    if df.empty:return None
     dates=list(df["d"])
-    best=min(range(len(dates)),key=lambda i:abs((dates[i]-target_date).days))
-    return best
+    return min(range(len(dates)),key=lambda i:abs((dates[i]-target_date).days))
 
 def evaluate_historical_forecast(df,forecast,wide_sessions=10,price_tol_pct=3.0,partial_price_tol_pct=6.0,
                                  time_tol_sessions=3,partial_time_tol_sessions=7):
-    """Compare a past forecast with what price actually did around its date.
-
-    TOP: actual comparison point is the highest high in ±wide_sessions.
-    LOW: actual comparison point is the lowest low in ±wide_sessions.
-
-    تحقق:
-      price error <= 3% AND time error <= 3 sessions.
-    تحقق جزئي:
-      (price error <= 3% AND time <= 7 sessions) OR
-      (price error <= 6% AND time <= 3 sessions).
-    Otherwise: لم يتحقق.
-
-    This is a descriptive validation rule, not a claim of predictive probability.
-    """
-    d=forecast.get("date")
-    target=float(forecast.get("price") or 0)
+    d=forecast.get("date");target=float(forecast.get("price") or 0)
     if not d or target<=0 or df.empty:
-        return {**forecast,"status":"غير قابل للتقييم","status_key":"na",
-                "actual_price":None,"actual_date":None,"price_error_pct":None,"time_error_sessions":None}
-
+        return {**forecast,"status":"غير قابل للتقييم","status_key":"na","status_color":"#64748b","actual_price":None,"actual_date":None,"price_error_pct":None,"time_error_sessions":None}
     center=_nearest_session_index(df,d)
     if center is None:
-        return {**forecast,"status":"غير قابل للتقييم","status_key":"na",
-                "actual_price":None,"actual_date":None,"price_error_pct":None,"time_error_sessions":None}
-
-    lo=max(0,center-wide_sessions)
-    hi=min(len(df)-1,center+wide_sessions)
-    w=df.iloc[lo:hi+1]
+        return {**forecast,"status":"غير قابل للتقييم","status_key":"na","status_color":"#64748b","actual_price":None,"actual_date":None,"price_error_pct":None,"time_error_sessions":None}
+    lo=max(0,center-wide_sessions);hi=min(len(df)-1,center+wide_sessions);w=df.iloc[lo:hi+1]
     if w.empty:
-        return {**forecast,"status":"غير قابل للتقييم","status_key":"na",
-                "actual_price":None,"actual_date":None,"price_error_pct":None,"time_error_sessions":None}
-
+        return {**forecast,"status":"غير قابل للتقييم","status_key":"na","status_color":"#64748b","actual_price":None,"actual_date":None,"price_error_pct":None,"time_error_sessions":None}
     if forecast.get("type")=="TOP":
-        rel=int(np.nanargmax(w["h"].to_numpy(float)))
-        actual_price=float(w.iloc[rel]["h"])
+        rel=int(np.nanargmax(w["h"].to_numpy(float)));actual_price=float(w.iloc[rel]["h"])
     else:
-        rel=int(np.nanargmin(w["l"].to_numpy(float)))
-        actual_price=float(w.iloc[rel]["l"])
-
-    actual_i=lo+rel
-    actual_date=df.iloc[actual_i]["d"]
-    price_error=abs(actual_price/target-1)*100
-    time_error=abs(actual_i-center)
-
-    if price_error<=price_tol_pct and time_error<=time_tol_sessions:
-        status,status_key="تحقق","hit"
-    elif ((price_error<=price_tol_pct and time_error<=partial_time_tol_sessions) or
-          (price_error<=partial_price_tol_pct and time_error<=time_tol_sessions)):
-        status,status_key="تحقق جزئي","partial"
-    else:
-        status,status_key="لم يتحقق","miss"
-
+        rel=int(np.nanargmin(w["l"].to_numpy(float)));actual_price=float(w.iloc[rel]["l"])
+    actual_i=lo+rel;actual_date=df.iloc[actual_i]["d"]
+    price_error=abs(actual_price/target-1)*100;time_error=abs(actual_i-center)
+    if price_error<=price_tol_pct and time_error<=time_tol_sessions:status,status_key="تحقق","hit"
+    elif ((price_error<=price_tol_pct and time_error<=partial_time_tol_sessions) or (price_error<=partial_price_tol_pct and time_error<=time_tol_sessions)):status,status_key="تحقق جزئي","partial"
+    else:status,status_key="لم يتحقق","miss"
     status_color={"hit":"#15803d","partial":"#d97706","miss":"#b91c1c","na":"#64748b"}[status_key]
-    return {
-        **forecast,
-        "status":status,
-        "status_key":status_key,
-        "status_color":status_color,
-        "actual_price":round(actual_price,4),
-        "actual_date":actual_date,
-        "price_error_pct":round(price_error,2),
-        "time_error_sessions":int(time_error),
-    }
+    return {**forecast,"status":status,"status_key":status_key,"status_color":status_color,"actual_price":round(actual_price,4),"actual_date":actual_date,"price_error_pct":round(price_error,2),"time_error_sessions":int(time_error)}
 
-
-def _historical_expected_turns(df, pivots, chart_start, wing=7):
-    """Build latest historical forecasts and evaluate them later.
-
-    Pivot forecasts only become eligible after pivot confirmation (`wing`
-    sessions later), avoiding the misleading impression that the exact pivot
-    was known on its own day.
-    """
-    if not pivots:
-        return [], []
-
-    today=date.today()
-    hist_tops=[]
-    hist_lows=[]
-    subset=pivots[-12:]
-    base_idx=max(0,len(pivots)-len(subset))
-
+def _historical_expected_turns(df,pivots,chart_start=None,wing=7):
+    """As-of historical forecasts; each anchor stops when the next anchor is available."""
+    if not pivots:return [],[]
+    today=date.today();hist_tops=[];hist_lows=[]
+    subset=pivots[-14:];base_idx=max(0,len(pivots)-len(subset))
     for local_idx,p in enumerate(subset):
-        anchor_date=p["date"]
-        anchor_price=float(p["price"])
-        pivot_i=int(p.get("i",0))
-        confirm_i=min(len(df)-1,pivot_i+wing)
+        anchor_date=p["date"];anchor_price=float(p["price"]);pivot_i=int(p.get("i",0))
+        confirm_i=min(len(df)-1,max(0,pivot_i+wing))
         available_date=p.get("available_date") or df.iloc[confirm_i]["d"]
+        global_idx=base_idx+local_idx
+        next_available=today
+        if global_idx+1<len(pivots):
+            npiv=pivots[global_idx+1]
+            next_available=npiv.get("available_date") or npiv.get("date") or today
+        if next_available<=available_date:continue
 
         price_items=_sq9_levels(anchor_price,p["kind"],anchor_date)+_master_price_levels(p)
-        global_idx=base_idx+local_idx
         if global_idx>0:
             prev=pivots[global_idx-1]
-            rng={
-                "low":min(float(prev["price"]),anchor_price),
-                "high":max(float(prev["price"]),anchor_price),
-                "range":abs(anchor_price-float(prev["price"])),
-                "anchor_date":anchor_date,
-            }
+            rng={"low":min(float(prev["price"]),anchor_price),"high":max(float(prev["price"]),anchor_price),"range":abs(anchor_price-float(prev["price"])),"anchor_date":anchor_date}
             price_items+=_range_ratio_levels(rng)
-
-        # Cluster around the anchor, then keep only a principal level.
-        temp_pc=cluster_price_levels(price_items,anchor_price,_atr(df.iloc[:confirm_i+1]))
+        atr_hist=_atr(df.iloc[:confirm_i+1])
+        temp_pc=cluster_price_levels(price_items,anchor_price,atr_hist)
         side="resistance" if p["kind"]=="L" else "support"
-        main=select_main_price_levels(temp_pc,anchor_price,side,limit=1)
-        if not main:
-            continue
+        main=select_main_price_levels(temp_pc,anchor_price,side,limit=1,atr=atr_hist)
+        if not main:continue
         price_pick=main[0]
 
-        time_items=[]
-        unit=anchor_price
+        # Historical time geometry must be generated as-of the old anchor.
+        # Do not use the future-only helper functions here because they filter
+        # against today's date and would erase old forecast windows.
+        time_items=[];unit=anchor_price
+        hist_method="Gann Square Low" if p["kind"]=="L" else "Gann Square High"
         if 0<unit<=5000:
-            for cycle in range(0,5):
+            for cycle in range(0,6):
                 for frac,label,_ in IMPORTANT_RATIOS:
                     off=(cycle+frac)*unit
-                    if off<=0 or off>2500:
-                        continue
+                    if off<=0 or off>2500:continue
                     for mode in ("calendar","trading"):
                         d=_calendar_add(anchor_date,off) if mode=="calendar" else _business_add(anchor_date,int(round(off)))
-                        if d>available_date and d<today and d>=chart_start:
-                            time_items.append({
-                                "method":"Gann Square Low" if p["kind"]=="L" else "Gann Square High",
-                                "submethod":f"{label} · {'تقويمي' if mode=='calendar' else 'جلسات'}",
-                                "date":d,"strength":_time_strength(label),"mode":mode,
-                            })
-
-        for cycle in range(0,5):
+                        if d>available_date and d<next_available and d<today:
+                            time_items.append({"method":hist_method,"submethod":f"{label} · {'تقويمي' if mode=='calendar' else 'جلسات'}","date":d,"strength":_time_strength(label),"mode":mode,"anchor_kind":p["kind"]})
+        for cycle in range(0,6):
             for n,strength in MASTER_144:
                 off=cycle*144+n
                 for mode in ("calendar","trading"):
                     d=_calendar_add(anchor_date,off) if mode=="calendar" else _business_add(anchor_date,off)
-                    if d>available_date and d<today and d>=chart_start:
-                        time_items.append({
-                            "method":"Master 144",
-                            "submethod":f"{n} · {'تقويمي' if mode=='calendar' else 'جلسات'}",
-                            "date":d,"strength":strength,"mode":mode,
-                        })
-
+                    if d>available_date and d<next_available and d<today:
+                        time_items.append({"method":"Master 144","submethod":f"{n} · {'تقويمي' if mode=='calendar' else 'جلسات'}","date":d,"strength":strength,"mode":mode,"anchor_kind":p["kind"]})
         for n in MIKULA_225_CELL_COUNTS:
             d=_business_add(anchor_date,n)
-            if d>available_date and d<today and d>=chart_start:
-                time_items.append({
-                    "method":"Mikula 225° Cells","submethod":f"{n} bars","date":d,
-                    "strength":min(96,78+int(math.log(max(n,9),3))*3),"mode":"trading",
-                })
-
-        strong_times=[x for x in cluster_time_dates(time_items) if x["strength"]>=78]
-        if not strong_times:
-            continue
-
-        for t in strong_times[:2]:
+            if d>available_date and d<next_available and d<today:
+                time_items.append({"method":"Mikula 225° Cells","submethod":f"{n} bars","date":d,"strength":min(96,78+int(math.log(max(n,9),3))*3),"mode":"trading","anchor_kind":p["kind"]})
+        strong_times=[x for x in cluster_time_dates(time_items) if x["strength"]>=75]
+        strong_times=sorted(strong_times,key=lambda x:(-x["strength"],x["date"]))[:2]
+        for t in strong_times:
             st=int(round(min(100,.62*price_pick["strength"]+.38*t["strength"]+5)))
-            item={
-                "type":"TOP" if p["kind"]=="L" else "LOW",
-                "price":round(float(price_pick["level"]),4),
-                "date":t["date"],
-                "strength":st,
-                "methods":sorted(set(price_pick["methods"]+t["methods"])),
-                "color":strength_color(st),
-                "anchor_date":anchor_date,
-                "anchor_price":round(anchor_price,4),
-                "available_date":available_date,
-            }
-            if p["kind"]=="L":
-                hist_tops.append(item)
-            else:
-                hist_lows.append(item)
+            item={"type":"TOP" if p["kind"]=="L" else "LOW","price":round(float(price_pick["level"]),4),"date":t["date"],"strength":st,"methods":sorted(set(price_pick["methods"]+t["methods"])),"color":strength_color(st),"anchor_date":anchor_date,"anchor_price":round(anchor_price,4),"available_date":available_date}
+            (hist_tops if p["kind"]=="L" else hist_lows).append(item)
 
     def compact(items):
-        items=sorted(items,key=lambda x:(x["date"],-x["strength"]))
-        out=[]
+        items=sorted(items,key=lambda x:(x["date"],-x["strength"]));out=[]
         for it in items:
             if out and abs((it["date"]-out[-1]["date"]).days)<=2:
-                if it["strength"]>out[-1]["strength"]:
-                    out[-1]=it
-            else:
-                out.append(it)
-        return out[-2:]
+                if it["strength"]>out[-1]["strength"]:out[-1]=it
+            else:out.append(it)
+        return out[-12:]
+    return [evaluate_historical_forecast(df,x) for x in compact(hist_tops)],[evaluate_historical_forecast(df,x) for x in compact(hist_lows)]
 
-    tops=[evaluate_historical_forecast(df,x) for x in compact(hist_tops)]
-    lows=[evaluate_historical_forecast(df,x) for x in compact(hist_lows)]
-    return tops,lows
+def _backtest_stats(tops,lows):
+    xs=[x for x in tops+lows if x.get("status_key") in ("hit","partial","miss")]
+    n=len(xs);hits=sum(x["status_key"]=="hit" for x in xs);partials=sum(x["status_key"]=="partial" for x in xs);misses=sum(x["status_key"]=="miss" for x in xs)
+    if n:
+        raw=(100*hits+60*partials)/n
+        reliability=50+(raw-50)*(n/(n+4))
+        pe=[x["price_error_pct"] for x in xs if x.get("price_error_pct") is not None]
+        te=[x["time_error_sessions"] for x in xs if x.get("time_error_sessions") is not None]
+        med_price=float(np.median(pe)) if pe else None;med_time=float(np.median(te)) if te else None
+    else:
+        raw=50;reliability=50;med_price=med_time=None
+    return {"samples":n,"hits":hits,"partials":partials,"misses":misses,"hit_rate":round(100*hits/n,1) if n else None,"useful_rate":round(100*(hits+partials)/n,1) if n else None,"raw_score":round(raw,1),"reliability_score":round(reliability,1),"median_price_error_pct":round(med_price,2) if med_price is not None else None,"median_time_error_sessions":round(med_time,1) if med_time is not None else None,"sample_quality":"كافٍ" if n>=FINAL_BACKTEST_MIN_SAMPLES else "محدود"}
 
-def _pair_turns(pc,tc,current):
-    sups=select_main_price_levels(pc,current,"support",limit=2)
-    ress=select_main_price_levels(pc,current,"resistance",limit=2)
+def _anchor_strength(market,low,high):
+    if market=="EGX":
+        vals=[float(x.get("stability_pct",0)) for x in (low,high) if x]
+        return round(sum(vals)/len(vals),1) if vals else 50.0
+    return 65.0
 
-    # Keep future time windows principal too: strongest near-term clusters,
-    # then sort them chronologically for display.
-    future=[x for x in tc if x["date"]>=date.today()]
-    future=sorted(future,key=lambda x:(-x["strength"],x["date"]))[:4]
-    future=sorted(future,key=lambda x:x["date"])
+def _final_decision_score(geometry,anchor_strength,backtest):
+    n=int(backtest.get("samples",0));rel=float(backtest.get("reliability_score",50))
+    if n>=FINAL_BACKTEST_MIN_SAMPLES:score=.55*geometry+.25*anchor_strength+.20*rel
+    else:score=.70*geometry+.30*anchor_strength
+    return int(round(max(0,min(100,score))))
 
-    def make(levels,typ):
+def _pair_turns(pc,tc,current,atr,anchor_strength,backtest):
+    sups=select_main_price_levels(pc,current,"support",limit=2,atr=atr)
+    ress=select_main_price_levels(pc,current,"resistance",limit=2,atr=atr)
+    top_times=select_final_time_windows(tc,"TOP",limit=2)
+    low_times=select_final_time_windows(tc,"LOW",limit=2)
+    def make(levels,times,typ):
         ans=[]
         for i,p in enumerate(levels):
-            t=future[i] if i<len(future) else (future[-1] if future else None)
-            st=int(round(p["strength"] if not t else min(100,.62*p["strength"]+.38*t["strength"]+5)))
-            ans.append({
-                "type":typ,"price":p["level"],"date":t["date"] if t else None,
-                "strength":st,"price_strength":p["strength"],
-                "time_strength":t["strength"] if t else None,
-                "methods":sorted(set(p["methods"]+(t["methods"] if t else []))),
-                "color":strength_color(st),
-                "level_count":p.get("count",1),
-            })
+            t=times[i] if i<len(times) else (times[-1] if times else None)
+            geometry=int(round(p["strength"] if not t else min(100,.62*p["strength"]+.38*t["strength"]+5)))
+            decision=_final_decision_score(geometry,anchor_strength,backtest)
+            ans.append({"type":typ,"price":p["level"],"date":t["date"] if t else None,"window_start":t.get("window_start") if t else None,"window_end":t.get("window_end") if t else None,"strength":decision,"decision_score":decision,"geometry_strength":geometry,"price_strength":p["strength"],"time_strength":t["strength"] if t else None,"methods":sorted(set(p["methods"]+(t["methods"] if t else []))),"color":strength_color(decision),"level_count":p.get("count",1),"distance_pct":p.get("distance_pct"),"anchor_kinds":p.get("anchor_kinds",[])})
         return ans
-    return make(ress,"TOP"),make(sups,"LOW")
+    return make(ress,top_times,"TOP"),make(sups,low_times,"LOW"),top_times,low_times
+
+def _decision_summary(last,ns,nr,next_times,backtest,anchor_strength):
+    sup_dist=abs(100*(last/ns["level"]-1)) if ns and ns.get("level") else None
+    res_dist=abs(100*(nr["level"]/last-1)) if nr and nr.get("level") else None
+    if sup_dist is not None and res_dist is not None:
+        total=sup_dist+res_dist;position=(100*sup_dist/total) if total else 50
+        if position>=70:zone="قريب من المقاومة الرئيسية"
+        elif position<=30:zone="قريب من الدعم الرئيسي"
+        else:zone="منتصف النطاق الرئيسي"
+    elif nr:zone="أقرب لمقاومة رئيسية";position=None
+    elif ns:zone="أقرب لدعم رئيسي";position=None
+    else:zone="لا توجد مستويات رئيسية كافية";position=None
+    return {"zone":zone,"position_pct":round(position,1) if position is not None else None,"support_distance_pct":round(sup_dist,2) if sup_dist is not None else None,"resistance_distance_pct":round(res_dist,2) if res_dist is not None else None,"next_window":next_times[0] if next_times else None,"backtest_reliability":backtest.get("reliability_score"),"anchor_strength":anchor_strength}
 
 def build_method_rows(last,pc,tc):
     methods=[
@@ -1070,56 +1036,61 @@ def build_method_rows(last,pc,tc):
     return rows
 
 def analyze_symbol(DB,symbol,limit=900):
-    df=load_daily(DB,symbol,limit)
+    market=symbol_market(symbol)
+    effective_limit=max(int(limit or 900),FINAL_HISTORY_LIMIT_EGX if market=="EGX" else FINAL_HISTORY_LIMIT_US)
+    df=load_daily(DB,symbol,effective_limit)
     if df.empty:return None
 
-    market=symbol_market(symbol)
-    market_pivots=[]
+    market_pivots=[];historical_market_pivots=[]
     if market=="EGX":
         market_pivots=get_egx_market_pivots(DB)
-        if len(market_pivots)<2:
-            raise RuntimeError("لا توجد قمم/قيعان سوق رئيسية كافية بعد الفلترة المشددة.")
+        if len(market_pivots)<2:raise RuntimeError("لا توجد قمم/قيعان سوق رئيسية كافية.")
         all_market_stock_pivots=_map_market_pivots_to_stock(df,market_pivots)
-        if len(all_market_stock_pivots)<2:
-            raise RuntimeError("لا توجد بيانات كافية للسهم حول مرتكزات السوق الرئيسية.")
-
-        # Forward Gann projections use only the latest confirmed principal LOW
-        # and latest confirmed principal HIGH. Historical validation still uses
-        # the full accepted major-pivot sequence.
+        if len(all_market_stock_pivots)<2:raise RuntimeError("لا توجد بيانات كافية للسهم حول مرتكزات السوق الرئيسية.")
         last_low=next((x for x in reversed(all_market_stock_pivots) if x["kind"]=="L"),None)
         last_high=next((x for x in reversed(all_market_stock_pivots) if x["kind"]=="H"),None)
-        piv=[x for x in [last_low,last_high] if x is not None]
-        piv.sort(key=lambda x:x["i"])
+        piv=[x for x in (last_low,last_high) if x is not None];piv.sort(key=lambda x:x["i"])
         historical_market_pivots=all_market_stock_pivots
-        anchor_source="EGX_MARKET_MAJOR"
+        anchor_source="EGX_MARKET_CONSENSUS_FINAL"
     else:
-        piv=detect_pivots(df)
-        anchor_source="LOCAL"
+        piv=detect_pivots(df,wing=7,min_move_pct=4.0)
+        historical_market_pivots=piv
+        anchor_source="LOCAL_CONFIRMED"
 
-    low,high=_latest_pair(piv); rng=_last_completed_range(piv); last=float(df.iloc[-1]["c"]); atr=_atr(df)
+    low,high=_latest_pair(piv);rng=_last_completed_range(piv);last=float(df.iloc[-1]["c"]);atr=_atr(df)
+    if not low or not high:raise RuntimeError("لا يوجد قاع وقمة مؤكدان كافيان لبناء محرك جان.")
+
     pi=[]
-    if low: pi+=_sq9_levels(low["price"],"L",low["date"])+_master_price_levels(low)
-    if high: pi+=_sq9_levels(high["price"],"H",high["date"])+_master_price_levels(high)
-    pi+=_range_ratio_levels(rng); pc=cluster_price_levels(pi,last,atr)
+    pi+=_sq9_levels(low["price"],"L",low["date"])+_master_price_levels(low)
+    pi+=_sq9_levels(high["price"],"H",high["date"])+_master_price_levels(high)
+    pi+=_range_ratio_levels(rng)
+    pc=cluster_price_levels(pi,last,atr)
+
     ti=[]
-    if low: ti+=_repeat_square_dates(low["date"],low["price"],"Gann Square Low")+_master_144_dates(low["date"])+_mikula_dates(low["date"])
-    if high: ti+=_repeat_square_dates(high["date"],high["price"],"Gann Square High")+_master_144_dates(high["date"])+_mikula_dates(high["date"])
-    if rng and rng["range"]>0: ti+=_repeat_square_dates(rng["anchor_date"],rng["range"],"Gann Square Range")
-    tc=cluster_time_dates(ti); next_times=[x for x in tc if x["date"]>=date.today()][:6]
-    tops,lows=_pair_turns(pc,tc,last)
-    main_sups=select_main_price_levels(pc,last,"support",limit=2)
-    main_ress=select_main_price_levels(pc,last,"resistance",limit=2)
-    ns=main_sups[0] if main_sups else None
-    nr=main_ress[0] if main_ress else None
-    strengths=[x["strength"] for x in tops+lows]+[x["strength"] for x in next_times[:2]]
+    ti+=_tag_times(_repeat_square_dates(low["date"],low["price"],"Gann Square Low"),"L")
+    ti+=_tag_times(_master_144_dates(low["date"]),"L")+_tag_times(_mikula_dates(low["date"]),"L")
+    ti+=_tag_times(_repeat_square_dates(high["date"],high["price"],"Gann Square High"),"H")
+    ti+=_tag_times(_master_144_dates(high["date"]),"H")+_tag_times(_mikula_dates(high["date"]),"H")
+    if rng and rng["range"]>0:ti+=_tag_times(_repeat_square_dates(rng["anchor_date"],rng["range"],"Gann Square Range"),"RANGE")
+    tc=cluster_time_dates(ti)
+
+    previous_tops,previous_lows=_historical_expected_turns(df,historical_market_pivots,df.iloc[0]["d"],wing=7)
+    backtest=_backtest_stats(previous_tops,previous_lows)
+    anchor_strength=_anchor_strength(market,low,high)
+
+    tops,lows,top_times,low_times=_pair_turns(pc,tc,last,atr,anchor_strength,backtest)
+    all_final_times=sorted({x["date"]:x for x in top_times+low_times}.values(),key=lambda x:x["date"])
+    next_times=all_final_times[:2]
+
+    main_sups=select_main_price_levels(pc,last,"support",limit=2,atr=atr)
+    main_ress=select_main_price_levels(pc,last,"resistance",limit=2,atr=atr)
+    ns=main_sups[0] if main_sups else None;nr=main_ress[0] if main_ress else None
+    decision_summary=_decision_summary(last,ns,nr,next_times,backtest,anchor_strength)
+    scores=[x["decision_score"] for x in tops+lows]
+    overall=max(scores) if scores else int(round(anchor_strength))
+
     candles=df.tail(220)
-    chart_start=candles.iloc[0]["d"] if len(candles) else df.iloc[0]["d"]
-    hist_pivots=historical_market_pivots if market=="EGX" else piv
-    previous_tops,previous_lows=_historical_expected_turns(df,hist_pivots,chart_start,wing=7)
-    return {"symbol":symbol.upper(),"market":market,"anchor_source":anchor_source,
-            "market_pivots":market_pivots,
-            "stock_market_anchors":historical_market_pivots[-6:] if market=="EGX" else [],
-            "last_price":round(last,4),"last_date":df.iloc[-1]["d"],"atr14":round(atr,4),"latest_low":low,"latest_high":high,"range":rng,"price_clusters":pc,"time_clusters":tc,"next_times":next_times,"nearest_support":ns,"nearest_resistance":nr,"tops":tops,"lows":lows,"previous_tops":previous_tops,"previous_lows":previous_lows,"overall_strength":max(strengths) if strengths else 0,"overall_color":strength_color(max(strengths) if strengths else 0),"chart":{"dates":[d.isoformat() for d in candles["d"]],"open":[round(float(x),4) for x in candles["o"]],"high":[round(float(x),4) for x in candles["h"]],"low":[round(float(x),4) for x in candles["l"]],"close":[round(float(x),4) for x in candles["c"]]},"method_rows":build_method_rows(last,pc,tc)}
+    return {"engine_version":GANN_ENGINE_VERSION,"symbol":symbol.upper(),"market":market,"anchor_source":anchor_source,"market_pivots":market_pivots,"stock_market_anchors":historical_market_pivots[-6:] if market=="EGX" else [],"last_price":round(last,4),"last_date":df.iloc[-1]["d"],"atr14":round(atr,4),"latest_low":low,"latest_high":high,"range":rng,"price_clusters":pc,"time_clusters":tc,"next_times":next_times,"top_times":top_times,"low_times":low_times,"nearest_support":ns,"nearest_resistance":nr,"tops":tops,"lows":lows,"previous_tops":previous_tops,"previous_lows":previous_lows,"backtest":backtest,"anchor_strength":anchor_strength,"decision_summary":decision_summary,"overall_strength":overall,"overall_color":strength_color(overall),"chart":{"dates":[d.isoformat() for d in candles["d"]],"open":[round(float(x),4) for x in candles["o"]],"high":[round(float(x),4) for x in candles["h"]],"low":[round(float(x),4) for x in candles["l"]],"close":[round(float(x),4) for x in candles["c"]]},"method_rows":build_method_rows(last,pc,tc)}
 
 def market_page(DB,query="",page=1,per_page=100,market="US"):
     market=normalize_market(market)
@@ -1128,7 +1099,7 @@ def market_page(DB,query="",page=1,per_page=100,market="US"):
         try:
             a=analyze_symbol(DB,sym,420)
             if not a: continue
-            rows.append({"symbol":sym,"last_price":a["last_price"],"last_date":a["last_date"],"support":a["nearest_support"],"resistance":a["nearest_resistance"],"next_time":a["next_times"][0] if a["next_times"] else None,"top1":a["tops"][0] if a["tops"] else None,"top2":a["tops"][1] if len(a["tops"])>1 else None,"low1":a["lows"][0] if a["lows"] else None,"low2":a["lows"][1] if len(a["lows"])>1 else None,"strength":a["overall_strength"],"color":a["overall_color"]})
+            rows.append({"symbol":sym,"last_price":a["last_price"],"last_date":a["last_date"],"support":a["nearest_support"],"resistance":a["nearest_resistance"],"next_time":a["next_times"][0] if a["next_times"] else None,"top1":a["tops"][0] if a["tops"] else None,"top2":a["tops"][1] if len(a["tops"])>1 else None,"low1":a["lows"][0] if a["lows"] else None,"low2":a["lows"][1] if len(a["lows"])>1 else None,"strength":a["overall_strength"],"color":a["overall_color"],"zone":a["decision_summary"]["zone"],"backtest":a["backtest"]})
         except Exception as e:
             rows.append({"symbol":sym,"error":str(e)[:180],"strength":0,"color":"#64748b"})
     return {"rows":rows,"total":total,"page":page,"pages":pages,"query":query or "","market":market}
@@ -1138,5 +1109,6 @@ def source_methodology():
       {"name":"Gann: Square Range / Low / High","rule":"مساواة عدد نقاط السعر بعدد فترات الزمن مع نسب 1/4،1/3،1/2،2/3،3/4 والمربع الكامل.","source":"W.D. Gann Master Commodities Course — Chapter 6."},
       {"name":"Gann Master Square of 144","rule":"نقاط وتقاطع 36،45،48،54،63،72،81،90،96،108،117،126،135،144.","source":"W.D. Gann Master Mathematical Price, Time and Trend Calculator."},
       {"name":"Bowden","rule":"Squaring a Low / High / Range مع calendar days وtrading days وضبط 45° كـ1×1 حقيقي.","source":"David E. Bowden — Squaring Time and Price."},
-      {"name":"Mikula Square of Nine","rule":"(sqrt(P) ± angle/180)^2 ومستويات Cardinal/Fixed Cross وتواريخ Cell counts.","source":"Patrick Mikula — The Definitive Guide to Forecasting Using W.D. Gann's Square of Nine."}
+      {"name":"Mikula Square of Nine","rule":"(sqrt(P) ± angle/180)^2 ومستويات Cardinal/Fixed Cross وتواريخ Cell counts.","source":"Patrick Mikula — The Definitive Guide to Forecasting Using W.D. Gann's Square of Nine."},
+      {"name":"Final Decision Layer","rule":"يجمع الالتقاء الهندسي + ثبات الـAnchor + Backtest تاريخي as-of. درجة القرار ليست احتمال نجاح ولا توصية شراء/بيع.","source":"طبقة قرار داخلية V5.0 فوق طرق جان/Mikula."}
     ]
