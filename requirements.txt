@@ -7,3 +7,4 @@ aiohttp>=3.10,<4
 numpy
 pandas
 scikit-learn
+pyswisseph>=2.10
