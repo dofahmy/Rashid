@@ -6,8 +6,12 @@ DB=database()
 pivots=get_egx_market_pivots(DB,cache_seconds=0)
 if not pivots:
     print("NO MAJOR EGX MARKET PIVOTS FOUND")
-    print("Run/update Egypt data first so ^CASE30 and .CA stocks exist in market_candles_1d.")
+    print("The engine tried official ^CASE30 first, then the synthetic Top-30 liquid market proxy.")
 else:
+    source=pivots[-1].get("index_source","UNKNOWN")
+    print("Index source:",source)
+    if source=="SYNTHETIC_TOP30_LIQUID":
+        print("NOTE: official ^CASE30 history was unavailable; using a synthetic equal-weight Top-30 liquid EGX proxy.")
     print(f"Major EGX market pivots: {len(pivots)}")
     for p in pivots:
         typ="LOW" if p["kind"]=="L" else "HIGH"
