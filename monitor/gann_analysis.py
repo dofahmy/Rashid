@@ -30,6 +30,9 @@ EGX_MARKET_HIGH_MIN_BREADTH=30.0 # highs can be narrower than panic/capitulation
 EGX_MARKET_HISTORY_DATES=2500     # roughly full 2019+ history
 EGX_MARKET_MIN_EVENT_GAP=20        # minimum sessions between accepted LOW/HIGH pivots
 EGX_MARKET_CLOSE_WING=10           # close-based pivot wing on synthetic/official index
+EGX_FINAL_CONSENSUS_MIN_VOTES=3     # selected by at least 3 of 5 reasonable models
+EGX_FINAL_MIN_GAP=15               # absolute safety floor between opposite pivots
+EGX_FINAL_MIN_TRANSITION_SWING=6.0 # only removes market noise, not a 'major' hard threshold
 
 # Major/representative listed banks. Only symbols available in the database count.
 EGX_BANK_SYMBOLS={
@@ -260,18 +263,66 @@ def _confirmation_rate_prepared(prepared,symbols,event_date,kind):
     return (good/avail if avail else 0.0),good,avail
 
 
-def _major_market_pivots_uncached(DB,include_diagnostics=False):
+def _sat(value,target):
+    """Smooth 0..100 saturation score; no cliff at the target."""
+    try:
+        v=max(0.0,float(value))
+        t=max(1e-9,float(target))
+    except Exception:
+        return 0.0
+    return min(100.0,100.0*v/t)
+
+def _candidate_quality(row,profile="balanced"):
+    """Market-wide significance score under several reasonable viewpoints.
+
+    LOWs emphasize breadth/capitulation.
+    HIGHs emphasize index reversal + leaders + banks, matching the intended
+    definition that important tops are visible in the index and large/bank stocks.
+    """
+    kind=row["kind"]
+    prior=_sat(row.get("prior_swing_pct",0),15)
+    follow=_sat(row.get("follow_pct",0),12)
+    breadth=_sat(row.get("breadth_pct",0),60 if kind=="L" else 42)
+    leaders=_sat(row.get("leaders_pct",0),55)
+    banks=_sat(row.get("banks_pct",0),55)
+
+    profiles={
+        "balanced":{
+            "L":(20,20,35,15,10),
+            "H":(20,20,20,20,20),
+        },
+        "breadth_led":{
+            "L":(15,15,45,15,10),
+            "H":(15,15,30,20,20),
+        },
+        "leadership_led":{
+            "L":(15,15,25,20,25),
+            "H":(15,15,15,25,30),
+        },
+        "reversal_led":{
+            "L":(25,30,25,10,10),
+            "H":(25,30,15,15,15),
+        },
+        "conservative":{
+            "L":(20,25,30,15,10),
+            "H":(25,25,15,17.5,17.5),
+        },
+    }
+    wp,wf,wb,wl,wbank=profiles[profile][kind]
+    q=(wp*prior+wf*follow+wb*breadth+wl*leaders+wbank*banks)/100.0
+    return round(q,2)
+
+def _build_raw_market_candidates(DB):
+    """Build close-pivot candidates and all confirmation metrics once."""
     idx,panel,index_source=_load_egx_panel(DB)
     if idx.empty or panel.empty:
-        return ([],[]) if include_diagnostics else []
+        return idx,panel,index_source,[]
 
     candidates=_index_candidate_pivots(idx)
     all_symbols=sorted(panel["symbol"].dropna().unique().tolist())
     prepared=_prepare_symbol_turn_data(panel)
     all_symbols=[s for s in all_symbols if s in prepared]
-
-    raw=[]
-    diagnostics=[]
+    rows=[]
 
     for c in candidates:
         i=c["i"];event_date=c["date"];kind=c["kind"]
@@ -286,7 +337,6 @@ def _major_market_pivots_uncached(DB,include_diagnostics=False):
 
         fwd=idx.iloc[i+1:min(len(idx),i+1+EGX_MARKET_FOLLOW_WINDOW)]
         if fwd.empty:
-            diagnostics.append({**c,"reason":"no_follow_window","index_source":index_source})
             continue
         if kind=="L":
             fwd_ext=float(fwd["c"].max())
@@ -307,22 +357,9 @@ def _major_market_pivots_uncached(DB,include_diagnostics=False):
             prepared,banks,event_date,kind
         )
 
-        # Market turn score: close-pivot creates the candidate, cross-sectional
-        # data only confirms its importance.
-        index_component=30.0*min(1.0,max(0.0,prior_swing/15.0))
-        breadth_component=30.0*min(1.0,breadth_rate/(0.60 if kind=="L" else 0.40))
-        leader_component=15.0*min(1.0,leader_rate/0.50)
-        bank_component=10.0*min(1.0,bank_rate/0.50) if bank_n else 0.0
-        follow_component=15.0*min(1.0,follow_pct/15.0)
-
-        score=index_component+breadth_component+leader_component+bank_component+follow_component
-        if bank_n==0:
-            score=score/90.0*100.0
-
         available_i=min(len(idx)-1,i+EGX_MARKET_WING)
         row={
             **c,
-            "score":round(score,1),
             "prior_swing_pct":round(prior_swing,2),
             "follow_pct":round(follow_pct,2),
             "breadth_pct":round(100*breadth_rate,1),
@@ -334,106 +371,212 @@ def _major_market_pivots_uncached(DB,include_diagnostics=False):
             "available_date":idx.iloc[available_i]["d"],
             "index_source":index_source,
         }
+        for prof in ("balanced","breadth_led","leadership_led","reversal_led","conservative"):
+            row[f"quality_{prof}"]=_candidate_quality(row,prof)
+        row["quality"]=row["quality_balanced"]
+        rows.append(row)
 
-        reasons=[]
-        if row["score"]<EGX_MARKET_MIN_SCORE:
-            reasons.append(f"score<{EGX_MARKET_MIN_SCORE:g}")
-        if row["follow_pct"]<EGX_MARKET_FOLLOW_MIN_PCT:
-            reasons.append(f"follow<{EGX_MARKET_FOLLOW_MIN_PCT:g}%")
-        if kind=="L" and row["breadth_pct"]<EGX_MARKET_LOW_MIN_BREADTH:
-            reasons.append(f"low_breadth<{EGX_MARKET_LOW_MIN_BREADTH:g}%")
-        if kind=="H" and row["breadth_pct"]<EGX_MARKET_HIGH_MIN_BREADTH:
-            reasons.append(f"high_breadth<{EGX_MARKET_HIGH_MIN_BREADTH:g}%")
+    return idx,panel,index_source,rows
 
-        row["hard_pass"]=not reasons
-        row["reject_reason"]=",".join(reasons) if reasons else ""
-        raw.append(row)
+def _transition_swing(a,b):
+    if not a or not b or not a.get("price"):
+        return 0.0
+    return abs(float(b["price"])/float(a["price"])-1)*100.0
 
-    strong=[x for x in raw if x["hard_pass"]]
-    if not strong:
-        if include_diagnostics:
-            return [],raw
+def _select_profile_sequence(candidates,quality_key,min_gap,min_swing,node_cost):
+    """Dynamic-programming selection of an alternating market-cycle sequence.
+
+    Unlike greedy filters, a later candidate cannot erase a valid intermediate
+    turn simply because another threshold failed. The optimizer rewards:
+    - stable market-wide quality,
+    - meaningful opposite-direction swing,
+    - reasonable time separation,
+    while charging a cost for every extra pivot to avoid over-segmentation.
+    """
+    cs=sorted(candidates,key=lambda x:(x["i"],x["kind"]))
+    n=len(cs)
+    if not n:
         return []
 
-    # Collapse nearby same-type candidates only. Opposite-type candidates are
-    # NEVER collapsed together; this prevents a one-day LOW/HIGH artifact.
-    collapsed=[]
-    for p in strong:
-        if (collapsed and p["kind"]==collapsed[-1]["kind"]
-            and p["i"]-collapsed[-1]["i"]<EGX_MARKET_MIN_SEPARATION):
-            old=collapsed[-1]
-            more_extreme=(p["kind"]=="L" and p["price"]<old["price"]) or \
-                         (p["kind"]=="H" and p["price"]>old["price"])
-            # Favor extreme close if scores are broadly comparable.
-            if p["score"]>old["score"]+3 or (more_extreme and p["score"]>=old["score"]-4):
-                old2=dict(old);old2["reject_reason"]="replaced_by_stronger_same_type"
-                diagnostics.append(old2)
-                collapsed[-1]=p
-            else:
-                p2=dict(p);p2["reject_reason"]="nearby_weaker_same_type"
-                diagnostics.append(p2)
-        else:
-            collapsed.append(p)
+    dp=[-1e18]*n
+    prev=[None]*n
 
-    # Build an alternating sequence. We require a minimum time gap AND a major
-    # swing. Importantly, a later failure does not delete an already accepted
-    # intermediate pivot.
-    accepted=[]
-    for p in collapsed:
-        if not accepted:
-            accepted.append(p)
+    for j,b in enumerate(cs):
+        q=float(b.get(quality_key,0))
+        base=q-node_cost
+        dp[j]=base
+
+        for i in range(j):
+            a=cs[i]
+            if a["kind"]==b["kind"]:
+                continue
+            gap=int(b["i"])-int(a["i"])
+            if gap<min_gap:
+                continue
+            swing=_transition_swing(a,b)
+            if swing<min_swing:
+                continue
+
+            # Soft bonuses: large swings/time separation help, but neither
+            # creates a cliff just above an arbitrary threshold.
+            swing_bonus=min(24.0,1.15*swing)
+            gap_bonus=min(6.0,max(0.0,(gap-min_gap)/25.0))
+            val=dp[i]+base+swing_bonus+gap_bonus
+            if val>dp[j]:
+                dp[j]=val
+                prev[j]=i
+
+    j=max(range(n),key=lambda k:dp[k])
+    seq=[]
+    while j is not None:
+        seq.append(cs[j])
+        j=prev[j]
+    seq.reverse()
+
+    # Drop negative-value singleton/noisy starts until sequence is meaningful.
+    # Retain at least two pivots if possible.
+    while len(seq)>2 and float(seq[0].get(quality_key,0))<55:
+        seq=seq[1:]
+    return seq
+
+def _consensus_major_pivots(DB,include_diagnostics=False):
+    idx,panel,index_source,raw=_build_raw_market_candidates(DB)
+    if not raw:
+        return ([],[]) if include_diagnostics else []
+
+    # Five deliberately different but reasonable decision models.
+    configs=[
+        ("balanced","quality_balanced",15,7.0,62.0),
+        ("breadth_led","quality_breadth_led",15,6.0,60.0),
+        ("leadership_led","quality_leadership_led",18,6.0,62.0),
+        ("reversal_led","quality_reversal_led",18,8.0,64.0),
+        ("conservative","quality_conservative",22,10.0,68.0),
+    ]
+
+    votes={(r["date"],r["kind"]):0 for r in raw}
+    profile_hits={(r["date"],r["kind"]):[] for r in raw}
+
+    for name,qkey,gap,swing,cost in configs:
+        seq=_select_profile_sequence(raw,qkey,gap,swing,cost)
+        for x in seq:
+            k=(x["date"],x["kind"])
+            votes[k]=votes.get(k,0)+1
+            profile_hits.setdefault(k,[]).append(name)
+
+    ranked=[]
+    for r in raw:
+        x=dict(r)
+        k=(x["date"],x["kind"])
+        x["consensus_votes"]=int(votes.get(k,0))
+        x["stability_pct"]=round(100*x["consensus_votes"]/len(configs),1)
+        x["selected_profiles"]=profile_hits.get(k,[])
+        # Blend balanced significance with stability. Stability is deliberately
+        # large: a date that survives multiple reasonable models is preferable
+        # to one created by a single parameter choice.
+        x["final_score"]=round(
+            0.60*float(x["quality_balanced"])+0.40*x["stability_pct"],1
+        )
+        ranked.append(x)
+
+    stable=[x for x in ranked if x["consensus_votes"]>=EGX_FINAL_CONSENSUS_MIN_VOTES]
+
+    # Final sequence uses stable candidates only and very mild safety floors.
+    # No 15%/10% hard cliff remains here.
+    stable.sort(key=lambda x:(x["i"],x["kind"]))
+    final=[]
+    for p in stable:
+        if not final:
+            final.append(p)
             continue
 
-        prev=accepted[-1]
-
+        prev=final[-1]
         if p["kind"]==prev["kind"]:
+            # Same market phase: retain the more stable/significant extreme.
             more_extreme=(p["kind"]=="L" and p["price"]<prev["price"]) or \
                          (p["kind"]=="H" and p["price"]>prev["price"])
-            if p["score"]>prev["score"]+3 or (more_extreme and p["score"]>=prev["score"]-4):
-                old=dict(prev);old["reject_reason"]="superseded_same_type"
-                diagnostics.append(old)
-                accepted[-1]=p
-            else:
-                p2=dict(p);p2["reject_reason"]="same_type_not_stronger"
-                diagnostics.append(p2)
+            if (p["final_score"]>prev["final_score"]+4 or
+                (more_extreme and p["final_score"]>=prev["final_score"]-2)):
+                final[-1]=p
             continue
 
-        gap=p["i"]-prev["i"]
-        if gap<EGX_MARKET_MIN_EVENT_GAP:
-            p2=dict(p);p2["reject_reason"]=f"gap<{EGX_MARKET_MIN_EVENT_GAP}_sessions"
-            diagnostics.append(p2)
+        gap=int(p["i"])-int(prev["i"])
+        swing=_transition_swing(prev,p)
+        if gap<EGX_FINAL_MIN_GAP or swing<EGX_FINAL_MIN_TRANSITION_SWING:
+            # Do not silently lose it from diagnostics; it remains ranked but
+            # is not a principal cycle boundary.
             continue
-
-        swing=abs(p["price"]/prev["price"]-1)*100 if prev["price"] else 0.0
-        if swing<EGX_MARKET_MIN_SWING_PCT:
-            p2=dict(p);p2["reject_reason"]=f"swing<{EGX_MARKET_MIN_SWING_PCT:g}%"
-            p2["swing_from_prev_pct"]=round(swing,2)
-            diagnostics.append(p2)
-            continue
-
         q=dict(p)
         q["swing_from_prev_pct"]=round(swing,2)
-        accepted.append(q)
+        final.append(q)
 
-    # Keep all accepted major pivots; UI/forward projections will use only the
-    # latest major LOW and HIGH, but diagnostics need the historical sequence.
-    accepted=accepted[-12:]
+    # If an unstable but exceptional candidate lies between two final pivots,
+    # allow rescue only when cross-sectional evidence is extraordinary.
+    # This prevents long gaps such as 2024->2026 without reopening the door to noise.
+    rescued=[]
+    if len(final)>=2:
+        for a,b in zip(final[:-1],final[1:]):
+            rescued.append(a)
+            between=[
+                x for x in ranked
+                if a["i"]<x["i"]<b["i"] and x["kind"]!=a["kind"]
+                and x["kind"]!=b["kind"] if False
+            ]
+            # Because accepted endpoints alternate, a genuine missing pivot
+            # would create same-type endpoints only; handled below.
+        rescued.append(final[-1])
+
+    # Repair same-type long gaps using one extraordinary market-wide candidate.
+    # Usually final is already alternating, but this protects against consensus
+    # dropping the only opposite turn in a long market cycle.
+    repaired=[]
+    for p in final:
+        if not repaired:
+            repaired.append(p);continue
+        if p["kind"]!=repaired[-1]["kind"]:
+            repaired.append(p);continue
+        a=repaired[-1]
+        between=[
+            x for x in ranked
+            if a["i"]<x["i"]<p["i"] and x["kind"]!=a["kind"]
+            and (
+                x["breadth_pct"]>=65 or
+                (x["leaders_pct"]>=60 and x["banks_pct"]>=55) or
+                x["quality_balanced"]>=88
+            )
+        ]
+        if between:
+            mid=max(between,key=lambda x:(x["final_score"],x["quality_balanced"]))
+            repaired.append(mid)
+        repaired.append(p)
+
+    final=repaired[-14:]
+
+    # Attach explicit decision reasons to every candidate.
+    final_keys={(x["date"],x["kind"]) for x in final}
+    diagnostics=[]
+    for x in ranked:
+        y=dict(x)
+        if (x["date"],x["kind"]) in final_keys:
+            y["decision"]="ACCEPTED"
+            y["decision_reason"]=f'consensus {x["consensus_votes"]}/5; final_score={x["final_score"]}'
+        elif x["consensus_votes"]<EGX_FINAL_CONSENSUS_MIN_VOTES:
+            y["decision"]="REJECTED"
+            y["decision_reason"]=f'consensus only {x["consensus_votes"]}/5'
+        else:
+            y["decision"]="REJECTED"
+            y["decision_reason"]="stable candidate but lost to stronger same-cycle pivot / minimum cycle separation"
+        diagnostics.append(y)
 
     if include_diagnostics:
-        # include hard-filter rejects too
-        seen={(x["date"],x["kind"],x.get("reject_reason","")) for x in diagnostics}
-        for x in raw:
-            if not x["hard_pass"]:
-                k=(x["date"],x["kind"],x.get("reject_reason",""))
-                if k not in seen:
-                    diagnostics.append(x)
-        diagnostics.sort(key=lambda x:(x["date"],x["kind"]))
-        return accepted,diagnostics
+        return final,diagnostics
+    return final
 
-    return accepted
+def _major_market_pivots_uncached(DB,include_diagnostics=False):
+    # Backward-compatible public name used by diagnostics and the Gann engine.
+    return _consensus_major_pivots(DB,include_diagnostics=include_diagnostics)
 
 def get_egx_market_pivots(DB,cache_seconds=1800):
-    """Cached major EGX turns based on index + breadth + leaders + banks."""
+    """Cached final consensus EGX major pivots."""
     now_ts=time.time()
     key=id(DB)
     if (_EGX_MARKET_CACHE.get("key")==key
@@ -473,7 +616,10 @@ def _map_market_pivots_to_stock(df,market_pivots,event_window=EGX_MARKET_EVENT_W
             "leaders_pct":mp["leaders_pct"],
             "banks_pct":mp["banks_pct"],
             "index_price":mp["price"],
-            "index_swing_pct":mp["index_swing_pct"],
+            "index_swing_pct":mp.get("prior_swing_pct",0),
+            "consensus_votes":mp.get("consensus_votes",0),
+            "stability_pct":mp.get("stability_pct",0),
+            "final_score":mp.get("final_score",mp.get("quality",0)),
         })
     return out
 
