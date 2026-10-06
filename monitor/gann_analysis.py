@@ -1,16 +1,36 @@
 
 from __future__ import annotations
 import math
+import time
 from datetime import date, datetime, timedelta
 from typing import Any
 import numpy as np
 import pandas as pd
-from sqlalchemy import MetaData, Table, select, func
+from sqlalchemy import MetaData, Table, select, func, and_
 
 IMPORTANT_RATIOS=[(0.25,"1/4",82),(1/3,"1/3",78),(0.375,"3/8",72),(0.50,"1/2",92),(0.625,"5/8",72),(2/3,"2/3",78),(0.75,"3/4",82),(0.875,"7/8",72),(1.00,"1/1",95)]
 SQ9_ANGLES=[(45,78),(90,90),(135,78),(180,94),(225,78),(270,90),(315,78),(360,96)]
 MASTER_144=[(36,86),(45,80),(48,78),(54,80),(63,82),(72,94),(81,82),(90,90),(96,78),(108,86),(117,76),(126,78),(135,82),(144,98)]
 MIKULA_225_CELL_COUNTS=[9,25,49,81,121,169,225,289,361]
+
+# Egyptian market anchor settings.
+EGX_INDEX_SYMBOL="^CASE30"
+EGX_MARKET_WING=10               # index pivot confirmation / local extremum wing
+EGX_MARKET_EVENT_WINDOW=3        # stocks may bottom/top within ±3 sessions of index
+EGX_MARKET_LOCAL_WINDOW=12       # local stock extremum reference window
+EGX_MARKET_MIN_SCORE=70.0        # accept only market-wide pivots
+EGX_MARKET_MIN_SWING_PCT=7.0     # minimum index swing between accepted opposite pivots
+EGX_MARKET_MIN_SEPARATION=25     # sessions between same-type major pivots
+EGX_LEADER_COUNT=15
+
+# Major/representative listed banks. Only symbols available in the database count.
+EGX_BANK_SYMBOLS={
+    "COMI.CA","QNBA.CA","ADIB.CA","CIEB.CA","FAIT.CA",
+    "HDBK.CA","EXPA.CA","CANA.CA","SAUD.CA","EGBE.CA",
+}
+
+_EGX_MARKET_CACHE={"stamp":0.0,"key":None,"pivots":[]}
+
 
 def _business_add(d,n): return (pd.Timestamp(d)+pd.offsets.BDay(max(0,int(n)))).date()
 def _calendar_add(d,n): return d+timedelta(days=max(0,int(round(n))))
@@ -32,6 +52,219 @@ def load_daily(DB,symbol,limit=900):
     df["d"]=pd.to_datetime(df["d"]).dt.date
     for c in ["o","h","l","c","v","adj_c"]: df[c]=pd.to_numeric(df[c],errors="coerce")
     return df.dropna(subset=["h","l","c"]).reset_index(drop=True)
+
+
+def _load_egx_panel(DB,limit_dates=900):
+    """Load EGX30 + Egyptian stocks for cross-sectional pivot confirmation."""
+    with DB() as s:
+        t=_daily_table(s)
+        idx_rows=s.execute(
+            select(t.c.session_date,t.c.o,t.c.h,t.c.l,t.c.c,t.c.v)
+            .where(t.c.symbol==EGX_INDEX_SYMBOL)
+            .order_by(t.c.session_date.desc()).limit(limit_dates)
+        ).all()
+        if not idx_rows:
+            return pd.DataFrame(),pd.DataFrame()
+
+        min_date=min(str(r[0]) for r in idx_rows)
+        stock_rows=s.execute(
+            select(t.c.symbol,t.c.session_date,t.c.h,t.c.l,t.c.c,t.c.v)
+            .where(t.c.symbol.ilike("%.CA"),t.c.session_date>=min_date)
+            .order_by(t.c.session_date,t.c.symbol)
+        ).all()
+
+    idx=pd.DataFrame(idx_rows,columns=["d","o","h","l","c","v"]).iloc[::-1].reset_index(drop=True)
+    idx["d"]=pd.to_datetime(idx["d"]).dt.date
+    for c in ["o","h","l","c","v"]:idx[c]=pd.to_numeric(idx[c],errors="coerce")
+    idx=idx.dropna(subset=["h","l","c"]).reset_index(drop=True)
+
+    panel=pd.DataFrame(stock_rows,columns=["symbol","d","h","l","c","v"])
+    if not panel.empty:
+        panel["d"]=pd.to_datetime(panel["d"]).dt.date
+        for c in ["h","l","c","v"]:panel[c]=pd.to_numeric(panel[c],errors="coerce")
+        panel=panel.dropna(subset=["h","l","c"]).reset_index(drop=True)
+        panel["dv"]=panel["c"]*panel["v"].fillna(0)
+    return idx,panel
+
+def _index_candidate_pivots(idx,wing=EGX_MARKET_WING):
+    if len(idx)<wing*2+10:return []
+    h=idx["h"].to_numpy(float);l=idx["l"].to_numpy(float)
+    out=[]
+    for i in range(wing,len(idx)-wing):
+        if h[i]>=np.nanmax(h[i-wing:i+wing+1]):
+            out.append({"i":i,"kind":"H","date":idx.iloc[i]["d"],"price":float(h[i])})
+        if l[i]<=np.nanmin(l[i-wing:i+wing+1]):
+            out.append({"i":i,"kind":"L","date":idx.iloc[i]["d"],"price":float(l[i])})
+    return sorted(out,key=lambda x:(x["i"],0 if x["kind"]=="L" else 1))
+
+def _symbol_confirms_market_turn(sdf,event_date,kind,event_window=EGX_MARKET_EVENT_WINDOW,
+                                 local_window=EGX_MARKET_LOCAL_WINDOW):
+    """Did this stock make a local extreme close to the index turning date?"""
+    if sdf.empty:return False
+    sdf=sdf.sort_values("d").reset_index(drop=True)
+    dates=list(sdf["d"])
+    # nearest trading session to event date
+    j=min(range(len(dates)),key=lambda k:abs((dates[k]-event_date).days))
+    lo=max(0,j-local_window); hi=min(len(sdf)-1,j+local_window)
+    elo=max(0,j-event_window); ehi=min(len(sdf)-1,j+event_window)
+    local=sdf.iloc[lo:hi+1]; event=sdf.iloc[elo:ehi+1]
+    if local.empty or event.empty:return False
+    if kind=="L":
+        event_ext=float(event["l"].min()); local_ext=float(local["l"].min())
+        # allow a tiny tolerance for near-equal lows.
+        return event_ext <= local_ext*1.01
+    event_ext=float(event["h"].max()); local_ext=float(local["h"].max())
+    return event_ext >= local_ext*0.99
+
+def _leaders_for_date(panel,event_date,count=EGX_LEADER_COUNT):
+    """Dynamic leaders = highest median EGP turnover in the prior ~60 sessions."""
+    if panel.empty:return []
+    start=event_date-timedelta(days=120)
+    sub=panel[(panel["d"]<event_date)&(panel["d"]>=start)]
+    if sub.empty:return []
+    med=sub.groupby("symbol")["dv"].median().sort_values(ascending=False)
+    return list(med.head(count).index)
+
+def _confirmation_rate(panel,symbols,event_date,kind):
+    if panel.empty or not symbols:return 0.0,0,0
+    good=0;avail=0
+    for sym in symbols:
+        sdf=panel[panel["symbol"]==sym]
+        if len(sdf)<20:continue
+        avail+=1
+        if _symbol_confirms_market_turn(sdf,event_date,kind):
+            good+=1
+    return (good/avail if avail else 0.0),good,avail
+
+def _major_market_pivots_uncached(DB):
+    idx,panel=_load_egx_panel(DB)
+    if idx.empty or panel.empty:return []
+
+    candidates=_index_candidate_pivots(idx)
+    all_symbols=sorted(panel["symbol"].dropna().unique().tolist())
+    raw=[]
+
+    for c in candidates:
+        i=c["i"];event_date=c["date"];kind=c["kind"]
+
+        # Index component: larger swing away from the opposite extreme gets more credit.
+        back=idx.iloc[max(0,i-60):i+1]
+        if kind=="L":
+            opp=float(back["h"].max()) if not back.empty else c["price"]
+            index_swing=max(0.0,(opp/c["price"]-1)*100) if c["price"] else 0.0
+        else:
+            opp=float(back["l"].min()) if not back.empty else c["price"]
+            index_swing=max(0.0,(c["price"]/opp-1)*100) if opp else 0.0
+        index_component=40.0*min(1.0,max(0.55,index_swing/12.0))
+
+        breadth_rate,breadth_good,breadth_n=_confirmation_rate(panel,all_symbols,event_date,kind)
+        leaders=_leaders_for_date(panel,event_date)
+        leader_rate,leader_good,leader_n=_confirmation_rate(panel,leaders,event_date,kind)
+        banks=sorted(EGX_BANK_SYMBOLS.intersection(all_symbols))
+        bank_rate,bank_good,bank_n=_confirmation_rate(panel,banks,event_date,kind)
+
+        # Saturation thresholds deliberately reward a genuinely broad turn rather
+        # than requiring every listed share to pivot on the same session.
+        breadth_component=30.0*min(1.0,breadth_rate/0.35)
+        leader_component=20.0*min(1.0,leader_rate/0.50)
+        bank_component=10.0*min(1.0,bank_rate/0.50) if bank_n else 0.0
+
+        score=index_component+breadth_component+leader_component+bank_component
+        # If no bank history exists, renormalize the observable 90 points to 100.
+        if bank_n==0:
+            score=score/90.0*100.0
+
+        available_i=min(len(idx)-1,i+EGX_MARKET_WING)
+        raw.append({
+            **c,
+            "score":round(score,1),
+            "index_swing_pct":round(index_swing,2),
+            "breadth_pct":round(100*breadth_rate,1),
+            "breadth_count":breadth_good,"breadth_total":breadth_n,
+            "leaders_pct":round(100*leader_rate,1),
+            "leaders_count":leader_good,"leaders_total":leader_n,
+            "banks_pct":round(100*bank_rate,1),
+            "banks_count":bank_good,"banks_total":bank_n,
+            "available_date":idx.iloc[available_i]["d"],
+        })
+
+    strong=[x for x in raw if x["score"]>=EGX_MARKET_MIN_SCORE]
+    if not strong:return []
+
+    # First collapse same-type pivots that are close in time.
+    collapsed=[]
+    for p in strong:
+        if (collapsed and p["kind"]==collapsed[-1]["kind"]
+            and p["i"]-collapsed[-1]["i"]<EGX_MARKET_MIN_SEPARATION):
+            old=collapsed[-1]
+            more_extreme=(p["kind"]=="L" and p["price"]<old["price"]) or (p["kind"]=="H" and p["price"]>old["price"])
+            if p["score"]>old["score"]+4 or (more_extreme and p["score"]>=old["score"]-2):
+                collapsed[-1]=p
+        else:
+            collapsed.append(p)
+
+    # Enforce alternating major turns and a meaningful index swing.
+    accepted=[]
+    for p in collapsed:
+        if not accepted:
+            accepted.append(p);continue
+        prev=accepted[-1]
+        if p["kind"]==prev["kind"]:
+            better=(p["score"]>prev["score"]) or (
+                p["kind"]=="L" and p["price"]<prev["price"]) or (
+                p["kind"]=="H" and p["price"]>prev["price"])
+            if better:accepted[-1]=p
+            continue
+        swing=abs(p["price"]/prev["price"]-1)*100 if prev["price"] else 0.0
+        if swing>=EGX_MARKET_MIN_SWING_PCT:
+            accepted.append(p)
+
+    return accepted[-12:]
+
+def get_egx_market_pivots(DB,cache_seconds=1800):
+    """Cached major EGX turns based on index + breadth + leaders + banks."""
+    now_ts=time.time()
+    key=id(DB)
+    if (_EGX_MARKET_CACHE.get("key")==key
+        and now_ts-_EGX_MARKET_CACHE.get("stamp",0)<cache_seconds):
+        return _EGX_MARKET_CACHE.get("pivots",[])
+    piv=_major_market_pivots_uncached(DB)
+    _EGX_MARKET_CACHE.update({"stamp":now_ts,"key":key,"pivots":piv})
+    return piv
+
+def _map_market_pivots_to_stock(df,market_pivots,event_window=EGX_MARKET_EVENT_WINDOW):
+    """Use each major market date, then anchor to this stock's local extreme near it."""
+    if df.empty:return []
+    out=[]
+    for mp in market_pivots:
+        d=mp["date"]
+        dates=list(df["d"])
+        j=min(range(len(dates)),key=lambda k:abs((dates[k]-d).days))
+        lo=max(0,j-event_window);hi=min(len(df)-1,j+event_window)
+        w=df.iloc[lo:hi+1]
+        if w.empty:continue
+        if mp["kind"]=="L":
+            rel=int(np.nanargmin(w["l"].to_numpy(float)))
+            price=float(w.iloc[rel]["l"])
+        else:
+            rel=int(np.nanargmax(w["h"].to_numpy(float)))
+            price=float(w.iloc[rel]["h"])
+        ii=lo+rel
+        out.append({
+            "i":ii,
+            "kind":mp["kind"],
+            "price":price,
+            "date":df.iloc[ii]["d"],
+            "market_date":mp["date"],
+            "available_date":mp["available_date"],
+            "market_score":mp["score"],
+            "breadth_pct":mp["breadth_pct"],
+            "leaders_pct":mp["leaders_pct"],
+            "banks_pct":mp["banks_pct"],
+            "index_price":mp["price"],
+            "index_swing_pct":mp["index_swing_pct"],
+        })
+    return out
 
 def normalize_market(market):
     market=(market or "US").strip().upper()
@@ -337,7 +570,7 @@ def _historical_expected_turns(df, pivots, chart_start, wing=7):
         anchor_price=float(p["price"])
         pivot_i=int(p.get("i",0))
         confirm_i=min(len(df)-1,pivot_i+wing)
-        available_date=df.iloc[confirm_i]["d"]
+        available_date=p.get("available_date") or df.iloc[confirm_i]["d"]
 
         price_items=_sq9_levels(anchor_price,p["kind"],anchor_date)+_master_price_levels(p)
         global_idx=base_idx+local_idx
@@ -482,7 +715,22 @@ def build_method_rows(last,pc,tc):
 def analyze_symbol(DB,symbol,limit=900):
     df=load_daily(DB,symbol,limit)
     if df.empty:return None
-    piv=detect_pivots(df); low,high=_latest_pair(piv); rng=_last_completed_range(piv); last=float(df.iloc[-1]["c"]); atr=_atr(df)
+
+    market=symbol_market(symbol)
+    market_pivots=[]
+    if market=="EGX":
+        market_pivots=get_egx_market_pivots(DB)
+        if len(market_pivots)<2:
+            raise RuntimeError("لا توجد قمم/قيعان سوق رئيسية كافية. حدّثي بيانات السوق المصري أولاً.")
+        piv=_map_market_pivots_to_stock(df,market_pivots)
+        if len(piv)<2:
+            raise RuntimeError("لا توجد بيانات كافية للسهم حول مرتكزات السوق الرئيسية.")
+        anchor_source="EGX_MARKET"
+    else:
+        piv=detect_pivots(df)
+        anchor_source="LOCAL"
+
+    low,high=_latest_pair(piv); rng=_last_completed_range(piv); last=float(df.iloc[-1]["c"]); atr=_atr(df)
     pi=[]
     if low: pi+=_sq9_levels(low["price"],"L",low["date"])+_master_price_levels(low)
     if high: pi+=_sq9_levels(high["price"],"H",high["date"])+_master_price_levels(high)
@@ -501,7 +749,9 @@ def analyze_symbol(DB,symbol,limit=900):
     candles=df.tail(220)
     chart_start=candles.iloc[0]["d"] if len(candles) else df.iloc[0]["d"]
     previous_tops,previous_lows=_historical_expected_turns(df,piv,chart_start,wing=7)
-    return {"symbol":symbol.upper(),"last_price":round(last,4),"last_date":df.iloc[-1]["d"],"atr14":round(atr,4),"latest_low":low,"latest_high":high,"range":rng,"price_clusters":pc,"time_clusters":tc,"next_times":next_times,"nearest_support":ns,"nearest_resistance":nr,"tops":tops,"lows":lows,"previous_tops":previous_tops,"previous_lows":previous_lows,"overall_strength":max(strengths) if strengths else 0,"overall_color":strength_color(max(strengths) if strengths else 0),"chart":{"dates":[d.isoformat() for d in candles["d"]],"open":[round(float(x),4) for x in candles["o"]],"high":[round(float(x),4) for x in candles["h"]],"low":[round(float(x),4) for x in candles["l"]],"close":[round(float(x),4) for x in candles["c"]]},"method_rows":build_method_rows(last,pc,tc)}
+    return {"symbol":symbol.upper(),"market":market,"anchor_source":anchor_source,
+            "market_pivots":market_pivots,"stock_market_anchors":piv[-6:] if market=="EGX" else [],
+            "last_price":round(last,4),"last_date":df.iloc[-1]["d"],"atr14":round(atr,4),"latest_low":low,"latest_high":high,"range":rng,"price_clusters":pc,"time_clusters":tc,"next_times":next_times,"nearest_support":ns,"nearest_resistance":nr,"tops":tops,"lows":lows,"previous_tops":previous_tops,"previous_lows":previous_lows,"overall_strength":max(strengths) if strengths else 0,"overall_color":strength_color(max(strengths) if strengths else 0),"chart":{"dates":[d.isoformat() for d in candles["d"]],"open":[round(float(x),4) for x in candles["o"]],"high":[round(float(x),4) for x in candles["h"]],"low":[round(float(x),4) for x in candles["l"]],"close":[round(float(x),4) for x in candles["c"]]},"method_rows":build_method_rows(last,pc,tc)}
 
 def market_page(DB,query="",page=1,per_page=100,market="US"):
     market=normalize_market(market)

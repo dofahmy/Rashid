@@ -62,10 +62,12 @@ def _egx_discover_sync():
             seen.add(symbol);out.append((symbol,str(company or symbol)))
     return out
 
-def _egx_daily_sync(symbol):
-    start=int(datetime(2019,1,1,tzinfo=ZoneInfo('UTC')).timestamp())
+def _yahoo_daily_sync(feed_symbol,start_year=2019):
+    start=int(datetime(start_year,1,1,tzinfo=ZoneInfo('UTC')).timestamp())
     end=int(time.time())+86400
-    url=(f'https://query1.finance.yahoo.com/v8/finance/chart/{symbol}.CA'
+    from urllib.parse import quote as _urlquote
+    encoded=_urlquote(feed_symbol,safe='')
+    url=(f'https://query1.finance.yahoo.com/v8/finance/chart/{encoded}'
          f'?period1={start}&period2={end}&interval=1d&events=div%2Csplits&includeAdjustedClose=true')
     obj=_http_json(url)
     res=((obj.get('chart') or {}).get('result') or [])
@@ -91,10 +93,17 @@ def _egx_daily_sync(symbol):
             'date':datetime.fromtimestamp(int(ts[i]),ZoneInfo(EGX_TZ)).date().isoformat(),
         })
     rows.sort(key=lambda r:r['ts'])
-    # de-duplicate by local date, keep last
     dedup={}
     for r in rows:dedup[r['date']]=r
     return list(dedup.values())
+
+def _egx_daily_sync(symbol):
+    feed=symbol if str(symbol).upper().endswith('.CA') else f'{symbol}.CA'
+    return _yahoo_daily_sync(feed)
+
+def _egx_index_daily_sync():
+    # Yahoo Finance ticker for EGX30 Price Return Index.
+    return _yahoo_daily_sync('^CASE30')
 
 
 def _save_egx_daily_candles(DB,symbol,company,rows):
@@ -173,6 +182,60 @@ def _save_egx_daily_candles(DB,symbol,company,rows):
                     else:
                         s.execute(t.insert().values(**row))
 
+    return len(payload)
+
+
+
+def _save_egx_index_candles(DB,rows):
+    """Persist EGX30 (^CASE30) daily history for market-pivot detection."""
+    if not rows:
+        return 0
+    retrieved=now()
+    metadata=json.dumps({
+        'market':'EGX',
+        'instrument':'INDEX',
+        'name':'EGX 30 Price Return Index',
+    },ensure_ascii=False)
+    payload=[{
+        'symbol':'^CASE30',
+        'session_date':r['date'],
+        'ts':int(r['ts']),
+        'o':float(r['o']),'h':float(r['h']),'l':float(r['l']),'c':float(r['c']),
+        'v':float(r['v']),'adj_c':float(r['ac']),
+        'feed_symbol':'^CASE30',
+        'source':'Yahoo public chart',
+        'retrieved_at':retrieved,
+        'metadata_json':metadata,
+    } for r in rows]
+
+    with DB.begin() as s:
+        bind=s.get_bind()
+        t=Table('market_candles_1d',MetaData(),autoload_with=bind)
+        for start in range(0,len(payload),500):
+            batch=payload[start:start+500]
+            if bind.dialect.name=='postgresql':
+                stmt=pg_insert(t).values(batch)
+                ex=stmt.excluded
+                stmt=stmt.on_conflict_do_update(
+                    index_elements=[t.c.symbol,t.c.session_date],
+                    set_={
+                        'ts':ex.ts,'o':ex.o,'h':ex.h,'l':ex.l,'c':ex.c,'v':ex.v,
+                        'adj_c':ex.adj_c,'feed_symbol':ex.feed_symbol,'source':ex.source,
+                        'retrieved_at':ex.retrieved_at,'metadata_json':ex.metadata_json,
+                    }
+                )
+                s.execute(stmt)
+            else:
+                for row in batch:
+                    exists=s.execute(select(t.c.symbol).where(
+                        t.c.symbol==row['symbol'],t.c.session_date==row['session_date']
+                    )).first()
+                    if exists:
+                        s.execute(update(t).where(
+                            t.c.symbol==row['symbol'],t.c.session_date==row['session_date']
+                        ).values(**{k:v for k,v in row.items() if k not in ('symbol','session_date')}))
+                    else:
+                        s.execute(t.insert().values(**row))
     return len(payload)
 
 
@@ -358,6 +421,11 @@ async def scan_egx_daily(DB,clock):
     with DB.begin() as s:
         scan=Scan(market='EG',boundary=boundary,status='running');s.add(scan);s.flush();scan_id=scan.id
     try:
+        # Persist EGX30 first; Gann's Egyptian anchors depend on the market index.
+        index_rows=await asyncio.to_thread(_egx_index_daily_sync)
+        index_saved=await asyncio.to_thread(_save_egx_index_candles,DB,index_rows)
+        log.info('EGX30 history saved for market anchors: %s candles',index_saved)
+
         symbols=await asyncio.to_thread(_egx_discover_sync)
         sem=asyncio.Semaphore(max(2,min(16,int(os.getenv('EGX_SCAN_CONCURRENCY','8')))))
         async def one(item):
@@ -370,7 +438,8 @@ async def scan_egx_daily(DB,clock):
                     return symbol,company,[],None,f'{type(exc).__name__}:{exc}'
         tasks=[asyncio.create_task(one(item)) for item in symbols]
         counts={'total':len(tasks),'ok':0,'errors':0,'new_plans':0,'transitions':0,
-                'gann_symbols_saved':0,'gann_candles_saved':0,'gann_save_errors':0}
+                'gann_symbols_saved':0,'gann_candles_saved':0,'gann_save_errors':0,
+                'egx30_candles_saved':int(index_saved or 0)}
         open_total=0
         rebuilt_open_rows=[]
         latest_activations=[]
@@ -446,6 +515,7 @@ async def scan_egx_daily(DB,clock):
                 'gann_symbols_saved':counts['gann_symbols_saved'],
                 'gann_candles_saved':counts['gann_candles_saved'],
                 'gann_save_errors':counts['gann_save_errors'],
+                'egx30_candles_saved':counts['egx30_candles_saved'],
             })
         log.info(
             'EGX daily scan complete %s open_signals=%s gann_symbols=%s gann_candles=%s',
