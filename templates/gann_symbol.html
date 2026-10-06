@@ -22,7 +22,12 @@ details.gann-details>summary{cursor:pointer;font-weight:700;padding:10px 0}
 {% if a.anchor_source=='EGX_MARKET' %}
 <div class="panel tablewrap">
 <h2>مرتكزات السوق المصري المستخدمة</h2>
-<p class="muted">في مصر لا نبدأ من أي قاع/قمة محلية للسهم. نبدأ فقط من قاع/قمة سوق رئيسية مؤكدة من EGX30 + اتساع السوق + القياديات + البنوك، ثم نأخذ قاع/قمة السهم داخل ±3 جلسات من تاريخ السوق.</p>
+<p class="muted">في مصر لا نبدأ من أي قاع/قمة محلية للسهم. نبدأ فقط من قاع/قمة سوق رئيسية مؤكدة من المؤشر/مؤشر السوق البديل + اتساع السوق + القياديات + البنوك، ثم نأخذ قاع/قمة السهم داخل ±3 جلسات من تاريخ السوق.</p>
+{% if a.market_pivots %}
+<p class="muted">مصدر محور السوق الحالي:
+<strong>{{'EGX30 الرسمي' if a.market_pivots[-1].index_source=='OFFICIAL_CASE30' else 'مؤشر سوق صناعي من أعلى 30 سهمًا سيولة (Fallback)'}}</strong>
+</p>
+{% endif %}
 <table>
 <thead><tr><th>النوع</th><th>تاريخ السوق</th><th>درجة السوق</th><th>اتساع السوق</th><th>القياديات</th><th>البنوك</th><th>تاريخ السهم</th><th>سعر السهم Anchor</th></tr></thead>
 <tbody>
