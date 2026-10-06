@@ -34,7 +34,7 @@ EGX_FINAL_CONSENSUS_MIN_VOTES=3     # selected by at least 3 of 5 reasonable mod
 EGX_FINAL_MIN_GAP=15               # absolute safety floor between opposite pivots
 EGX_FINAL_MIN_TRANSITION_SWING=6.0 # only removes market noise, not a 'major' hard threshold
 
-GANN_ENGINE_VERSION="6.0 FINAL VALIDATED"
+GANN_ENGINE_VERSION="7.0 CONSTANCE BROWN PUBLIC-METHOD"
 FINAL_TIME_HORIZON_DAYS=270
 FINAL_TIME_WINDOW_DAYS=2
 FINAL_TIME_MIN_SEPARATION_DAYS=7
@@ -50,6 +50,25 @@ FINAL_METHOD_RELIABILITY_GATE=42.0
 FINAL_DIRECTION_MIN_SCORE=55.0
 FINAL_MAX_DIRECTION_LEVEL_DISTANCE_PCT=35.0
 FINAL_SPLIT_RATIO=0.60
+
+# Constance Brown public-method implementation.
+# Public sources document the Gann Wheel angles, three-axis confluence,
+# square-bar-count time work, fixed-scale diagonal work, and Composite Index.
+BROWN_WHEEL_ANGLES=[45,90,120,180,240,270,315,360]
+BROWN_ANGLE_STRENGTH={45:82,90:92,120:94,180:98,240:94,270:92,315:82,360:99}
+BROWN_WHEEL_ROTATIONS=3
+BROWN_PRICE_CLUSTER_PCT=0.006
+BROWN_TIME_CLUSTER_DAYS=2
+BROWN_TIME_HORIZON_DAYS=270
+BROWN_SQUARE_BAR_COUNTS=[9,16,25,36,49,64,81,100,121,144,169,196,225,256,289,324,361]
+BROWN_SWING_TIME_FACTORS=[0.75,1.0,1.25,1.5]
+BROWN_MIN_HORIZONTAL_ORIGINS=2
+BROWN_MIN_VERTICAL_ORIGINS=2
+BROWN_DIAGONAL_TOL_ATR=1.25
+BROWN_NOISE_WINDOW_DAYS=30
+BROWN_NOISE_MAX_CLUSTERS=5
+BROWN_CI_FAST=13
+BROWN_CI_SLOW=33
 
 # Major/representative listed banks. Only symbols available in the database count.
 EGX_BANK_SYMBOLS={
@@ -721,6 +740,253 @@ def _last_completed_range(p):
     a,b=p[-2],p[-1]
     return {"start":a,"end":b,"low":min(a["price"],b["price"]),"high":max(a["price"],b["price"]),"range":abs(b["price"]-a["price"]),"anchor_date":b["date"]}
 
+
+def _brown_rsi(series,n=14):
+    s=pd.Series(series,dtype=float)
+    d=s.diff()
+    up=d.clip(lower=0.0)
+    dn=(-d.clip(upper=0.0))
+    au=up.ewm(alpha=1/n,adjust=False,min_periods=n).mean()
+    ad=dn.ewm(alpha=1/n,adjust=False,min_periods=n).mean()
+    rs=au/ad.replace(0,np.nan)
+    rsi=100-(100/(1+rs))
+    return rsi.fillna(50.0)
+
+def _brown_composite_index(df):
+    """Public Constance Brown Composite Index:
+    Momentum(9) of RSI(14) + SMA(3) of RSI(3), with 13/33 SMA signal lines.
+    """
+    c=pd.Series(df["c"].astype(float).values,index=df.index)
+    r14=_brown_rsi(c,14)
+    r3=_brown_rsi(c,3)
+    ci=(r14-r14.shift(9))+r3.rolling(3,min_periods=1).mean()
+    fast=ci.rolling(BROWN_CI_FAST,min_periods=1).mean()
+    slow=ci.rolling(BROWN_CI_SLOW,min_periods=1).mean()
+    return pd.DataFrame({"rsi14":r14,"ci":ci,"ci_fast":fast,"ci_slow":slow},index=df.index)
+
+def _brown_oscillator_confirmation(df,pivots):
+    """Conservative directional confirmation using Brown's Composite Index.
+    Returns warnings/confirmation, never creates a Gann target by itself.
+    """
+    o=_brown_composite_index(df)
+    if o.empty:
+        return {"bullish":False,"bearish":False,"state":"NEUTRAL","reason":"no oscillator data"}
+    last=o.iloc[-1]
+    bullish_mom=bool(last["ci"]>last["ci_fast"] and last["ci_fast"]>=last["ci_slow"])
+    bearish_mom=bool(last["ci"]<last["ci_fast"] and last["ci_fast"]<=last["ci_slow"])
+
+    lows=[x for x in pivots if x["kind"]=="L" and 0<=int(x["i"])<len(o)]
+    highs=[x for x in pivots if x["kind"]=="H" and 0<=int(x["i"])<len(o)]
+    bull_div=False;bear_div=False
+    if len(lows)>=2:
+        a,b=lows[-2],lows[-1]
+        ca=float(o.iloc[int(a["i"])]["ci"]);cb=float(o.iloc[int(b["i"])]["ci"])
+        bull_div=(float(b["price"])<float(a["price"]) and cb>ca)
+    if len(highs)>=2:
+        a,b=highs[-2],highs[-1]
+        ca=float(o.iloc[int(a["i"])]["ci"]);cb=float(o.iloc[int(b["i"])]["ci"])
+        bear_div=(float(b["price"])>float(a["price"]) and cb<ca)
+
+    bullish=bool(bull_div or bullish_mom)
+    bearish=bool(bear_div or bearish_mom)
+    state="BULLISH" if bullish and not bearish else "BEARISH" if bearish and not bullish else "MIXED"
+    return {
+        "bullish":bullish,"bearish":bearish,"bull_divergence":bull_div,"bear_divergence":bear_div,
+        "bullish_momentum":bullish_mom,"bearish_momentum":bearish_mom,"state":state,
+        "ci":round(float(last["ci"]),2),"ci_fast":round(float(last["ci_fast"]),2),
+        "ci_slow":round(float(last["ci_slow"]),2),"rsi14":round(float(last["rsi14"]),2)
+    }
+
+def _brown_wheel_levels(anchor,primary_only=False):
+    """Constance Brown/Gann Wheel price objectives using public square-root factors.
+    360° = +/-2 in sqrt(price); factor = angle/180.
+    """
+    if not anchor:return []
+    px=float(anchor["price"]);root=math.sqrt(max(px,1e-12));out=[]
+    kind=anchor.get("kind")
+    for rot in range(BROWN_WHEEL_ROTATIONS):
+        for angle in BROWN_WHEEL_ANGLES:
+            factor=(angle/180.0)+(2.0*rot)
+            strength=max(65,BROWN_ANGLE_STRENGTH.get(angle,80)-rot*7)
+            dirs=["up","down"]
+            if primary_only:
+                dirs=["up"] if kind=="L" else ["down"]
+            for direction in dirs:
+                rr=root+factor if direction=="up" else root-factor
+                if rr<=0:continue
+                lvl=rr*rr
+                out.append({
+                    "method":"Brown Gann Wheel",
+                    "submethod":f"{angle}° {'up' if direction=='up' else 'down'} · rotation {rot}",
+                    "level":lvl,"strength":strength,
+                    "pivot_kind":kind,"pivot_date":anchor["date"],
+                    "origin":f'{kind}:{anchor["date"]}',"angle":angle,"rotation":rot,
+                    "direction":direction,
+                })
+    return out
+
+def _brown_cluster_price(items,current,atr):
+    items=sorted([x for x in items if _safe_float(x.get("level")) and x["level"]>0],key=lambda x:x["level"])
+    if not items:return []
+    tol=max(current*BROWN_PRICE_CLUSTER_PCT,atr*0.35 if atr else 0.0)
+    cs=[]
+    for it in items:
+        if not cs or abs(it["level"]-cs[-1]["level"])>tol:
+            cs.append({"items":[it],"level":float(it["level"])})
+        else:
+            c=cs[-1];c["items"].append(it)
+            w=np.array([max(1,float(q.get("strength",1))) for q in c["items"]])
+            v=np.array([float(q["level"]) for q in c["items"]])
+            c["level"]=float(np.average(v,weights=w))
+    out=[]
+    for c in cs:
+        origins=sorted(set(x.get("origin") for x in c["items"] if x.get("origin")))
+        angles=sorted(set(int(x["angle"]) for x in c["items"] if x.get("angle") is not None))
+        base=max(float(x["strength"]) for x in c["items"])
+        confluence_bonus=min(22,8*max(0,len(origins)-1)+2*max(0,len(angles)-1))
+        st=int(round(min(100,base+confluence_bonus)))
+        out.append({
+            "level":round(c["level"],4),"strength":st,
+            "methods":["Brown Gann Wheel"],
+            "labels":[x["submethod"] for x in c["items"]],
+            "origins":origins,"origin_count":len(origins),"angles":angles,
+            "count":len(c["items"]),
+            "side":"resistance" if c["level"]>current else "support",
+            "distance_pct":round(100*(c["level"]/current-1),2),
+            "horizontal_confluence":len(origins)>=BROWN_MIN_HORIZONTAL_ORIGINS,
+        })
+    return out
+
+def _brown_square_bar_dates(anchor):
+    if not anchor:return []
+    out=[];today=date.today()
+    for n in BROWN_SQUARE_BAR_COUNTS:
+        d=_business_add(anchor["date"],n)
+        if d>=today-timedelta(days=10) and d<=today+timedelta(days=BROWN_TIME_HORIZON_DAYS):
+            out.append({
+                "method":"Brown Square Bar Count","submethod":f"{n} bars",
+                "date":d,"strength":min(98,72+int(math.sqrt(n))*2),
+                "anchor_kind":anchor.get("kind"),"origin":f'{anchor.get("kind")}:{anchor["date"]}',
+                "bar_count":n,
+            })
+    return out
+
+def _brown_swing_rhythm_dates(low,high,df):
+    """Public-source-inspired rhythm proxy: Brown explicitly discusses expanding/contracting cycles.
+    Exact proprietary Thirty-Second Jewel time equations are not public; this uses the observed
+    principal swing bar count only as a secondary vertical-axis input.
+    """
+    if not low or not high:return []
+    i1=int(low.get("i",0));i2=int(high.get("i",0))
+    bars=max(1,abs(i2-i1))
+    anchor=high if high["date"]>=low["date"] else low
+    out=[];today=date.today()
+    for f in BROWN_SWING_TIME_FACTORS:
+        n=max(1,int(round(bars*f)))
+        d=_business_add(anchor["date"],n)
+        if d>=today-timedelta(days=10) and d<=today+timedelta(days=BROWN_TIME_HORIZON_DAYS):
+            out.append({
+                "method":"Brown Swing Rhythm Proxy","submethod":f"{f:.2f}× prior swing ({n} bars)",
+                "date":d,"strength":78 if abs(f-1)<1e-9 else 70,
+                "anchor_kind":"RANGE","origin":f'RANGE:{anchor["date"]}',"bar_count":n,
+            })
+    return out
+
+def _brown_cluster_time(items,window_days=BROWN_TIME_CLUSTER_DAYS):
+    if not items:return []
+    items=sorted(items,key=lambda x:x["date"]);cs=[]
+    for it in items:
+        if not cs or abs((it["date"]-cs[-1]["date"]).days)>window_days:
+            cs.append({"date":it["date"],"items":[it]})
+        else:
+            cs[-1]["items"].append(it)
+            cs[-1]["date"]=max(cs[-1]["items"],key=lambda q:q["strength"])["date"]
+    out=[]
+    for c in cs:
+        origins=sorted(set(x.get("origin") for x in c["items"] if x.get("origin")))
+        methods=sorted(set(x.get("method") for x in c["items"] if x.get("method")))
+        base=max(float(x["strength"]) for x in c["items"])
+        st=int(round(min(100,base+min(22,9*max(0,len(origins)-1)+5*max(0,len(methods)-1)))))
+        out.append({
+            "date":c["date"],"strength":st,"methods":methods,
+            "labels":[x["submethod"] for x in c["items"]],
+            "origins":origins,"origin_count":len(origins),"count":len(c["items"]),
+            "vertical_confluence":len(origins)>=BROWN_MIN_VERTICAL_ORIGINS,
+        })
+    return out
+
+def _brown_time_noise(clusters):
+    """Brown warns that a congested mess of cycle targets over a wide interval is disharmonic noise."""
+    xs=sorted([x for x in clusters if x["date"]>=date.today()],key=lambda x:x["date"])
+    noisy=set()
+    for i,x in enumerate(xs):
+        lo=x["date"]-timedelta(days=BROWN_NOISE_WINDOW_DAYS//2)
+        hi=x["date"]+timedelta(days=BROWN_NOISE_WINDOW_DAYS//2)
+        nearby=[q for q in xs if lo<=q["date"]<=hi]
+        if len(nearby)>BROWN_NOISE_MAX_CLUSTERS:
+            noisy.add(x["date"])
+    out=[]
+    for x in clusters:
+        y=dict(x);y["disharmonic_noise"]=x["date"] in noisy
+        out.append(y)
+    return out
+
+def _brown_diagonal_proxy(low,high,target_date,level,df,atr):
+    """Backend proxy for Brown's diagonal/fan axis.
+    Brown's public material says fixed screen scale is required; the exact proprietary
+    Pythagorean/fixed-screen construction is not public. This proxy normalizes to the
+    observed principal swing slope and is never allowed to create a signal alone.
+    """
+    if not low or not high:return {"match":False,"distance_atr":None,"note":"missing anchors"}
+    a,b=(low,high) if low["date"]<=high["date"] else (high,low)
+    bars=max(1,abs(int(b.get("i",0))-int(a.get("i",0))))
+    base_slope=(float(b["price"])-float(a["price"]))/bars
+    anchor=b
+    # business-day distance approximation from anchor to target.
+    try:
+        future_bars=max(0,len(pd.bdate_range(pd.Timestamp(anchor["date"])+pd.offsets.BDay(1),pd.Timestamp(target_date))))
+    except Exception:
+        future_bars=max(0,(target_date-anchor["date"]).days)
+    projected=[]
+    # fan-style subdivisions around the observed 1x1 data-scale slope.
+    for ratio in (0.5,1.0,2.0):
+        projected.append(float(anchor["price"])+base_slope*ratio*future_bars)
+    if not projected:return {"match":False,"distance_atr":None,"note":"no projection"}
+    dist=min(abs(float(level)-x) for x in projected)
+    atru=max(float(atr or 0),1e-9)
+    da=dist/atru
+    return {
+        "match":bool(da<=BROWN_DIAGONAL_TOL_ATR),
+        "distance_atr":round(da,2),
+        "projected":[round(x,4) for x in projected],
+        "note":"data-scale proxy; exact fixed-screen Brown channel is not public",
+    }
+
+def _brown_select_price_clusters(pc,current,side,limit=3):
+    xs=[x for x in pc if x["side"]==side]
+    # Brown principle: confluence first, then proximity.
+    xs=sorted(xs,key=lambda x:(not x.get("horizontal_confluence",False),-x["origin_count"],-x["strength"],abs(x["distance_pct"])))
+    picked=[]
+    for x in xs:
+        if abs(float(x["distance_pct"]))>50:continue
+        if any(abs(x["level"]/q["level"]-1)*100<1.5 for q in picked):continue
+        picked.append(x)
+        if len(picked)>=limit:break
+    return picked
+
+def _brown_select_time_clusters(tc,limit=4):
+    xs=[x for x in tc if x["date"]>=date.today() and x["date"]<=date.today()+timedelta(days=BROWN_TIME_HORIZON_DAYS)]
+    xs=sorted(xs,key=lambda x:(not x.get("vertical_confluence",False),x.get("disharmonic_noise",False),-x["origin_count"],-x["strength"],x["date"]))
+    picked=[]
+    for x in xs:
+        if x.get("disharmonic_noise"):continue
+        if not x.get("vertical_confluence"):continue
+        if any(abs((x["date"]-q["date"]).days)<7 for q in picked):continue
+        y=dict(x);y["window_start"]=x["date"]-timedelta(days=2);y["window_end"]=x["date"]+timedelta(days=2)
+        picked.append(y)
+        if len(picked)>=limit:break
+    return sorted(picked,key=lambda x:x["date"])
+
 def _sq9_levels(pivot_price,pivot_kind,pivot_date):
     root=math.sqrt(max(pivot_price,1e-12)); out=[]
     for angle,strength in SQ9_ANGLES:
@@ -902,73 +1168,77 @@ def evaluate_historical_forecast(df,forecast,wide_sessions=10,price_tol_pct=3.0,
     return {**forecast,"status":status,"status_key":status_key,"status_color":status_color,"actual_price":round(actual_price,4),"actual_date":actual_date,"price_error_pct":round(price_error,2),"time_error_sessions":int(time_error)}
 
 def _historical_expected_turns(df,pivots,chart_start=None,wing=7):
-    """As-of historical forecasts; each anchor stops when the next anchor is available."""
-    if not pivots:return [],[]
-    today=date.today();hist_tops=[];hist_lows=[]
-    subset=pivots[-14:];base_idx=max(0,len(pivots)-len(subset))
-    for local_idx,p in enumerate(subset):
-        anchor_date=p["date"];anchor_price=float(p["price"]);pivot_i=int(p.get("i",0))
-        confirm_i=min(len(df)-1,max(0,pivot_i+wing))
-        available_date=p.get("available_date") or df.iloc[confirm_i]["d"]
-        global_idx=base_idx+local_idx
-        next_available=today
-        if global_idx+1<len(pivots):
-            npiv=pivots[global_idx+1]
-            next_available=npiv.get("available_date") or npiv.get("date") or today
-        if next_available<=available_date:continue
+    """Historical Brown-style as-of forecasts from price/time confluence.
+    Uses only anchors known at the forecast date; next pivot is evaluation boundary only.
+    """
+    if len(pivots)<2:return [],[]
+    hist_tops=[];hist_lows=[]
+    today=date.today()
+    for j in range(1,len(pivots)-1):
+        prev=pivots[j-1];p=pivots[j];nxt=pivots[j+1]
+        available=p.get("available_date") or p.get("date")
+        next_available=nxt.get("available_date") or nxt.get("date")
+        if not available or not next_available or next_available<=available:continue
 
-        price_items=_sq9_levels(anchor_price,p["kind"],anchor_date)+_master_price_levels(p)
-        if global_idx>0:
-            prev=pivots[global_idx-1]
-            rng={"low":min(float(prev["price"]),anchor_price),"high":max(float(prev["price"]),anchor_price),"range":abs(anchor_price-float(prev["price"])),"anchor_date":anchor_date}
-            price_items+=_range_ratio_levels(rng)
-        atr_hist=_atr(df.iloc[:confirm_i+1])
-        temp_pc=cluster_price_levels(price_items,anchor_price,atr_hist)
+        known=[prev,p]
+        price_items=[]
+        for a in known:price_items+=_brown_wheel_levels(a,primary_only=False)
+        current=float(p["price"])
+        atr_hist=_atr(df.iloc[:min(len(df),max(2,int(p.get("i",1))+1))])
+        pc=_brown_cluster_price(price_items,current,atr_hist)
         side="resistance" if p["kind"]=="L" else "support"
-        main=select_main_price_levels(temp_pc,anchor_price,side,limit=1,atr=atr_hist)
-        if not main:continue
-        price_pick=main[0]
+        levels=_brown_select_price_clusters(pc,current,side,limit=2)
+        levels=[x for x in levels if x.get("horizontal_confluence")]
+        if not levels:continue
 
-        # Historical time geometry must be generated as-of the old anchor.
-        # Do not use the future-only helper functions here because they filter
-        # against today's date and would erase old forecast windows.
-        time_items=[];unit=anchor_price
-        hist_method="Gann Square Low" if p["kind"]=="L" else "Gann Square High"
-        if 0<unit<=5000:
-            for cycle in range(0,6):
-                for frac,label,_ in IMPORTANT_RATIOS:
-                    off=(cycle+frac)*unit
-                    if off<=0 or off>2500:continue
-                    for mode in ("calendar","trading"):
-                        d=_calendar_add(anchor_date,off) if mode=="calendar" else _business_add(anchor_date,int(round(off)))
-                        if d>available_date and d<next_available and d<today:
-                            time_items.append({"method":hist_method,"submethod":f"{label} · {'تقويمي' if mode=='calendar' else 'جلسات'}","date":d,"strength":_time_strength(label),"mode":mode,"anchor_kind":p["kind"]})
-        for cycle in range(0,6):
-            for n,strength in MASTER_144:
-                off=cycle*144+n
-                for mode in ("calendar","trading"):
-                    d=_calendar_add(anchor_date,off) if mode=="calendar" else _business_add(anchor_date,off)
-                    if d>available_date and d<next_available and d<today:
-                        time_items.append({"method":"Master 144","submethod":f"{n} · {'تقويمي' if mode=='calendar' else 'جلسات'}","date":d,"strength":strength,"mode":mode,"anchor_kind":p["kind"]})
-        for n in MIKULA_225_CELL_COUNTS:
-            d=_business_add(anchor_date,n)
-            if d>available_date and d<next_available and d<today:
-                time_items.append({"method":"Mikula 225° Cells","submethod":f"{n} bars","date":d,"strength":min(96,78+int(math.log(max(n,9),3))*3),"mode":"trading","anchor_kind":p["kind"]})
-        strong_times=[x for x in cluster_time_dates(time_items) if x["strength"]>=75]
-        strong_times=sorted(strong_times,key=lambda x:(-x["strength"],x["date"]))[:2]
-        for t in strong_times:
-            st=int(round(min(100,.62*price_pick["strength"]+.38*t["strength"]+5)))
-            item={"type":"TOP" if p["kind"]=="L" else "LOW","price":round(float(price_pick["level"]),4),"date":t["date"],"strength":st,"methods":sorted(set(price_pick["methods"]+t["methods"])),"color":strength_color(st),"anchor_date":anchor_date,"anchor_price":round(anchor_price,4),"available_date":available_date}
-            (hist_tops if p["kind"]=="L" else hist_lows).append(item)
+        time_items=[]
+        for a in known:time_items+=_brown_square_bar_dates(a)
+        # Historical mode: rebuild dates without today's filter.
+        time_items=[]
+        for a in known:
+            for n in BROWN_SQUARE_BAR_COUNTS:
+                d=_business_add(a["date"],n)
+                if d>available and d<next_available and d<today:
+                    time_items.append({"method":"Brown Square Bar Count","submethod":f"{n} bars","date":d,
+                                       "strength":min(98,72+int(math.sqrt(n))*2),
+                                       "anchor_kind":a.get("kind"),"origin":f'{a.get("kind")}:{a["date"]}',"bar_count":n})
+        # observed swing rhythm from prev->p, known as-of p
+        bars=max(1,abs(int(p.get("i",0))-int(prev.get("i",0))))
+        for f in BROWN_SWING_TIME_FACTORS:
+            n=max(1,int(round(bars*f)));d=_business_add(p["date"],n)
+            if d>available and d<next_available and d<today:
+                time_items.append({"method":"Brown Swing Rhythm Proxy","submethod":f"{f:.2f}× prior swing","date":d,
+                                   "strength":78 if abs(f-1)<1e-9 else 70,
+                                   "anchor_kind":"RANGE","origin":f'RANGE:{p["date"]}',"bar_count":n})
+        tc=_brown_time_noise(_brown_cluster_time(time_items))
+        times=[x for x in tc if x.get("vertical_confluence") and not x.get("disharmonic_noise")]
+        times=sorted(times,key=lambda x:(-x["strength"],x["date"]))[:2]
+        if not times:continue
 
-    def compact(items):
-        items=sorted(items,key=lambda x:(x["date"],-x["strength"]));out=[]
-        for it in items:
-            if out and abs((it["date"]-out[-1]["date"]).days)<=2:
-                if it["strength"]>out[-1]["strength"]:out[-1]=it
-            else:out.append(it)
-        return out[-12:]
-    return [evaluate_historical_forecast(df,x) for x in compact(hist_tops)],[evaluate_historical_forecast(df,x) for x in compact(hist_lows)]
+        typ="TOP" if p["kind"]=="L" else "LOW"
+        for lvl in levels[:1]:
+            for tw in times:
+                diag=_brown_diagonal_proxy(prev,p,tw["date"],lvl["level"],df,atr_hist)
+                methods=["Brown Gann Wheel","Brown Square Bar Count"]
+                if "Brown Swing Rhythm Proxy" in tw["methods"]:methods.append("Brown Swing Rhythm Proxy")
+                if diag["match"]:methods.append("Brown Diagonal Proxy")
+                item={"type":typ,"price":lvl["level"],"date":tw["date"],
+                      "strength":int(round(min(100,.5*lvl["strength"]+.35*tw["strength"]+(15 if diag["match"] else 0)))),
+                      "methods":methods,"color":strength_color(80),
+                      "anchor_date":p["date"],"anchor_price":p["price"],"available_date":available,
+                      "horizontal_origins":lvl["origin_count"],"vertical_origins":tw["origin_count"],
+                      "diagonal_match":diag["match"]}
+                ev=evaluate_historical_forecast(df,item)
+                (hist_tops if typ=="TOP" else hist_lows).append(ev)
+
+    def compact(xs):
+        xs=sorted(xs,key=lambda x:(x["date"],-x["strength"]));out=[]
+        for x in xs:
+            if out and abs((x["date"]-out[-1]["date"]).days)<=3:
+                if x["strength"]>out[-1]["strength"]:out[-1]=x
+            else:out.append(x)
+        return out[-16:]
+    return compact(hist_tops),compact(hist_lows)
 
 def _outcome_points(status_key):
     if status_key=="hit":return 100.0
@@ -1215,23 +1485,79 @@ def _decision_summary(last,ns,nr,watch_windows,backtest,anchor_strength,directio
 
 def build_method_rows(last,pc,tc):
     methods=[
-      ("Gann Square Low","سعر القاع = الزمن مع الكسور المهمة."),
-      ("Gann Square High","سعر القمة = الزمن مع الكسور المهمة."),
-      ("Gann Square Range","مدى آخر حركة = الزمن ويتكرر طالما المدى صالح."),
-      ("Master 144","نقاط 36/45/48/54/63/72/81/90/96/108/117/126/135/144."),
-      ("Mikula SQ9","مستويات السعر من الجذر التربيعي عند 45° حتى 360°."),
-      ("Mikula 225° Cells","تواريخ bars: 9،25،49،81،121…"),
-      ("Gann Range Ratios","1/4،1/3،3/8،1/2،5/8،2/3،3/4،7/8 داخل آخر Range.")]
+      ("Brown Gann Wheel","Square-root Gann Wheel: 45°,90°,120°,180°,240°,270°,315°,360°; horizontal price objectives."),
+      ("Brown Square Bar Count","Vertical time axis from square bar counts projected from major/significant price bars."),
+      ("Brown Swing Rhythm Proxy","Secondary cycle expansion/contraction proxy from the observed major swing duration."),
+      ("Brown Diagonal Proxy","Data-scale fan proxy only; exact Brown fixed-screen/Pythagorean channel formula is not publicly specified."),
+      ("Brown Composite Index","Momentum(9) of RSI(14) + SMA(3) of RSI(3), with 13/33 SMA confirmation."),
+    ]
     rows=[]
     for method,desc in methods:
-        xs=[x for x in pc if method in x["methods"]]
+        xs=[x for x in pc if method in x.get("methods",[])]
         sup=max([x for x in xs if x["level"]<last],key=lambda x:x["level"],default=None)
         res=min([x for x in xs if x["level"]>last],key=lambda x:x["level"],default=None)
-        times=[x for x in tc if method in x["methods"] and x["date"]>=date.today()][:2]
+        times=[x for x in tc if method in x.get("methods",[]) and x["date"]>=date.today()][:2]
         sts=[x["strength"] for x in [sup,res] if x]+[x["strength"] for x in times]
         st=max(sts) if sts else 0
-        rows.append({"method":method,"description":desc,"support":sup,"resistance":res,"times":times,"strength":st,"color":strength_color(st)})
+        rows.append({"method":method,"description":desc,"support":sup,"resistance":res,"times":times,
+                     "strength":st,"color":strength_color(st)})
     return rows
+
+def _brown_pair_candidates(levels,times,low,high,df,atr,osc,backtest,method_stats,current):
+    out=[]
+    for lvl in levels:
+        typ="TOP" if lvl["side"]=="resistance" else "LOW"
+        for tw in times[:2]:
+            diag=_brown_diagonal_proxy(low,high,tw["date"],lvl["level"],df,atr)
+            methods=["Brown Gann Wheel","Brown Square Bar Count"]
+            if "Brown Swing Rhythm Proxy" in tw.get("methods",[]):methods.append("Brown Swing Rhythm Proxy")
+            if diag["match"]:methods.append("Brown Diagonal Proxy")
+            me,validated=_method_evidence(methods,method_stats)
+            horizontal=bool(lvl.get("horizontal_confluence"))
+            vertical=bool(tw.get("vertical_confluence")) and not bool(tw.get("disharmonic_noise"))
+            osc_ok=osc["bearish"] if typ=="TOP" else osc["bullish"]
+            three_axis=horizontal and vertical and diag["match"]
+            geometry=int(round(min(100,
+                .42*float(lvl["strength"])+.33*float(tw["strength"])+
+                (15 if diag["match"] else 0)+(10 if osc_ok else 0)
+            )))
+            decision=_final_decision_score(geometry,_anchor_strength("EGX" if str(low.get("market",""))=="EGX" else "",low,high),backtest,me)
+            gate_ok=bool(
+                backtest.get("direction_ready") and
+                three_axis and osc_ok and validated and
+                decision>=FINAL_DIRECTION_MIN_SCORE and
+                abs(float(lvl.get("distance_pct") or 0))<=FINAL_MAX_DIRECTION_LEVEL_DISTANCE_PCT
+            )
+            reason=[]
+            if not backtest.get("direction_ready"):reason.append(backtest.get("gate_reason","historical gate failed"))
+            if not horizontal:reason.append("no horizontal price confluence")
+            if not vertical:reason.append("no clean vertical time confluence")
+            if not diag["match"]:reason.append("diagonal axis not aligned")
+            if not osc_ok:reason.append("Composite Index not confirming direction")
+            if not validated:reason.append("no validated Brown method")
+            state="DIRECTIONAL" if gate_ok else "WATCH_ONLY"
+            out.append({
+                "type":typ if gate_ok else "WATCH","candidate_type":typ,
+                "label":("قمة محتملة" if typ=="TOP" else "قاع محتمل") if gate_ok else "منطقة سعر/زمن للمراقبة",
+                "state":state,"price":lvl["level"],"date":tw["date"],
+                "window_start":tw["date"]-timedelta(days=2),"window_end":tw["date"]+timedelta(days=2),
+                "strength":decision,"decision_score":decision,"geometry_strength":geometry,
+                "price_strength":lvl["strength"],"time_strength":tw["strength"],
+                "method_evidence":me,"validated_methods":validated,"methods":methods,
+                "color":strength_color(decision) if gate_ok else "#64748b",
+                "distance_pct":lvl["distance_pct"],"horizontal_origins":lvl["origin_count"],
+                "vertical_origins":tw["origin_count"],"diagonal":diag,
+                "oscillator_confirmed":osc_ok,"three_axis_confluence":three_axis,
+                "gate_reason":"PASS" if gate_ok else "; ".join(reason),
+            })
+    # keep the strongest unique price/time candidates
+    out=sorted(out,key=lambda x:(x["state"]!="DIRECTIONAL",-x["decision_score"],abs(x["distance_pct"]),x["date"]))
+    unique=[]
+    for x in out:
+        if any(abs(x["price"]/q["price"]-1)*100<1.0 and abs((x["date"]-q["date"]).days)<5 for q in unique):continue
+        unique.append(x)
+        if len(unique)>=4:break
+    return unique
 
 def analyze_symbol(DB,symbol,limit=900):
     market=symbol_market(symbol)
@@ -1251,84 +1577,99 @@ def analyze_symbol(DB,symbol,limit=900):
         historical_market_pivots=all_market_stock_pivots
         anchor_source="EGX_MARKET_CONSENSUS_FINAL"
     else:
-        piv=detect_pivots(df,wing=7,min_move_pct=4.0)
-        historical_market_pivots=piv
+        local=detect_pivots(df,wing=7,min_move_pct=4.0)
+        last_low=next((x for x in reversed(local) if x["kind"]=="L"),None)
+        last_high=next((x for x in reversed(local) if x["kind"]=="H"),None)
+        piv=[x for x in (last_low,last_high) if x];piv.sort(key=lambda x:x["i"])
+        historical_market_pivots=local
         anchor_source="LOCAL_CONFIRMED"
 
-    low,high=_latest_pair(piv);rng=_last_completed_range(piv);last=float(df.iloc[-1]["c"]);atr=_atr(df)
-    if not low or not high:raise RuntimeError("لا يوجد قاع وقمة مؤكدان كافيان لبناء محرك جان.")
+    low,high=_latest_pair(piv);last=float(df.iloc[-1]["c"]);atr=_atr(df)
+    if not low or not high:raise RuntimeError("لا يوجد قاع وقمة مؤكدان كافيان لمنهج Brown.")
 
-    pi=[]
-    pi+=_sq9_levels(low["price"],"L",low["date"])+_master_price_levels(low)
-    pi+=_sq9_levels(high["price"],"H",high["date"])+_master_price_levels(high)
-    pi+=_range_ratio_levels(rng)
-    pc=cluster_price_levels(pi,last,atr)
+    # Horizontal axis: Brown/Gann Wheel from both major/significant anchors.
+    price_items=_brown_wheel_levels(low,primary_only=False)+_brown_wheel_levels(high,primary_only=False)
+    pc=_brown_cluster_price(price_items,last,atr)
+    supports=_brown_select_price_clusters(pc,last,"support",limit=3)
+    resistances=_brown_select_price_clusters(pc,last,"resistance",limit=3)
 
-    ti=[]
-    ti+=_tag_times(_repeat_square_dates(low["date"],low["price"],"Gann Square Low"),"L")
-    ti+=_tag_times(_master_144_dates(low["date"]),"L")+_tag_times(_mikula_dates(low["date"]),"L")
-    ti+=_tag_times(_repeat_square_dates(high["date"],high["price"],"Gann Square High"),"H")
-    ti+=_tag_times(_master_144_dates(high["date"]),"H")+_tag_times(_mikula_dates(high["date"]),"H")
-    if rng and rng["range"]>0:
-        ti+=_tag_times(_repeat_square_dates(rng["anchor_date"],rng["range"],"Gann Square Range"),"RANGE")
-    tc=cluster_time_dates(ti)
+    # Vertical axis: square bar counts from both anchors + secondary rhythm proxy.
+    time_items=_brown_square_bar_dates(low)+_brown_square_bar_dates(high)+_brown_swing_rhythm_dates(low,high,df)
+    tc=_brown_time_noise(_brown_cluster_time(time_items))
+    watch_windows=_brown_select_time_clusters(tc,limit=4)
 
-    # Walk-forward/as-of historical validation first.
+    # Brown oscillator confirmation.
+    oscillator_pivots=historical_market_pivots if historical_market_pivots else detect_pivots(df,wing=7,min_move_pct=3)
+    osc=_brown_oscillator_confirmation(df,oscillator_pivots)
+
+    # Historical validation rebuilt using Brown price/time logic.
     previous_tops,previous_lows=_historical_expected_turns(df,historical_market_pivots,df.iloc[0]["d"],wing=7)
     backtest=_backtest_stats(previous_tops,previous_lows)
     method_stats=_method_validation(previous_tops,previous_lows)
     anchor_strength=_anchor_strength(market,low,high)
 
-    # Future candidates. Direction is allowed only if historical validation passes.
-    tops,lows,top_times,low_times=_pair_turns(pc,tc,last,atr,anchor_strength,backtest,method_stats)
-    watch_windows=_watch_windows(tc,method_stats,limit=4)
+    levels=[x for x in resistances+supports if x.get("horizontal_confluence")]
+    candidates=_brown_pair_candidates(levels,watch_windows,low,high,df,atr,osc,backtest,method_stats,last)
+    directional=[x for x in candidates if x["state"]=="DIRECTIONAL"]
+    tops=[x for x in candidates if x["candidate_type"]=="TOP"][:2]
+    lows=[x for x in candidates if x["candidate_type"]=="LOW"][:2]
 
-    main_sups=select_main_price_levels(pc,last,"support",limit=2,atr=atr)
-    main_ress=select_main_price_levels(pc,last,"resistance",limit=2,atr=atr)
-    ns=main_sups[0] if main_sups else None;nr=main_ress[0] if main_ress else None
-
-    directional=[x for x in tops+lows if x.get("state")=="DIRECTIONAL"]
-    decision_summary=_decision_summary(last,ns,nr,watch_windows,backtest,anchor_strength,len(directional))
-    overall=max([x["decision_score"] for x in directional],default=int(round(anchor_strength)))
-    next_times=watch_windows[:2]
+    ns=supports[0] if supports else None;nr=resistances[0] if resistances else None
+    regime="DIRECTIONAL" if directional else "WATCH_ONLY"
+    if regime=="DIRECTIONAL":
+        message="يوجد Price-Time-Diagonal confluence مع تأكيد Composite Index واجتاز الاختبار التاريخي."
+    else:
+        message="منهج Brown لم يعطِ ثلاثي Confluence مؤكدًا اتجاهيًا؛ اعرضي المناطق والنوافذ للمراقبة فقط."
+    decision_summary={
+        "zone":"منتصف النطاق الرئيسي",
+        "position_pct":None,
+        "support_distance_pct":abs(ns["distance_pct"]) if ns else None,
+        "resistance_distance_pct":abs(nr["distance_pct"]) if nr else None,
+        "next_window":watch_windows[0] if watch_windows else None,
+        "backtest_reliability":backtest.get("gate_reliability"),
+        "anchor_strength":anchor_strength,"regime":regime,"message":message,
+        "direction_ready":bool(directional),"gate_reason":backtest.get("gate_reason"),
+        "oscillator_state":osc["state"],
+    }
+    if ns and nr:
+        sd=abs(ns["distance_pct"]);rd=abs(nr["distance_pct"]);tot=sd+rd
+        pos=100*sd/tot if tot else 50
+        decision_summary["position_pct"]=round(pos,1)
+        decision_summary["zone"]="قريب من المقاومة الرئيسية" if pos>=70 else "قريب من الدعم الرئيسي" if pos<=30 else "منتصف النطاق الرئيسي"
 
     method_rows_final=[]
     for name,st in sorted(method_stats.items(),key=lambda kv:(-kv[1]["effective_reliability"],-kv[1]["samples"],kv[0])):
-        method_rows_final.append({
-            "name":name,
-            "samples":st["samples"],
-            "hit_rate":st["hit_rate"],
-            "useful_rate":st["useful_rate"],
-            "reliability":st["effective_reliability"],
-            "validated":st["validated"],
-        })
+        method_rows_final.append({"name":name,"samples":st["samples"],"hit_rate":st["hit_rate"],
+                                  "useful_rate":st["useful_rate"],"reliability":st["effective_reliability"],
+                                  "validated":st["validated"]})
 
+    overall=max([x["decision_score"] for x in directional],default=int(round(anchor_strength)))
     candles=df.tail(220)
     return {
-        "engine_version":GANN_ENGINE_VERSION,
+        "engine_version":GANN_ENGINE_VERSION,"methodology":"Constance Brown public-method implementation",
         "symbol":symbol.upper(),"market":market,"anchor_source":anchor_source,
-        "market_pivots":market_pivots,
-        "stock_market_anchors":historical_market_pivots[-6:] if market=="EGX" else [],
+        "market_pivots":market_pivots,"stock_market_anchors":historical_market_pivots[-6:] if market=="EGX" else [],
         "last_price":round(last,4),"last_date":df.iloc[-1]["d"],"atr14":round(atr,4),
-        "latest_low":low,"latest_high":high,"range":rng,
+        "latest_low":low,"latest_high":high,"range":_last_completed_range(piv),
         "price_clusters":pc,"time_clusters":tc,
-        "next_times":next_times,"watch_windows":watch_windows,
-        "top_times":top_times,"low_times":low_times,
+        "next_times":watch_windows[:2],"watch_windows":watch_windows,
         "nearest_support":ns,"nearest_resistance":nr,
-        "tops":tops,"lows":lows,
-        "directional_signals":directional,
+        "tops":tops,"lows":lows,"directional_signals":directional,
+        "brown_candidates":candidates,"brown_oscillator":osc,
         "previous_tops":previous_tops,"previous_lows":previous_lows,
         "backtest":backtest,"method_validation":method_stats,"method_validation_rows":method_rows_final,
-        "anchor_strength":anchor_strength,
-        "decision_summary":decision_summary,
+        "anchor_strength":anchor_strength,"decision_summary":decision_summary,
         "overall_strength":overall,"overall_color":strength_color(overall),
-        "chart":{
-            "dates":[d.isoformat() for d in candles["d"]],
-            "open":[round(float(x),4) for x in candles["o"]],
-            "high":[round(float(x),4) for x in candles["h"]],
-            "low":[round(float(x),4) for x in candles["l"]],
-            "close":[round(float(x),4) for x in candles["c"]]
-        },
+        "brown_public_limitations":[
+            "Exact Thirty-Second Jewel fixed-screen/Pythagorean diagonal formula is not public in the sources used.",
+            "Diagonal axis is a data-scale proxy and cannot create a signal by itself.",
+            "Swing-rhythm expansion/contraction is a secondary proxy, not claimed as Brown's proprietary equation."
+        ],
+        "chart":{"dates":[d.isoformat() for d in candles["d"]],
+                 "open":[round(float(x),4) for x in candles["o"]],
+                 "high":[round(float(x),4) for x in candles["h"]],
+                 "low":[round(float(x),4) for x in candles["l"]],
+                 "close":[round(float(x),4) for x in candles["c"]]},
         "method_rows":build_method_rows(last,pc,tc),
     }
 
@@ -1346,9 +1687,10 @@ def market_page(DB,query="",page=1,per_page=100,market="US"):
 
 def source_methodology():
     return [
-      {"name":"Gann: Square Range / Low / High","rule":"مساواة عدد نقاط السعر بعدد فترات الزمن مع نسب 1/4،1/3،1/2،2/3،3/4 والمربع الكامل.","source":"W.D. Gann Master Commodities Course — Chapter 6."},
-      {"name":"Gann Master Square of 144","rule":"نقاط وتقاطع 36،45،48،54،63،72،81،90،96،108،117،126،135،144.","source":"W.D. Gann Master Mathematical Price, Time and Trend Calculator."},
-      {"name":"Bowden","rule":"Squaring a Low / High / Range مع calendar days وtrading days وضبط 45° كـ1×1 حقيقي.","source":"David E. Bowden — Squaring Time and Price."},
-      {"name":"Mikula Square of Nine","rule":"(sqrt(P) ± angle/180)^2 ومستويات Cardinal/Fixed Cross وتواريخ Cell counts.","source":"Patrick Mikula — The Definitive Guide to Forecasting Using W.D. Gann's Square of Nine."},
-      {"name":"Final Validated Decision Layer","rule":"Walk-forward/as-of validation لكل سهم ولكل طريقة، بوابة موثوقية تمنع الاتجاه عند ضعف الاختبار، وفصل النافذة الزمنية عن TOP/LOW.","source":"طبقة قرار داخلية V6.0 فوق طرق جان/Mikula؛ الدرجة ليست probability ولا توصية تداول."}
+      {"name":"Constance Brown — Gann Wheel","rule":"الأهداف السعرية من الجذر التربيعي؛ 360° = ±2 على الجذر. الزوايا المستخدمة: 45،90،120،180،240،270،315،360.","source":"Constance Brown, Technical Analysis for the Trading Professional, Ch. 9; public Gann Wheel excerpt."},
+      {"name":"Brown Price/Time Confluence","rule":"السعر القوي منطقة Confluence من أكثر من projection، ثم يلتقي مع vertical time work.","source":"Constance Brown, Price and Time, Breakthroughs in Technical Analysis."},
+      {"name":"Three Axes","rule":"Horizontal price + Vertical time + Diagonal axis. لا يعتمد القرار على محور واحد.","source":"Constance Brown public 2023 CMT presentation; Thirty-Second Jewel descriptions."},
+      {"name":"Square Bar Count Time","rule":"الـvertical axis يعتمد bar-count time cycles من significant price bars؛ الكود يستخدم perfect-square bar counts كتنفيذ علني محافظ.","source":"Constance Brown public 2023 CMT presentation."},
+      {"name":"Composite Index","rule":"Momentum(9) of RSI(14) + SMA(3) of RSI(3)، مع SMA 13/33؛ يستخدم كتأكيد وليس كصانع للهدف.","source":"Constance Brown Composite Index public formula; StockCharts ChartSchool."},
+      {"name":"Public-method limitation","rule":"الـDiagonal backend proxy ليس صيغة Thirty-Second Jewel السرية؛ Brown تشترط fixed screen scale، والمعادلة الكاملة ليست منشورة في المصادر العامة المستخدمة.","source":"Optuma/Brown public materials and CMT presentation."},
     ]
