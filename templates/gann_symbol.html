@@ -20,7 +20,7 @@ details.gann-details>summary{cursor:pointer;font-weight:700;padding:10px 0}
 </div>
 
 <div class="panel">
-<h2>قرار جان المختصر</h2>
+<h2>Constance Brown — القرار المختصر</h2>
 <div class="gann-cards">
 <div class="gann-turn" style="--c:#0f172a"><strong>وضع السعر</strong><div class="metric">{{a.decision_summary.zone}}</div>{% if a.decision_summary.position_pct is not none %}<div class="muted">موضعه داخل النطاق {{a.decision_summary.position_pct}}%</div>{% endif %}</div>
 <div class="gann-turn" style="--c:#15803d"><strong>أقرب دعم رئيسي</strong><div class="metric">{{'%.2f'|format(a.nearest_support.level) if a.nearest_support else '—'}}</div>{% if a.decision_summary.support_distance_pct is not none %}<div class="muted">يبعد {{a.decision_summary.support_distance_pct}}%</div>{% endif %}</div>
@@ -70,7 +70,14 @@ Useful Validation: {{a.backtest.gate_useful_rate}}% ·
 {% endif %}
 
 <div class="panel">
-<h2>نوافذ جان الزمنية للمراقبة</h2>
+<h2>Composite Index Confirmation</h2>
+<div class="decision-note">
+State: <strong>{{a.brown_oscillator.state}}</strong> ·
+CI {{a.brown_oscillator.ci}} · Fast {{a.brown_oscillator.ci_fast}} · Slow {{a.brown_oscillator.ci_slow}} · RSI14 {{a.brown_oscillator.rsi14}}.
+{% if a.brown_oscillator.bull_divergence %} Bullish divergence detected.{% endif %}
+{% if a.brown_oscillator.bear_divergence %} Bearish divergence detected.{% endif %}
+</div>
+<h2>Brown Time Confluence — نوافذ المراقبة</h2>
 <div class="gann-cards">
 {% for x in a.watch_windows %}
 <div class="gann-turn" style="--c:#64748b">
@@ -84,7 +91,7 @@ Useful Validation: {{a.backtest.gate_useful_rate}}% ·
 {% endfor %}
 </div>
 
-<h2>التحقق التاريخي لكل طريقة</h2>
+<h2>التحقق التاريخي لمكونات Brown</h2>
 <div class="table-wrap"><table>
 <thead><tr><th>الطريقة</th><th>العينات</th><th>Hit</th><th>Useful</th><th>Reliability</th><th>الحالة</th></tr></thead>
 <tbody>
@@ -99,7 +106,7 @@ Useful Validation: {{a.backtest.gate_useful_rate}}% ·
 {% endfor %}
 </tbody></table></div>
 
-<h2>المخرجات النهائية القادمة</h2>
+<h2>Price–Time–Diagonal Candidates</h2>
 <div class="gann-cards">
 {% for x in a.tops %}
 <div class="gann-turn" style="--c:#b91c1c">
@@ -244,5 +251,8 @@ Validation المتأخر: {{a.backtest.validation.samples}} عينة · Reliabi
 </tbody>
 </table>
 </div>
+</details>
+<details><summary>حدود تطبيق Connie Brown في الـbackend</summary>
+<ul>{% for x in a.brown_public_limitations %}<li>{{x}}</li>{% endfor %}</ul>
 </details>
 {% endblock %}
