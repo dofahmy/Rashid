@@ -4,3 +4,6 @@ psycopg[binary]>=3.2,<4
 requests>=2.32,<3
 gunicorn>=23,<24
 aiohttp>=3.10,<4
+numpy
+pandas
+scikit-learn
