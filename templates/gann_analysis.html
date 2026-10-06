@@ -36,13 +36,13 @@
     </select>
     <button>تحليل</button>
   </form>
-  <p class="muted">القوة % درجة التقاء هندسية بين طرق جان/Mikula وليست احتمال نجاح تاريخي.</p>
+  <p class="muted">درجة القرار تجمع هندسة جان + ثبات الـAnchor + الاختبار التاريخي as-of. ليست احتمال نجاح ولا توصية تداول.</p>
 </div>
 
 <div class="panel tablewrap">
 <table>
 <thead>
-<tr><th>السهم</th><th>السوق</th><th>آخر سعر</th><th>الدعم</th><th>المقاومة</th><th>النافذة القادمة</th><th>القمة 1</th><th>القمة 2</th><th>القاع 1</th><th>القاع 2</th><th>القوة</th></tr>
+<tr><th>السهم</th><th>السوق</th><th>آخر سعر</th><th>الحالة</th><th>الدعم</th><th>المقاومة</th><th>النافذة القادمة</th><th>القمة 1</th><th>القمة 2</th><th>القاع 1</th><th>القاع 2</th><th>درجة القرار</th></tr>
 </thead>
 <tbody>
 {% for r in rows %}
@@ -53,6 +53,7 @@
 </td>
 <td><span class="market-label">{{'مصر' if r.symbol.endswith('.CA') else 'أمريكا'}}</span></td>
 <td>{{'%.2f'|format(r.last_price) if r.last_price is defined else '—'}}</td>
+<td>{{r.zone if r.zone is defined else '—'}}</td>
 <td>{% if r.support %}{{'%.2f'|format(r.support.level)}} · {{r.support.strength}}%{% else %}—{% endif %}</td>
 <td>{% if r.resistance %}{{'%.2f'|format(r.resistance.level)}} · {{r.resistance.strength}}%{% else %}—{% endif %}</td>
 <td>{% if r.next_time %}{{r.next_time.date}} · {{r.next_time.strength}}%{% else %}—{% endif %}</td>
@@ -63,7 +64,7 @@
 <td><span class="gann-badge" style="background:{{r.color}}">{{r.strength}}%</span></td>
 </tr>
 {% else %}
-<tr><td colspan="11">لا توجد بيانات Daily مطابقة لهذا السوق/البحث.</td></tr>
+<tr><td colspan="12">لا توجد بيانات Daily مطابقة لهذا السوق/البحث.</td></tr>
 {% endfor %}
 </tbody>
 </table>

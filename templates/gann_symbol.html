@@ -14,12 +14,23 @@ details.gann-details>summary{cursor:pointer;font-weight:700;padding:10px 0}
 <div class="actions">
 <div>
 <h1 style="margin-bottom:4px">تحليل جان · {{a.symbol}}</h1>
-<div class="muted">آخر سعر {{'%.2f'|format(a.last_price)}} · {{a.last_date}} · ATR14 {{'%.2f'|format(a.atr14)}}</div>
+<div class="muted">{{a.engine_version}} · آخر سعر {{'%.2f'|format(a.last_price)}} · {{a.last_date}} · ATR14 {{'%.2f'|format(a.atr14)}}</div>
 </div>
 <a class="button secondary" href="{{url_for('gann.gann_analysis',market=request.args.get('market','US'))}}">رجوع للسوق</a>
 </div>
 
-{% if a.anchor_source=='EGX_MARKET_MAJOR' %}
+<div class="panel">
+<h2>قرار جان المختصر</h2>
+<div class="gann-cards">
+<div class="gann-turn" style="--c:#0f172a"><strong>وضع السعر</strong><div class="metric">{{a.decision_summary.zone}}</div>{% if a.decision_summary.position_pct is not none %}<div class="muted">موضعه داخل النطاق {{a.decision_summary.position_pct}}%</div>{% endif %}</div>
+<div class="gann-turn" style="--c:#15803d"><strong>أقرب دعم رئيسي</strong><div class="metric">{{'%.2f'|format(a.nearest_support.level) if a.nearest_support else '—'}}</div>{% if a.decision_summary.support_distance_pct is not none %}<div class="muted">يبعد {{a.decision_summary.support_distance_pct}}%</div>{% endif %}</div>
+<div class="gann-turn" style="--c:#b91c1c"><strong>أقرب مقاومة رئيسية</strong><div class="metric">{{'%.2f'|format(a.nearest_resistance.level) if a.nearest_resistance else '—'}}</div>{% if a.decision_summary.resistance_distance_pct is not none %}<div class="muted">تبعد {{a.decision_summary.resistance_distance_pct}}%</div>{% endif %}</div>
+<div class="gann-turn" style="--c:#2563eb"><strong>النافذة الزمنية الأقرب</strong><div class="metric">{{a.decision_summary.next_window.date if a.decision_summary.next_window else '—'}}</div>{% if a.decision_summary.next_window %}<div class="muted">{{a.decision_summary.next_window.window_start}} → {{a.decision_summary.next_window.window_end}}</div>{% endif %}</div>
+</div>
+<div class="decision-note"><strong>ثبات الـAnchor:</strong> {{a.anchor_strength}}/100 · <strong>موثوقية الاختبار التاريخي:</strong> {{a.backtest.reliability_score}}/100 ({{a.backtest.samples}} عينة، {{a.backtest.sample_quality}}). <span class="muted">درجات قرار داخلية وليست احتمالات نجاح أو توصية تداول.</span></div>
+</div>
+
+{% if a.anchor_source=='EGX_MARKET_CONSENSUS_FINAL' %}
 <div class="panel tablewrap">
 <h2>مرتكزات السوق المصري المستخدمة</h2>
 <p class="muted">في مصر لا نبدأ من أي قاع/قمة محلية للسهم. نبدأ فقط من قاع/قمة سوق رئيسية مؤكدة من المؤشر/مؤشر السوق البديل + اتساع السوق + القياديات + البنوك، ثم نأخذ قاع/قمة السهم داخل ±3 جلسات من تاريخ السوق.</p>
@@ -50,13 +61,13 @@ details.gann-details>summary{cursor:pointer;font-weight:700;padding:10px 0}
 {% endif %}
 
 <div class="panel">
-<h2>المستويات الرئيسية القادمة فقط</h2>
+<h2>المخرجات النهائية القادمة</h2>
 <div class="gann-cards">
 {% for x in a.tops %}
 <div class="gann-turn" style="--c:#b91c1c">
 <strong>قمة متوقعة {{loop.index}}</strong>
 <div class="metric">{{'%.2f'|format(x.price)}}</div>
-<div>{{x.date or '—'}}</div>
+<div>{% if x.date %}{{x.window_start}} → {{x.window_end}}{% else %}—{% endif %}</div>
 <span class="gann-badge" style="background:{{x.color}}">{{x.strength}}%</span>
 <div class="muted">{{x.methods|join(' + ')}}</div>
 </div>
@@ -65,19 +76,20 @@ details.gann-details>summary{cursor:pointer;font-weight:700;padding:10px 0}
 <div class="gann-turn" style="--c:#15803d">
 <strong>قاع متوقع {{loop.index}}</strong>
 <div class="metric">{{'%.2f'|format(x.price)}}</div>
-<div>{{x.date or '—'}}</div>
+<div>{% if x.date %}{{x.window_start}} → {{x.window_end}}{% else %}—{% endif %}</div>
 <span class="gann-badge" style="background:{{x.color}}">{{x.strength}}%</span>
 <div class="muted">{{x.methods|join(' + ')}}</div>
 </div>
 {% endfor %}
 </div>
 <div class="decision-note muted">
-يظهر هنا فقط أقوى مستويين رئيسيين أعلى السعر وأقوى مستويين أسفله بعد دمج المستويات المتقاربة. القوة تعبر عن الالتقاء الهندسي، وليست نسبة نجاح تاريخية.
+يظهر فقط أقوى مستويين أعلى السعر وأقوى مستويين أسفله. درجة القرار تجمع هندسة السعر والزمن + ثبات الـAnchor + موثوقية الاختبار التاريخي، لكنها ليست احتمال نجاح ولا توصية شراء/بيع.
 </div>
 </div>
 
 <div class="panel tablewrap">
 <h2>التوقعات السابقة — هل تحققت؟</h2>
+<div class="decision-note"><strong>Backtest as-of:</strong> {{a.backtest.samples}} عينة · تحقق {{a.backtest.hits}} · جزئي {{a.backtest.partials}} · لم يتحقق {{a.backtest.misses}} · مفيد (تحقق+جزئي) {{a.backtest.useful_rate if a.backtest.useful_rate is not none else '—'}}% · Median فرق السعر {{a.backtest.median_price_error_pct if a.backtest.median_price_error_pct is not none else '—'}}% · Median فرق الزمن {{a.backtest.median_time_error_sessions if a.backtest.median_time_error_sessions is not none else '—'}} جلسة.</div>
 <table>
 <thead>
 <tr>
@@ -86,7 +98,7 @@ details.gann-details>summary{cursor:pointer;font-weight:700;padding:10px 0}
 </tr>
 </thead>
 <tbody>
-{% for x in a.previous_tops %}
+{% for x in a.previous_tops[-6:] %}
 <tr>
 <td>قمة سابقة {{loop.index}}</td>
 <td>{{'%.2f'|format(x.price)}}</td><td>{{x.date}}</td>
@@ -97,7 +109,7 @@ details.gann-details>summary{cursor:pointer;font-weight:700;padding:10px 0}
 <td><span class="status" style="background:{{x.status_color}}">{{x.status}}</span></td>
 </tr>
 {% endfor %}
-{% for x in a.previous_lows %}
+{% for x in a.previous_lows[-6:] %}
 <tr>
 <td>قاع سابق {{loop.index}}</td>
 <td>{{'%.2f'|format(x.price)}}</td><td>{{x.date}}</td>
@@ -126,13 +138,13 @@ details.gann-details>summary{cursor:pointer;font-weight:700;padding:10px 0}
 <div class="panel tablewrap">
 <h2>ملخص المستويات الرئيسية</h2>
 <table>
-<thead><tr><th>النوع</th><th>المستوى</th><th>التاريخ المتوقع</th><th>القوة</th><th>الطرق المتفقة</th></tr></thead>
+<thead><tr><th>النوع</th><th>المستوى</th><th>النافذة الزمنية</th><th>درجة القرار</th><th>هندسة خام</th><th>الطرق المتفقة</th></tr></thead>
 <tbody>
 {% for x in a.tops %}
-<tr><td>قمة {{loop.index}}</td><td>{{'%.2f'|format(x.price)}}</td><td>{{x.date or '—'}}</td><td>{{x.strength}}%</td><td>{{x.methods|join(' + ')}}</td></tr>
+<tr><td>قمة {{loop.index}}</td><td>{{'%.2f'|format(x.price)}}</td><td>{% if x.date %}{{x.window_start}} → {{x.window_end}}{% else %}—{% endif %}</td><td>{{x.decision_score}}%</td><td>{{x.geometry_strength}}%</td><td>{{x.methods|join(' + ')}}</td></tr>
 {% endfor %}
 {% for x in a.lows %}
-<tr><td>قاع {{loop.index}}</td><td>{{'%.2f'|format(x.price)}}</td><td>{{x.date or '—'}}</td><td>{{x.strength}}%</td><td>{{x.methods|join(' + ')}}</td></tr>
+<tr><td>قاع {{loop.index}}</td><td>{{'%.2f'|format(x.price)}}</td><td>{% if x.date %}{{x.window_start}} → {{x.window_end}}{% else %}—{% endif %}</td><td>{{x.decision_score}}%</td><td>{{x.geometry_strength}}%</td><td>{{x.methods|join(' + ')}}</td></tr>
 {% endfor %}
 </tbody>
 </table>
