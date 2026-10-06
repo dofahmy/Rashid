@@ -29,13 +29,14 @@ details.gann-details>summary{cursor:pointer;font-weight:700;padding:10px 0}
 </p>
 {% endif %}
 <table>
-<thead><tr><th>النوع</th><th>تاريخ السوق</th><th>درجة السوق</th><th>اتساع السوق</th><th>القياديات</th><th>البنوك</th><th>تاريخ السهم</th><th>سعر السهم Anchor</th></tr></thead>
+<thead><tr><th>النوع</th><th>تاريخ السوق</th><th>الثبات</th><th>الدرجة النهائية</th><th>اتساع السوق</th><th>القياديات</th><th>البنوك</th><th>تاريخ السهم</th><th>سعر السهم Anchor</th></tr></thead>
 <tbody>
 {% for x in a.stock_market_anchors[-4:] %}
 <tr>
 <td>{{'قاع سوق رئيسي' if x.kind=='L' else 'قمة سوق رئيسية'}}</td>
 <td>{{x.market_date}}</td>
-<td><strong>{{x.market_score}}/100</strong></td>
+<td><strong>{{x.stability_pct|default(0)}}%</strong></td>
+<td><strong>{{x.final_score|default(x.market_score|default(0))}}/100</strong></td>
 <td>{{x.breadth_pct}}%</td>
 <td>{{x.leaders_pct}}%</td>
 <td>{{x.banks_pct}}%</td>
