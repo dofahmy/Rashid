@@ -34,7 +34,7 @@ EGX_FINAL_CONSENSUS_MIN_VOTES=3     # selected by at least 3 of 5 reasonable mod
 EGX_FINAL_MIN_GAP=15               # absolute safety floor between opposite pivots
 EGX_FINAL_MIN_TRANSITION_SWING=6.0 # only removes market noise, not a 'major' hard threshold
 
-GANN_ENGINE_VERSION="5.0 FINAL"
+GANN_ENGINE_VERSION="6.0 FINAL VALIDATED"
 FINAL_TIME_HORIZON_DAYS=270
 FINAL_TIME_WINDOW_DAYS=2
 FINAL_TIME_MIN_SEPARATION_DAYS=7
@@ -42,6 +42,14 @@ FINAL_LEVEL_MIN_SEPARATION_PCT=1.75
 FINAL_BACKTEST_MIN_SAMPLES=3
 FINAL_HISTORY_LIMIT_EGX=2200
 FINAL_HISTORY_LIMIT_US=1400
+FINAL_VALIDATION_MIN_SAMPLES=6
+FINAL_METHOD_MIN_SAMPLES=3
+FINAL_RELIABILITY_GATE=45.0
+FINAL_USEFUL_RATE_GATE=35.0
+FINAL_METHOD_RELIABILITY_GATE=42.0
+FINAL_DIRECTION_MIN_SCORE=55.0
+FINAL_MAX_DIRECTION_LEVEL_DISTANCE_PCT=35.0
+FINAL_SPLIT_RATIO=0.60
 
 # Major/representative listed banks. Only symbols available in the database count.
 EGX_BANK_SYMBOLS={
@@ -962,18 +970,123 @@ def _historical_expected_turns(df,pivots,chart_start=None,wing=7):
         return out[-12:]
     return [evaluate_historical_forecast(df,x) for x in compact(hist_tops)],[evaluate_historical_forecast(df,x) for x in compact(hist_lows)]
 
+def _outcome_points(status_key):
+    if status_key=="hit":return 100.0
+    if status_key=="partial":return 55.0
+    if status_key=="miss":return 0.0
+    return None
+
+def _score_outcomes(xs,prior=50.0,prior_weight=6.0):
+    vals=[_outcome_points(x.get("status_key")) for x in xs]
+    vals=[v for v in vals if v is not None]
+    n=len(vals)
+    if not n:
+        return {"samples":0,"hits":0,"partials":0,"misses":0,"hit_rate":None,"useful_rate":None,
+                "raw_score":None,"reliability_score":prior,"median_price_error_pct":None,
+                "median_time_error_sessions":None}
+    hits=sum(x.get("status_key")=="hit" for x in xs)
+    partials=sum(x.get("status_key")=="partial" for x in xs)
+    misses=sum(x.get("status_key")=="miss" for x in xs)
+    raw=sum(vals)/n
+    reliability=(raw*n+prior*prior_weight)/(n+prior_weight)
+    pe=[float(x["price_error_pct"]) for x in xs if x.get("price_error_pct") is not None]
+    te=[float(x["time_error_sessions"]) for x in xs if x.get("time_error_sessions") is not None]
+    return {
+        "samples":n,"hits":hits,"partials":partials,"misses":misses,
+        "hit_rate":round(100*hits/n,1),
+        "useful_rate":round(100*(hits+partials)/n,1),
+        "raw_score":round(raw,1),
+        "reliability_score":round(reliability,1),
+        "median_price_error_pct":round(float(np.median(pe)),2) if pe else None,
+        "median_time_error_sessions":round(float(np.median(te)),1) if te else None,
+    }
+
 def _backtest_stats(tops,lows):
-    xs=[x for x in tops+lows if x.get("status_key") in ("hit","partial","miss")]
-    n=len(xs);hits=sum(x["status_key"]=="hit" for x in xs);partials=sum(x["status_key"]=="partial" for x in xs);misses=sum(x["status_key"]=="miss" for x in xs)
-    if n:
-        raw=(100*hits+60*partials)/n
-        reliability=50+(raw-50)*(n/(n+4))
-        pe=[x["price_error_pct"] for x in xs if x.get("price_error_pct") is not None]
-        te=[x["time_error_sessions"] for x in xs if x.get("time_error_sessions") is not None]
-        med_price=float(np.median(pe)) if pe else None;med_time=float(np.median(te)) if te else None
+    xs=sorted([x for x in tops+lows if x.get("status_key") in ("hit","partial","miss")],
+              key=lambda x:(x.get("available_date") or x.get("date"),x.get("date")))
+    full=_score_outcomes(xs)
+    n=len(xs)
+    cut=max(1,min(n-1,int(round(n*FINAL_SPLIT_RATIO)))) if n>=2 else n
+    train=xs[:cut] if n>=2 else xs
+    validation=xs[cut:] if n>=2 else []
+    train_stats=_score_outcomes(train)
+    val_stats=_score_outcomes(validation)
+
+    # Direction-specific diagnostics.
+    top_stats=_score_outcomes([x for x in xs if x.get("type")=="TOP"])
+    low_stats=_score_outcomes([x for x in xs if x.get("type")=="LOW"])
+
+    # Validation readiness must depend on later unseen-in-time examples, not only full history.
+    val_n=val_stats["samples"]
+    gate_reliability=val_stats["reliability_score"] if val_n>=3 else full["reliability_score"]
+    gate_useful=val_stats["useful_rate"] if val_n>=3 and val_stats["useful_rate"] is not None else full["useful_rate"]
+    direction_ready=(
+        full["samples"]>=FINAL_VALIDATION_MIN_SAMPLES and
+        gate_reliability>=FINAL_RELIABILITY_GATE and
+        (gate_useful or 0)>=FINAL_USEFUL_RATE_GATE
+    )
+
+    return {
+        **full,
+        "train":train_stats,
+        "validation":val_stats,
+        "top":top_stats,
+        "low":low_stats,
+        "sample_quality":"كافٍ" if full["samples"]>=FINAL_VALIDATION_MIN_SAMPLES else "محدود",
+        "gate_reliability":round(float(gate_reliability),1),
+        "gate_useful_rate":round(float(gate_useful or 0),1),
+        "direction_ready":bool(direction_ready),
+        "gate_reason":(
+            "PASS" if direction_ready else
+            "عينات تاريخية غير كافية" if full["samples"]<FINAL_VALIDATION_MIN_SAMPLES else
+            "موثوقية الاختبار المتأخر ضعيفة" if gate_reliability<FINAL_RELIABILITY_GATE else
+            "نسبة تحقق/جزئي التاريخية ضعيفة"
+        )
+    }
+
+def _method_validation(previous_tops,previous_lows):
+    """Per-method walk-forward evidence from as-of forecasts.
+
+    A historical forecast can contain several converging Gann methods; each method
+    receives the realized outcome of that forecast. Scores are shrunk to 50 for
+    small samples, so one lucky hit cannot dominate future decisions.
+    """
+    xs=sorted([x for x in previous_tops+previous_lows if x.get("status_key") in ("hit","partial","miss")],
+              key=lambda x:(x.get("available_date") or x.get("date"),x.get("date")))
+    methods={}
+    for x in xs:
+        for m in sorted(set(x.get("methods") or [])):
+            methods.setdefault(m,[]).append(x)
+    out={}
+    for m,rows in methods.items():
+        st=_score_outcomes(rows,prior=50.0,prior_weight=5.0)
+        n=st["samples"]
+        cut=max(1,min(n-1,int(round(n*FINAL_SPLIT_RATIO)))) if n>=2 else n
+        late=rows[cut:] if n>=2 else []
+        late_st=_score_outcomes(late,prior=50.0,prior_weight=5.0)
+        effective=late_st["reliability_score"] if late_st["samples"]>=2 else st["reliability_score"]
+        validated=(n>=FINAL_METHOD_MIN_SAMPLES and effective>=FINAL_METHOD_RELIABILITY_GATE)
+        out[m]={
+            **st,
+            "late":late_st,
+            "effective_reliability":round(float(effective),1),
+            "validated":bool(validated),
+        }
+    return out
+
+def _method_evidence(methods,method_stats):
+    vals=[];validated=[]
+    for m in methods or []:
+        st=method_stats.get(m)
+        if not st:continue
+        vals.append(float(st["effective_reliability"]))
+        if st["validated"]:validated.append(m)
+    if vals:
+        # Average plus a small reward for independent validated methods.
+        score=min(100.0,float(np.mean(vals))+min(10,2.5*max(0,len(validated)-1)))
     else:
-        raw=50;reliability=50;med_price=med_time=None
-    return {"samples":n,"hits":hits,"partials":partials,"misses":misses,"hit_rate":round(100*hits/n,1) if n else None,"useful_rate":round(100*(hits+partials)/n,1) if n else None,"raw_score":round(raw,1),"reliability_score":round(reliability,1),"median_price_error_pct":round(med_price,2) if med_price is not None else None,"median_time_error_sessions":round(med_time,1) if med_time is not None else None,"sample_quality":"كافٍ" if n>=FINAL_BACKTEST_MIN_SAMPLES else "محدود"}
+        score=50.0
+    return round(score,1),validated
 
 def _anchor_strength(market,low,high):
     if market=="EGX":
@@ -981,28 +1094,93 @@ def _anchor_strength(market,low,high):
         return round(sum(vals)/len(vals),1) if vals else 50.0
     return 65.0
 
-def _final_decision_score(geometry,anchor_strength,backtest):
-    n=int(backtest.get("samples",0));rel=float(backtest.get("reliability_score",50))
-    if n>=FINAL_BACKTEST_MIN_SAMPLES:score=.55*geometry+.25*anchor_strength+.20*rel
-    else:score=.70*geometry+.30*anchor_strength
+def _final_decision_score(geometry,anchor_strength,backtest,method_evidence):
+    """Validated ranking score; never presented as probability."""
+    rel=float(backtest.get("gate_reliability",50))
+    score=.35*geometry+.20*anchor_strength+.25*method_evidence+.20*rel
     return int(round(max(0,min(100,score))))
 
-def _pair_turns(pc,tc,current,atr,anchor_strength,backtest):
+def _direction_gate(backtest,decision_score,distance_pct,validated_methods):
+    if not backtest.get("direction_ready"):
+        return False,backtest.get("gate_reason") or "ضعف التحقق التاريخي"
+    if decision_score<FINAL_DIRECTION_MIN_SCORE:
+        return False,"درجة القرار أقل من الحد المطلوب"
+    if abs(float(distance_pct or 0))>FINAL_MAX_DIRECTION_LEVEL_DISTANCE_PCT:
+        return False,"المستوى بعيد جدًا عن السعر الحالي"
+    if not validated_methods:
+        return False,"لا توجد طريقة جان اجتازت التحقق التاريخي المستقل"
+    return True,"PASS"
+
+def _pair_turns(pc,tc,current,atr,anchor_strength,backtest,method_stats):
+    """Create candidates, but label TOP/LOW only after the validation gate."""
     sups=select_main_price_levels(pc,current,"support",limit=2,atr=atr)
     ress=select_main_price_levels(pc,current,"resistance",limit=2,atr=atr)
     top_times=select_final_time_windows(tc,"TOP",limit=2)
     low_times=select_final_time_windows(tc,"LOW",limit=2)
+
     def make(levels,times,typ):
         ans=[]
         for i,p in enumerate(levels):
             t=times[i] if i<len(times) else (times[-1] if times else None)
+            methods=sorted(set(p["methods"]+(t["methods"] if t else [])))
             geometry=int(round(p["strength"] if not t else min(100,.62*p["strength"]+.38*t["strength"]+5)))
-            decision=_final_decision_score(geometry,anchor_strength,backtest)
-            ans.append({"type":typ,"price":p["level"],"date":t["date"] if t else None,"window_start":t.get("window_start") if t else None,"window_end":t.get("window_end") if t else None,"strength":decision,"decision_score":decision,"geometry_strength":geometry,"price_strength":p["strength"],"time_strength":t["strength"] if t else None,"methods":sorted(set(p["methods"]+(t["methods"] if t else []))),"color":strength_color(decision),"level_count":p.get("count",1),"distance_pct":p.get("distance_pct"),"anchor_kinds":p.get("anchor_kinds",[])})
+            me,validated_methods=_method_evidence(methods,method_stats)
+            decision=_final_decision_score(geometry,anchor_strength,backtest,me)
+            directional,reason=_direction_gate(backtest,decision,p.get("distance_pct"),validated_methods)
+            state="DIRECTIONAL" if directional else "WATCH_ONLY"
+            label=("قمة محتملة" if typ=="TOP" else "قاع محتمل") if directional else "نافذة مراقبة"
+            ans.append({
+                "type":typ if directional else "WATCH",
+                "candidate_type":typ,
+                "label":label,
+                "state":state,
+                "price":p["level"],
+                "date":t["date"] if t else None,
+                "window_start":t.get("window_start") if t else None,
+                "window_end":t.get("window_end") if t else None,
+                "strength":decision,
+                "decision_score":decision,
+                "geometry_strength":geometry,
+                "price_strength":p["strength"],
+                "time_strength":t["strength"] if t else None,
+                "method_evidence":me,
+                "validated_methods":validated_methods,
+                "methods":methods,
+                "color":strength_color(decision) if directional else "#64748b",
+                "level_count":p.get("count",1),
+                "distance_pct":p.get("distance_pct"),
+                "anchor_kinds":p.get("anchor_kinds",[]),
+                "gate_reason":reason,
+            })
         return ans
+
     return make(ress,top_times,"TOP"),make(sups,low_times,"LOW"),top_times,low_times
 
-def _decision_summary(last,ns,nr,next_times,backtest,anchor_strength):
+def _watch_windows(tc,method_stats,limit=4):
+    """Time clusters are always safe to show as watch windows, without directional claims."""
+    today=date.today();end=today+timedelta(days=FINAL_TIME_HORIZON_DAYS)
+    xs=[x for x in tc if today<=x["date"]<=end]
+    ranked=[]
+    for x in xs:
+        me,valid=_method_evidence(x.get("methods") or [],method_stats)
+        score=.65*float(x.get("strength",0))+.35*me
+        y=dict(x)
+        y["method_evidence"]=round(me,1)
+        y["validated_methods"]=valid
+        y["watch_score"]=int(round(max(0,min(100,score))))
+        y["window_start"]=x["date"]-timedelta(days=FINAL_TIME_WINDOW_DAYS)
+        y["window_end"]=x["date"]+timedelta(days=FINAL_TIME_WINDOW_DAYS)
+        ranked.append(y)
+    ranked.sort(key=lambda x:(-x["watch_score"],x["date"]))
+    picked=[]
+    for x in ranked:
+        if any(abs((x["date"]-q["date"]).days)<FINAL_TIME_MIN_SEPARATION_DAYS for q in picked):
+            continue
+        picked.append(x)
+        if len(picked)>=limit:break
+    return sorted(picked,key=lambda x:x["date"])
+
+def _decision_summary(last,ns,nr,watch_windows,backtest,anchor_strength,directional_count):
     sup_dist=abs(100*(last/ns["level"]-1)) if ns and ns.get("level") else None
     res_dist=abs(100*(nr["level"]/last-1)) if nr and nr.get("level") else None
     if sup_dist is not None and res_dist is not None:
@@ -1013,7 +1191,27 @@ def _decision_summary(last,ns,nr,next_times,backtest,anchor_strength):
     elif nr:zone="أقرب لمقاومة رئيسية";position=None
     elif ns:zone="أقرب لدعم رئيسي";position=None
     else:zone="لا توجد مستويات رئيسية كافية";position=None
-    return {"zone":zone,"position_pct":round(position,1) if position is not None else None,"support_distance_pct":round(sup_dist,2) if sup_dist is not None else None,"resistance_distance_pct":round(res_dist,2) if res_dist is not None else None,"next_window":next_times[0] if next_times else None,"backtest_reliability":backtest.get("reliability_score"),"anchor_strength":anchor_strength}
+
+    if directional_count>0 and backtest.get("direction_ready"):
+        regime="DIRECTIONAL"
+        message="يوجد توقع اتجاهي اجتاز بوابة التحقق التاريخي."
+    else:
+        regime="WATCH_ONLY"
+        message="جان غير موثوق اتجاهيًا على هذا السهم حاليًا؛ استخدمي النوافذ الزمنية للمراقبة فقط."
+
+    return {
+        "zone":zone,
+        "position_pct":round(position,1) if position is not None else None,
+        "support_distance_pct":round(sup_dist,2) if sup_dist is not None else None,
+        "resistance_distance_pct":round(res_dist,2) if res_dist is not None else None,
+        "next_window":watch_windows[0] if watch_windows else None,
+        "backtest_reliability":backtest.get("gate_reliability"),
+        "anchor_strength":anchor_strength,
+        "regime":regime,
+        "message":message,
+        "direction_ready":bool(backtest.get("direction_ready")),
+        "gate_reason":backtest.get("gate_reason"),
+    }
 
 def build_method_rows(last,pc,tc):
     methods=[
@@ -1071,26 +1269,68 @@ def analyze_symbol(DB,symbol,limit=900):
     ti+=_tag_times(_master_144_dates(low["date"]),"L")+_tag_times(_mikula_dates(low["date"]),"L")
     ti+=_tag_times(_repeat_square_dates(high["date"],high["price"],"Gann Square High"),"H")
     ti+=_tag_times(_master_144_dates(high["date"]),"H")+_tag_times(_mikula_dates(high["date"]),"H")
-    if rng and rng["range"]>0:ti+=_tag_times(_repeat_square_dates(rng["anchor_date"],rng["range"],"Gann Square Range"),"RANGE")
+    if rng and rng["range"]>0:
+        ti+=_tag_times(_repeat_square_dates(rng["anchor_date"],rng["range"],"Gann Square Range"),"RANGE")
     tc=cluster_time_dates(ti)
 
+    # Walk-forward/as-of historical validation first.
     previous_tops,previous_lows=_historical_expected_turns(df,historical_market_pivots,df.iloc[0]["d"],wing=7)
     backtest=_backtest_stats(previous_tops,previous_lows)
+    method_stats=_method_validation(previous_tops,previous_lows)
     anchor_strength=_anchor_strength(market,low,high)
 
-    tops,lows,top_times,low_times=_pair_turns(pc,tc,last,atr,anchor_strength,backtest)
-    all_final_times=sorted({x["date"]:x for x in top_times+low_times}.values(),key=lambda x:x["date"])
-    next_times=all_final_times[:2]
+    # Future candidates. Direction is allowed only if historical validation passes.
+    tops,lows,top_times,low_times=_pair_turns(pc,tc,last,atr,anchor_strength,backtest,method_stats)
+    watch_windows=_watch_windows(tc,method_stats,limit=4)
 
     main_sups=select_main_price_levels(pc,last,"support",limit=2,atr=atr)
     main_ress=select_main_price_levels(pc,last,"resistance",limit=2,atr=atr)
     ns=main_sups[0] if main_sups else None;nr=main_ress[0] if main_ress else None
-    decision_summary=_decision_summary(last,ns,nr,next_times,backtest,anchor_strength)
-    scores=[x["decision_score"] for x in tops+lows]
-    overall=max(scores) if scores else int(round(anchor_strength))
+
+    directional=[x for x in tops+lows if x.get("state")=="DIRECTIONAL"]
+    decision_summary=_decision_summary(last,ns,nr,watch_windows,backtest,anchor_strength,len(directional))
+    overall=max([x["decision_score"] for x in directional],default=int(round(anchor_strength)))
+    next_times=watch_windows[:2]
+
+    method_rows_final=[]
+    for name,st in sorted(method_stats.items(),key=lambda kv:(-kv[1]["effective_reliability"],-kv[1]["samples"],kv[0])):
+        method_rows_final.append({
+            "name":name,
+            "samples":st["samples"],
+            "hit_rate":st["hit_rate"],
+            "useful_rate":st["useful_rate"],
+            "reliability":st["effective_reliability"],
+            "validated":st["validated"],
+        })
 
     candles=df.tail(220)
-    return {"engine_version":GANN_ENGINE_VERSION,"symbol":symbol.upper(),"market":market,"anchor_source":anchor_source,"market_pivots":market_pivots,"stock_market_anchors":historical_market_pivots[-6:] if market=="EGX" else [],"last_price":round(last,4),"last_date":df.iloc[-1]["d"],"atr14":round(atr,4),"latest_low":low,"latest_high":high,"range":rng,"price_clusters":pc,"time_clusters":tc,"next_times":next_times,"top_times":top_times,"low_times":low_times,"nearest_support":ns,"nearest_resistance":nr,"tops":tops,"lows":lows,"previous_tops":previous_tops,"previous_lows":previous_lows,"backtest":backtest,"anchor_strength":anchor_strength,"decision_summary":decision_summary,"overall_strength":overall,"overall_color":strength_color(overall),"chart":{"dates":[d.isoformat() for d in candles["d"]],"open":[round(float(x),4) for x in candles["o"]],"high":[round(float(x),4) for x in candles["h"]],"low":[round(float(x),4) for x in candles["l"]],"close":[round(float(x),4) for x in candles["c"]]},"method_rows":build_method_rows(last,pc,tc)}
+    return {
+        "engine_version":GANN_ENGINE_VERSION,
+        "symbol":symbol.upper(),"market":market,"anchor_source":anchor_source,
+        "market_pivots":market_pivots,
+        "stock_market_anchors":historical_market_pivots[-6:] if market=="EGX" else [],
+        "last_price":round(last,4),"last_date":df.iloc[-1]["d"],"atr14":round(atr,4),
+        "latest_low":low,"latest_high":high,"range":rng,
+        "price_clusters":pc,"time_clusters":tc,
+        "next_times":next_times,"watch_windows":watch_windows,
+        "top_times":top_times,"low_times":low_times,
+        "nearest_support":ns,"nearest_resistance":nr,
+        "tops":tops,"lows":lows,
+        "directional_signals":directional,
+        "previous_tops":previous_tops,"previous_lows":previous_lows,
+        "backtest":backtest,"method_validation":method_stats,"method_validation_rows":method_rows_final,
+        "anchor_strength":anchor_strength,
+        "decision_summary":decision_summary,
+        "overall_strength":overall,"overall_color":strength_color(overall),
+        "chart":{
+            "dates":[d.isoformat() for d in candles["d"]],
+            "open":[round(float(x),4) for x in candles["o"]],
+            "high":[round(float(x),4) for x in candles["h"]],
+            "low":[round(float(x),4) for x in candles["l"]],
+            "close":[round(float(x),4) for x in candles["c"]]
+        },
+        "method_rows":build_method_rows(last,pc,tc),
+    }
 
 def market_page(DB,query="",page=1,per_page=100,market="US"):
     market=normalize_market(market)
@@ -1099,7 +1339,7 @@ def market_page(DB,query="",page=1,per_page=100,market="US"):
         try:
             a=analyze_symbol(DB,sym,420)
             if not a: continue
-            rows.append({"symbol":sym,"last_price":a["last_price"],"last_date":a["last_date"],"support":a["nearest_support"],"resistance":a["nearest_resistance"],"next_time":a["next_times"][0] if a["next_times"] else None,"top1":a["tops"][0] if a["tops"] else None,"top2":a["tops"][1] if len(a["tops"])>1 else None,"low1":a["lows"][0] if a["lows"] else None,"low2":a["lows"][1] if len(a["lows"])>1 else None,"strength":a["overall_strength"],"color":a["overall_color"],"zone":a["decision_summary"]["zone"],"backtest":a["backtest"]})
+            rows.append({"symbol":sym,"last_price":a["last_price"],"last_date":a["last_date"],"support":a["nearest_support"],"resistance":a["nearest_resistance"],"next_time":a["next_times"][0] if a["next_times"] else None,"top1":a["tops"][0] if a["tops"] else None,"top2":a["tops"][1] if len(a["tops"])>1 else None,"low1":a["lows"][0] if a["lows"] else None,"low2":a["lows"][1] if len(a["lows"])>1 else None,"strength":a["overall_strength"],"color":a["overall_color"],"zone":a["decision_summary"]["zone"],"regime":a["decision_summary"]["regime"],"backtest":a["backtest"]})
         except Exception as e:
             rows.append({"symbol":sym,"error":str(e)[:180],"strength":0,"color":"#64748b"})
     return {"rows":rows,"total":total,"page":page,"pages":pages,"query":query or "","market":market}
@@ -1110,5 +1350,5 @@ def source_methodology():
       {"name":"Gann Master Square of 144","rule":"نقاط وتقاطع 36،45،48،54،63،72،81،90،96،108،117،126،135،144.","source":"W.D. Gann Master Mathematical Price, Time and Trend Calculator."},
       {"name":"Bowden","rule":"Squaring a Low / High / Range مع calendar days وtrading days وضبط 45° كـ1×1 حقيقي.","source":"David E. Bowden — Squaring Time and Price."},
       {"name":"Mikula Square of Nine","rule":"(sqrt(P) ± angle/180)^2 ومستويات Cardinal/Fixed Cross وتواريخ Cell counts.","source":"Patrick Mikula — The Definitive Guide to Forecasting Using W.D. Gann's Square of Nine."},
-      {"name":"Final Decision Layer","rule":"يجمع الالتقاء الهندسي + ثبات الـAnchor + Backtest تاريخي as-of. درجة القرار ليست احتمال نجاح ولا توصية شراء/بيع.","source":"طبقة قرار داخلية V5.0 فوق طرق جان/Mikula."}
+      {"name":"Final Validated Decision Layer","rule":"Walk-forward/as-of validation لكل سهم ولكل طريقة، بوابة موثوقية تمنع الاتجاه عند ضعف الاختبار، وفصل النافذة الزمنية عن TOP/LOW.","source":"طبقة قرار داخلية V6.0 فوق طرق جان/Mikula؛ الدرجة ليست probability ولا توصية تداول."}
     ]
