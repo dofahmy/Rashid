@@ -18,10 +18,15 @@ EGX_INDEX_SYMBOL="^CASE30"
 EGX_MARKET_WING=10               # index pivot confirmation / local extremum wing
 EGX_MARKET_EVENT_WINDOW=3        # stocks may bottom/top within ±3 sessions of index
 EGX_MARKET_LOCAL_WINDOW=12       # local stock extremum reference window
-EGX_MARKET_MIN_SCORE=70.0        # accept only market-wide pivots
-EGX_MARKET_MIN_SWING_PCT=7.0     # minimum index swing between accepted opposite pivots
-EGX_MARKET_MIN_SEPARATION=25     # sessions between same-type major pivots
+EGX_MARKET_MIN_SCORE=90.0        # accept only market-wide pivots
+EGX_MARKET_MIN_SWING_PCT=15.0     # minimum index swing between accepted opposite pivots
+EGX_MARKET_MIN_SEPARATION=45     # sessions between same-type major pivots
 EGX_LEADER_COUNT=15
+EGX_MARKET_FOLLOW_WINDOW=40       # sessions after candidate used to confirm follow-through
+EGX_MARKET_FOLLOW_MIN_PCT=10.0   # required move away from the pivot
+EGX_MARKET_LOW_MIN_BREADTH=55.0  # principal market lows should be broad
+EGX_MARKET_HIGH_MIN_BREADTH=30.0 # highs can be narrower than panic/capitulation lows
+EGX_MARKET_HISTORY_DATES=2500     # roughly full 2019+ history
 
 # Major/representative listed banks. Only symbols available in the database count.
 EGX_BANK_SYMBOLS={
@@ -95,7 +100,7 @@ def _build_synthetic_egx30(panel,leader_count=30):
     return agg[["d","o","h","l","c","v"]],leaders
 
 
-def _load_egx_panel(DB,limit_dates=900):
+def _load_egx_panel(DB,limit_dates=EGX_MARKET_HISTORY_DATES):
     """Load official EGX30 if available; otherwise synthesize a market proxy.
 
     Returns (index_df, stock_panel, source_label).
@@ -202,7 +207,8 @@ def _confirmation_rate(panel,symbols,event_date,kind):
 
 def _major_market_pivots_uncached(DB):
     idx,panel,index_source=_load_egx_panel(DB)
-    if idx.empty or panel.empty:return []
+    if idx.empty or panel.empty:
+        return []
 
     candidates=_index_candidate_pivots(idx)
     all_symbols=sorted(panel["symbol"].dropna().unique().tolist())
@@ -211,15 +217,25 @@ def _major_market_pivots_uncached(DB):
     for c in candidates:
         i=c["i"];event_date=c["date"];kind=c["kind"]
 
-        # Index component: larger swing away from the opposite extreme gets more credit.
-        back=idx.iloc[max(0,i-60):i+1]
+        # Backward swing context.
+        back=idx.iloc[max(0,i-90):i+1]
         if kind=="L":
             opp=float(back["h"].max()) if not back.empty else c["price"]
-            index_swing=max(0.0,(opp/c["price"]-1)*100) if c["price"] else 0.0
+            prior_swing=max(0.0,(opp/c["price"]-1)*100) if c["price"] else 0.0
         else:
             opp=float(back["l"].min()) if not back.empty else c["price"]
-            index_swing=max(0.0,(c["price"]/opp-1)*100) if opp else 0.0
-        index_component=40.0*min(1.0,max(0.55,index_swing/12.0))
+            prior_swing=max(0.0,(c["price"]/opp-1)*100) if opp else 0.0
+
+        # Follow-through: a major pivot must launch a meaningful move.
+        fwd=idx.iloc[i+1:min(len(idx),i+1+EGX_MARKET_FOLLOW_WINDOW)]
+        if fwd.empty:
+            continue
+        if kind=="L":
+            fwd_ext=float(fwd["h"].max())
+            follow_pct=max(0.0,(fwd_ext/c["price"]-1)*100) if c["price"] else 0.0
+        else:
+            fwd_ext=float(fwd["l"].min())
+            follow_pct=max(0.0,(1-fwd_ext/c["price"])*100) if c["price"] else 0.0
 
         breadth_rate,breadth_good,breadth_n=_confirmation_rate(panel,all_symbols,event_date,kind)
         leaders=_leaders_for_date(panel,event_date)
@@ -227,14 +243,15 @@ def _major_market_pivots_uncached(DB):
         banks=sorted(EGX_BANK_SYMBOLS.intersection(all_symbols))
         bank_rate,bank_good,bank_n=_confirmation_rate(panel,banks,event_date,kind)
 
-        # Saturation thresholds deliberately reward a genuinely broad turn rather
-        # than requiring every listed share to pivot on the same session.
-        breadth_component=30.0*min(1.0,breadth_rate/0.35)
-        leader_component=20.0*min(1.0,leader_rate/0.50)
+        # Stronger score: index + breadth + leaders + banks + follow-through.
+        # Total observable points = 100.
+        index_component=30.0*min(1.0,max(0.0,prior_swing/15.0))
+        breadth_component=30.0*min(1.0,breadth_rate/(0.60 if kind=="L" else 0.40))
+        leader_component=15.0*min(1.0,leader_rate/0.50)
         bank_component=10.0*min(1.0,bank_rate/0.50) if bank_n else 0.0
+        follow_component=15.0*min(1.0,follow_pct/15.0)
 
-        score=index_component+breadth_component+leader_component+bank_component
-        # If no bank history exists, renormalize the observable 90 points to 100.
+        score=index_component+breadth_component+leader_component+bank_component+follow_component
         if bank_n==0:
             score=score/90.0*100.0
 
@@ -242,7 +259,8 @@ def _major_market_pivots_uncached(DB):
         raw.append({
             **c,
             "score":round(score,1),
-            "index_swing_pct":round(index_swing,2),
+            "prior_swing_pct":round(prior_swing,2),
+            "follow_pct":round(follow_pct,2),
             "breadth_pct":round(100*breadth_rate,1),
             "breadth_count":breadth_good,"breadth_total":breadth_n,
             "leaders_pct":round(100*leader_rate,1),
@@ -253,38 +271,81 @@ def _major_market_pivots_uncached(DB):
             "index_source":index_source,
         })
 
-    strong=[x for x in raw if x["score"]>=EGX_MARKET_MIN_SCORE]
-    if not strong:return []
+    # Hard filters for principal market pivots.
+    strong=[]
+    for x in raw:
+        if x["score"]<EGX_MARKET_MIN_SCORE:
+            continue
+        if x["follow_pct"]<EGX_MARKET_FOLLOW_MIN_PCT:
+            continue
+        if x["kind"]=="L" and x["breadth_pct"]<EGX_MARKET_LOW_MIN_BREADTH:
+            continue
+        if x["kind"]=="H" and x["breadth_pct"]<EGX_MARKET_HIGH_MIN_BREADTH:
+            continue
+        strong.append(x)
 
-    # First collapse same-type pivots that are close in time.
+    if not strong:
+        return []
+
+    # Collapse same-type nearby pivots. Prefer the more extreme turning point,
+    # but only if its market score is not materially weaker.
     collapsed=[]
     for p in strong:
         if (collapsed and p["kind"]==collapsed[-1]["kind"]
             and p["i"]-collapsed[-1]["i"]<EGX_MARKET_MIN_SEPARATION):
             old=collapsed[-1]
-            more_extreme=(p["kind"]=="L" and p["price"]<old["price"]) or (p["kind"]=="H" and p["price"]>old["price"])
-            if p["score"]>old["score"]+4 or (more_extreme and p["score"]>=old["score"]-2):
+            more_extreme=(p["kind"]=="L" and p["price"]<old["price"]) or \
+                         (p["kind"]=="H" and p["price"]>old["price"])
+            if (p["score"]>old["score"]+2) or (more_extreme and p["score"]>=old["score"]-3):
                 collapsed[-1]=p
         else:
             collapsed.append(p)
 
-    # Enforce alternating major turns and a meaningful index swing.
+    # Enforce alternating LOW/HIGH and require a >=15% market swing between
+    # accepted opposite pivots. If two candidates of the same type occur,
+    # retain only the stronger/more extreme one.
     accepted=[]
     for p in collapsed:
         if not accepted:
-            accepted.append(p);continue
+            accepted.append(p)
+            continue
+
         prev=accepted[-1]
         if p["kind"]==prev["kind"]:
             better=(p["score"]>prev["score"]) or (
                 p["kind"]=="L" and p["price"]<prev["price"]) or (
                 p["kind"]=="H" and p["price"]>prev["price"])
-            if better:accepted[-1]=p
+            if better:
+                accepted[-1]=p
             continue
+
         swing=abs(p["price"]/prev["price"]-1)*100 if prev["price"] else 0.0
         if swing>=EGX_MARKET_MIN_SWING_PCT:
+            p=dict(p)
+            p["swing_from_prev_pct"]=round(swing,2)
             accepted.append(p)
 
-    return accepted[-12:]
+    # Second pass: make sure every interior point is meaningful relative to
+    # both neighbouring accepted pivots. This removes small zigzags that survive
+    # the first pass because of isolated high scores.
+    changed=True
+    while changed and len(accepted)>=3:
+        changed=False
+        new=[accepted[0]]
+        for j in range(1,len(accepted)-1):
+            a=accepted[j-1]; b=accepted[j]; c=accepted[j+1]
+            swing1=abs(b["price"]/a["price"]-1)*100 if a["price"] else 0
+            swing2=abs(c["price"]/b["price"]-1)*100 if b["price"] else 0
+            if min(swing1,swing2)<EGX_MARKET_MIN_SWING_PCT:
+                # Remove the weaker of the interior zigzag points by skipping b.
+                changed=True
+                continue
+            new.append(b)
+        new.append(accepted[-1])
+        accepted=new
+
+    # Keep a concise recent history for the Gann engine.
+    return accepted[-8:]
 
 def get_egx_market_pivots(DB,cache_seconds=1800):
     """Cached major EGX turns based on index + breadth + leaders + banks."""
@@ -786,11 +847,20 @@ def analyze_symbol(DB,symbol,limit=900):
     if market=="EGX":
         market_pivots=get_egx_market_pivots(DB)
         if len(market_pivots)<2:
-            raise RuntimeError("لا توجد قمم/قيعان سوق رئيسية كافية. حدّثي بيانات السوق المصري أولاً.")
-        piv=_map_market_pivots_to_stock(df,market_pivots)
-        if len(piv)<2:
+            raise RuntimeError("لا توجد قمم/قيعان سوق رئيسية كافية بعد الفلترة المشددة.")
+        all_market_stock_pivots=_map_market_pivots_to_stock(df,market_pivots)
+        if len(all_market_stock_pivots)<2:
             raise RuntimeError("لا توجد بيانات كافية للسهم حول مرتكزات السوق الرئيسية.")
-        anchor_source="EGX_MARKET"
+
+        # Forward Gann projections use only the latest confirmed principal LOW
+        # and latest confirmed principal HIGH. Historical validation still uses
+        # the full accepted major-pivot sequence.
+        last_low=next((x for x in reversed(all_market_stock_pivots) if x["kind"]=="L"),None)
+        last_high=next((x for x in reversed(all_market_stock_pivots) if x["kind"]=="H"),None)
+        piv=[x for x in [last_low,last_high] if x is not None]
+        piv.sort(key=lambda x:x["i"])
+        historical_market_pivots=all_market_stock_pivots
+        anchor_source="EGX_MARKET_MAJOR"
     else:
         piv=detect_pivots(df)
         anchor_source="LOCAL"
@@ -813,9 +883,11 @@ def analyze_symbol(DB,symbol,limit=900):
     strengths=[x["strength"] for x in tops+lows]+[x["strength"] for x in next_times[:2]]
     candles=df.tail(220)
     chart_start=candles.iloc[0]["d"] if len(candles) else df.iloc[0]["d"]
-    previous_tops,previous_lows=_historical_expected_turns(df,piv,chart_start,wing=7)
+    hist_pivots=historical_market_pivots if market=="EGX" else piv
+    previous_tops,previous_lows=_historical_expected_turns(df,hist_pivots,chart_start,wing=7)
     return {"symbol":symbol.upper(),"market":market,"anchor_source":anchor_source,
-            "market_pivots":market_pivots,"stock_market_anchors":piv[-6:] if market=="EGX" else [],
+            "market_pivots":market_pivots,
+            "stock_market_anchors":historical_market_pivots[-6:] if market=="EGX" else [],
             "last_price":round(last,4),"last_date":df.iloc[-1]["d"],"atr14":round(atr,4),"latest_low":low,"latest_high":high,"range":rng,"price_clusters":pc,"time_clusters":tc,"next_times":next_times,"nearest_support":ns,"nearest_resistance":nr,"tops":tops,"lows":lows,"previous_tops":previous_tops,"previous_lows":previous_lows,"overall_strength":max(strengths) if strengths else 0,"overall_color":strength_color(max(strengths) if strengths else 0),"chart":{"dates":[d.isoformat() for d in candles["d"]],"open":[round(float(x),4) for x in candles["o"]],"high":[round(float(x),4) for x in candles["h"]],"low":[round(float(x),4) for x in candles["l"]],"close":[round(float(x),4) for x in candles["c"]]},"method_rows":build_method_rows(last,pc,tc)}
 
 def market_page(DB,query="",page=1,per_page=100,market="US"):
