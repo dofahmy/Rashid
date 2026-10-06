@@ -1,24 +1,57 @@
 {% extends 'base.html' %}{% block content %}
 <style>
 .gann-badge{display:inline-block;padding:4px 9px;border-radius:999px;color:#fff;font-weight:700}
+.market-tabs{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}
+.market-tab{padding:10px 16px;border:1px solid #cbd5e1;border-radius:9px;text-decoration:none;background:#fff;color:#0f172a;font-weight:700}
+.market-tab.active{background:#0f172a;color:#fff;border-color:#0f172a}
+.market-label{display:inline-block;padding:4px 8px;border-radius:999px;background:#eef2ff;font-size:12px;font-weight:700}
 </style>
-<div class="actions"><h1 style="margin:0">تحليل جان</h1><a class="button secondary" href="{{url_for('stocks')}}">متابعة الأسهم</a></div>
-<div class="panel">
-<h2>بحث سهم أو السوق كله</h2>
-<form class="filters" method="get">
-<input name="symbol" placeholder="رمز السهم أو اتركيه فارغًا للسوق كله" value="{{query}}">
-<select name="per_page">{% for n in [50,100,150,200] %}<option value="{{n}}" {{'selected' if per_page==n else ''}}>{{n}} سهم/صفحة</option>{% endfor %}</select>
-<button>تحليل</button>
-</form>
-<p class="muted">القوة % درجة التقاء هندسية بين طرق جان/Mikula وليست احتمال نجاح تاريخي.</p>
+
+<div class="actions">
+  <div>
+    <h1 style="margin:0">تحليل جان</h1>
+    <div class="muted">
+      {% if market=='EGX' %}السوق المصري 🇪🇬{% elif market=='US' %}السوق الأمريكي 🇺🇸{% else %}كل الأسواق{% endif %}
+      · {{total}} سهم
+    </div>
+  </div>
+  <a class="button secondary" href="{{url_for('stocks')}}">متابعة الأسهم</a>
 </div>
+
+<div class="panel">
+  <h2>اختاري السوق</h2>
+  <div class="market-tabs">
+    <a class="market-tab {{'active' if market=='EGX' else ''}}" href="{{url_for('gann.gann_analysis',market='EGX',per_page=per_page)}}">🇪🇬 مصر</a>
+    <a class="market-tab {{'active' if market=='US' else ''}}" href="{{url_for('gann.gann_analysis',market='US',per_page=per_page)}}">🇺🇸 أمريكا</a>
+    <a class="market-tab {{'active' if market=='ALL' else ''}}" href="{{url_for('gann.gann_analysis',market='ALL',per_page=per_page)}}">كل الأسواق</a>
+  </div>
+
+  <form class="filters" method="get">
+    <input type="hidden" name="market" value="{{market}}">
+    <input name="symbol" placeholder="{% if market=='EGX' %}مثال: COMI.CA{% elif market=='US' %}مثال: AAPL{% else %}رمز السهم{% endif %}" value="{{query}}">
+    <select name="per_page">
+      {% for n in [50,100,150,200] %}
+      <option value="{{n}}" {{'selected' if per_page==n else ''}}>{{n}} سهم/صفحة</option>
+      {% endfor %}
+    </select>
+    <button>تحليل</button>
+  </form>
+  <p class="muted">القوة % درجة التقاء هندسية بين طرق جان/Mikula وليست احتمال نجاح تاريخي.</p>
+</div>
+
 <div class="panel tablewrap">
 <table>
-<thead><tr><th>السهم</th><th>آخر سعر</th><th>الدعم</th><th>المقاومة</th><th>النافذة القادمة</th><th>القمة 1</th><th>القمة 2</th><th>القاع 1</th><th>القاع 2</th><th>القوة</th></tr></thead>
+<thead>
+<tr><th>السهم</th><th>السوق</th><th>آخر سعر</th><th>الدعم</th><th>المقاومة</th><th>النافذة القادمة</th><th>القمة 1</th><th>القمة 2</th><th>القاع 1</th><th>القاع 2</th><th>القوة</th></tr>
+</thead>
 <tbody>
 {% for r in rows %}
 <tr>
-<td><a href="{{url_for('gann.gann_symbol',symbol=r.symbol)}}"><strong>{{r.symbol}}</strong></a>{% if r.error %}<div class="muted">{{r.error}}</div>{% endif %}</td>
+<td>
+  <a href="{{url_for('gann.gann_symbol',symbol=r.symbol,market=market)}}"><strong>{{r.symbol}}</strong></a>
+  {% if r.error %}<div class="muted">{{r.error}}</div>{% endif %}
+</td>
+<td><span class="market-label">{{'مصر' if r.symbol.endswith('.CA') else 'أمريكا'}}</span></td>
 <td>{{'%.2f'|format(r.last_price) if r.last_price is defined else '—'}}</td>
 <td>{% if r.support %}{{'%.2f'|format(r.support.level)}} · {{r.support.strength}}%{% else %}—{% endif %}</td>
 <td>{% if r.resistance %}{{'%.2f'|format(r.resistance.level)}} · {{r.resistance.strength}}%{% else %}—{% endif %}</td>
@@ -29,16 +62,26 @@
 <td>{% if r.low2 %}{{'%.2f'|format(r.low2.price)}}<div class="muted">{{r.low2.date}}</div>{% else %}—{% endif %}</td>
 <td><span class="gann-badge" style="background:{{r.color}}">{{r.strength}}%</span></td>
 </tr>
-{% else %}<tr><td colspan="10">لا توجد بيانات Daily مطابقة.</td></tr>{% endfor %}
+{% else %}
+<tr><td colspan="11">لا توجد بيانات Daily مطابقة لهذا السوق/البحث.</td></tr>
+{% endfor %}
 </tbody>
 </table>
+
 <div class="pagination">
-{% if page>1 %}<a href="{{url_for('gann.gann_analysis',symbol=query,page=page-1,per_page=per_page)}}">السابق</a>{% endif %}
+{% if page>1 %}
+<a href="{{url_for('gann.gann_analysis',market=market,symbol=query,page=page-1,per_page=per_page)}}">السابق</a>
+{% endif %}
 <span>{{page}} / {{pages}} · {{total}} سهم</span>
-{% if page<pages %}<a href="{{url_for('gann.gann_analysis',symbol=query,page=page+1,per_page=per_page)}}">التالي</a>{% endif %}
+{% if page<pages %}
+<a href="{{url_for('gann.gann_analysis',market=market,symbol=query,page=page+1,per_page=per_page)}}">التالي</a>
+{% endif %}
 </div>
 </div>
+
 <div class="panel"><h2>الطرق المستخدمة</h2>
-{% for m in methodology %}<p><strong>{{m.name}}</strong> — {{m.rule}}<br><span class="muted">{{m.source}}</span></p>{% endfor %}
+{% for m in methodology %}
+<p><strong>{{m.name}}</strong> — {{m.rule}}<br><span class="muted">{{m.source}}</span></p>
+{% endfor %}
 </div>
 {% endblock %}

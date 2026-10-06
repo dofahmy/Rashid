@@ -9,7 +9,7 @@
 <div class="actions">
 <div><h1 style="margin-bottom:4px">تحليل جان · {{a.symbol}}</h1>
 <div class="muted">آخر سعر {{'%.2f'|format(a.last_price)}} · {{a.last_date}} · ATR14 {{'%.2f'|format(a.atr14)}}</div></div>
-<a class="button secondary" href="{{url_for('gann.gann_analysis')}}">السوق كله</a>
+<a class="button secondary" href="{{url_for('gann.gann_analysis',market=request.args.get('market','US'))}}">رجوع للسوق</a>
 </div>
 
 <div class="panel">
