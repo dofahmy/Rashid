@@ -1,52 +1,65 @@
 {% extends 'base.html' %}{% block content %}
-<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
-<style>.gann-cards{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}.gann-turn{border-right:6px solid var(--c);padding:12px}.gann-badge{display:inline-block;padding:4px 9px;border-radius:999px;color:#fff;font-weight:700}@media(max-width:900px){.gann-cards{grid-template-columns:1fr 1fr}}</style>
-<div class="actions"><div><h1 style="margin-bottom:4px">تحليل جان · {{a.symbol}}</h1><div class="muted">آخر سعر {{'%.2f'|format(a.last_price)}} · {{a.last_date}} · ATR14 {{'%.2f'|format(a.atr14)}}</div></div><a class="button secondary" href="{{url_for('gann_analysis')}}">السوق كله</a></div>
-<div class="panel"><div class="gann-cards">{% for x in a.tops %}<div class="gann-turn" style="--c:{{x.color}}"><strong>قمة متوقعة {{loop.index}}</strong><div class="metric">{{'%.2f'|format(x.price)}}</div><div>{{x.date or '—'}}</div><span class="gann-badge" style="background:{{x.color}}">{{x.strength}}%</span><div class="muted">{{x.methods|join(' + ')}}</div></div>{% endfor %}{% for x in a.lows %}<div class="gann-turn" style="--c:{{x.color}}"><strong>قاع متوقع {{loop.index}}</strong><div class="metric">{{'%.2f'|format(x.price)}}</div><div>{{x.date or '—'}}</div><span class="gann-badge" style="background:{{x.color}}">{{x.strength}}%</span><div class="muted">{{x.methods|join(' + ')}}</div></div>{% endfor %}</div><p class="muted">أحمر ≥90، برتقالي ≥80، ذهبي ≥70، أزرق ≥60. الدرجة قوة التقاء هندسي وليست probability.</p></div>
+<style>
+.gann-cards{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+.gann-turn{border-right:6px solid var(--c);padding:12px}
+.gann-badge{display:inline-block;padding:4px 9px;border-radius:999px;color:#fff;font-weight:700}
+@media(max-width:900px){.gann-cards{grid-template-columns:1fr 1fr}}
+</style>
+
+<div class="actions">
+<div><h1 style="margin-bottom:4px">تحليل جان · {{a.symbol}}</h1>
+<div class="muted">آخر سعر {{'%.2f'|format(a.last_price)}} · {{a.last_date}} · ATR14 {{'%.2f'|format(a.atr14)}}</div></div>
+<a class="button secondary" href="{{url_for('gann.gann_analysis')}}">السوق كله</a>
+</div>
 
 <div class="panel">
-<h2>التوقعات السابقة على نفس الشارت</h2>
+<h2>التوقعات القادمة</h2>
 <div class="gann-cards">
-{% for x in a.previous_tops %}
-<div class="gann-turn" style="--c:{{x.color}}">
-<strong>قمة متوقعة سابقة {{loop.index}}</strong>
-<div class="metric">{{'%.2f'|format(x.price)}}</div>
-<div>{{x.date}}</div>
-<span class="gann-badge" style="background:{{x.color}}">{{x.strength}}%</span>
-<div class="muted">من Pivot {{x.anchor_date}} @ {{'%.2f'|format(x.anchor_price)}}</div>
-<div class="muted">{{x.methods|join(' + ')}}</div>
-</div>
+{% for x in a.tops %}
+<div class="gann-turn" style="--c:{{x.color}}"><strong>قمة متوقعة {{loop.index}}</strong><div class="metric">{{'%.2f'|format(x.price)}}</div><div>{{x.date or '—'}}</div><span class="gann-badge" style="background:{{x.color}}">{{x.strength}}%</span><div class="muted">{{x.methods|join(' + ')}}</div></div>
 {% endfor %}
-{% for x in a.previous_lows %}
-<div class="gann-turn" style="--c:{{x.color}}">
-<strong>قاع متوقع سابق {{loop.index}}</strong>
-<div class="metric">{{'%.2f'|format(x.price)}}</div>
-<div>{{x.date}}</div>
-<span class="gann-badge" style="background:{{x.color}}">{{x.strength}}%</span>
-<div class="muted">من Pivot {{x.anchor_date}} @ {{'%.2f'|format(x.anchor_price)}}</div>
-<div class="muted">{{x.methods|join(' + ')}}</div>
-</div>
+{% for x in a.lows %}
+<div class="gann-turn" style="--c:{{x.color}}"><strong>قاع متوقع {{loop.index}}</strong><div class="metric">{{'%.2f'|format(x.price)}}</div><div>{{x.date or '—'}}</div><span class="gann-badge" style="background:{{x.color}}">{{x.strength}}%</span><div class="muted">{{x.methods|join(' + ')}}</div></div>
 {% endfor %}
 </div>
-<p class="muted">هذه علامات Forecast تاريخية محسوبة من Pivot سابق، وليست قممًا/قيعانًا فعلية مأخوذة من المستقبل.</p>
 </div>
 
-<div class="panel"><h2>الشارت والمستويات</h2><div id="gannChart" style="height:620px;width:100%"></div></div>
-<div class="panel tablewrap"><h2>كل طريقة منفردة</h2><table><thead><tr><th>الطريقة</th><th>الوصف</th><th>أقرب دعم</th><th>أقرب مقاومة</th><th>التواريخ القادمة</th><th>القوة</th></tr></thead><tbody>{% for m in a.method_rows %}<tr><td><strong>{{m.method}}</strong></td><td>{{m.description}}</td><td>{% if m.support %}{{'%.2f'|format(m.support.level)}} · {{m.support.strength}}%{% else %}—{% endif %}</td><td>{% if m.resistance %}{{'%.2f'|format(m.resistance.level)}} · {{m.resistance.strength}}%{% else %}—{% endif %}</td><td>{% for t in m.times %}<div>{{t.date}} · {{t.strength}}%</div>{% else %}—{% endfor %}</td><td><span class="gann-badge" style="background:{{m.color}}">{{m.strength}}%</span></td></tr>{% endfor %}</tbody></table></div>
-<div class="panel tablewrap"><h2>المستويات السعرية</h2><table><thead><tr><th>المستوى</th><th>نوعه</th><th>المسافة</th><th>القوة</th><th>الطرق</th></tr></thead><tbody>{% for x in a.price_clusters|sort(attribute='distance_pct') %}<tr><td>{{'%.2f'|format(x.level)}}</td><td>{{'مقاومة/قمة' if x.side=='resistance' else 'دعم/قاع'}}</td><td>{{'%+.2f'|format(x.distance_pct)}}%</td><td>{{x.strength}}%</td><td>{{x.methods|join(' + ')}}<div class="muted">{{x.labels|join(' · ')}}</div></td></tr>{% endfor %}</tbody></table></div>
-<div class="panel tablewrap"><h2>النوافذ الزمنية القادمة</h2><table><thead><tr><th>التاريخ</th><th>القوة</th><th>الطرق</th><th>تفاصيل</th></tr></thead><tbody>{% for x in a.next_times %}<tr><td>{{x.date}}</td><td>{{x.strength}}%</td><td>{{x.methods|join(' + ')}}</td><td>{{x.labels|join(' · ')}}</td></tr>{% else %}<tr><td colspan="4">لا توجد نافذة قريبة.</td></tr>{% endfor %}</tbody></table></div>
-<script>
-const C={{a.chart|tojson}},tops={{a.tops|tojson}},lows={{a.lows|tojson}},times={{a.next_times|tojson}},prevTops={{a.previous_tops|tojson}},prevLows={{a.previous_lows|tojson}};
-const shapes=[],annotations=[];
-function addTurn(x,label){if(!x)return;shapes.push({type:'line',xref:'paper',x0:0,x1:1,yref:'y',y0:x.price,y1:x.price,line:{color:x.color,width:2,dash:'dot'}});if(x.date){shapes.push({type:'line',xref:'x',x0:String(x.date),x1:String(x.date),yref:'paper',y0:0,y1:1,line:{color:x.color,width:1,dash:'dash'}});annotations.push({x:String(x.date),y:x.price,xref:'x',yref:'y',text:label+' '+x.strength+'%',showarrow:true,arrowhead:2,bgcolor:x.color,font:{color:'white'}})}}
-function addHistorical(x,label){
-  if(!x||!x.date)return;
-  shapes.push({type:'line',xref:'x',x0:String(x.date),x1:String(x.date),yref:'paper',y0:0,y1:1,line:{color:x.color,width:1,dash:'dashdot'}});
-  annotations.push({x:String(x.date),y:x.price,xref:'x',yref:'y',text:label+' '+x.strength+'%',showarrow:true,arrowhead:1,bgcolor:'rgba(255,255,255,.88)',bordercolor:x.color,font:{color:x.color}});
-}
-tops.forEach((x,i)=>addTurn(x,'قمة '+(i+1)));lows.forEach((x,i)=>addTurn(x,'قاع '+(i+1)));
-prevTops.forEach((x,i)=>addHistorical(x,'قمة سابقة '+(i+1)));prevLows.forEach((x,i)=>addHistorical(x,'قاع سابق '+(i+1)));
-times.slice(0,4).forEach(t=>shapes.push({type:'line',xref:'x',x0:String(t.date),x1:String(t.date),yref:'paper',y0:0,y1:1,line:{color:'#64748b',width:1,dash:'dot'}}));
-Plotly.newPlot('gannChart',[{type:'candlestick',x:C.dates,open:C.open,high:C.high,low:C.low,close:C.close,name:'{{a.symbol}}'}],{margin:{l:55,r:25,t:20,b:40},dragmode:'pan',showlegend:false,xaxis:{rangeslider:{visible:false}},shapes:shapes,annotations:annotations},{responsive:true,displaylogo:false});
-</script>
+<div class="panel">
+<h2>آخر توقعات سابقة على نفس الشارت</h2>
+<div class="gann-cards">
+{% for x in a.previous_tops %}
+<div class="gann-turn" style="--c:{{x.color}}"><strong>قمة متوقعة سابقة {{loop.index}}</strong><div class="metric">{{'%.2f'|format(x.price)}}</div><div>{{x.date}}</div><span class="gann-badge" style="background:{{x.color}}">{{x.strength}}%</span><div class="muted">Pivot {{x.anchor_date}} @ {{'%.2f'|format(x.anchor_price)}}</div></div>
+{% endfor %}
+{% for x in a.previous_lows %}
+<div class="gann-turn" style="--c:{{x.color}}"><strong>قاع متوقع سابق {{loop.index}}</strong><div class="metric">{{'%.2f'|format(x.price)}}</div><div>{{x.date}}</div><span class="gann-badge" style="background:{{x.color}}">{{x.strength}}%</span><div class="muted">Pivot {{x.anchor_date}} @ {{'%.2f'|format(x.anchor_price)}}</div></div>
+{% endfor %}
+</div>
+<p class="muted">التوقعات السابقة محسوبة من Pivot سابق، وليست القمم والقيعان الفعلية مأخوذة بأثر رجعي.</p>
+</div>
+
+<div class="panel"><h2>الشارت</h2>{{chart_svg}}</div>
+
+<div class="panel tablewrap"><h2>كل طريقة منفردة</h2>
+<table><thead><tr><th>الطريقة</th><th>الوصف</th><th>أقرب دعم</th><th>أقرب مقاومة</th><th>التواريخ القادمة</th><th>القوة</th></tr></thead><tbody>
+{% for m in a.method_rows %}
+<tr><td><strong>{{m.method}}</strong></td><td>{{m.description}}</td>
+<td>{% if m.support %}{{'%.2f'|format(m.support.level)}} · {{m.support.strength}}%{% else %}—{% endif %}</td>
+<td>{% if m.resistance %}{{'%.2f'|format(m.resistance.level)}} · {{m.resistance.strength}}%{% else %}—{% endif %}</td>
+<td>{% for t in m.times %}<div>{{t.date}} · {{t.strength}}%</div>{% else %}—{% endfor %}</td>
+<td><span class="gann-badge" style="background:{{m.color}}">{{m.strength}}%</span></td></tr>
+{% endfor %}
+</tbody></table></div>
+
+<div class="panel tablewrap"><h2>المستويات السعرية</h2>
+<table><thead><tr><th>المستوى</th><th>نوعه</th><th>المسافة</th><th>القوة</th><th>الطرق</th></tr></thead><tbody>
+{% for x in a.price_clusters|sort(attribute='distance_pct') %}
+<tr><td>{{'%.2f'|format(x.level)}}</td><td>{{'مقاومة/قمة' if x.side=='resistance' else 'دعم/قاع'}}</td><td>{{'%+.2f'|format(x.distance_pct)}}%</td><td>{{x.strength}}%</td><td>{{x.methods|join(' + ')}}<div class="muted">{{x.labels|join(' · ')}}</div></td></tr>
+{% endfor %}
+</tbody></table></div>
+
+<div class="panel tablewrap"><h2>النوافذ الزمنية القادمة</h2>
+<table><thead><tr><th>التاريخ</th><th>القوة</th><th>الطرق</th><th>تفاصيل</th></tr></thead><tbody>
+{% for x in a.next_times %}<tr><td>{{x.date}}</td><td>{{x.strength}}%</td><td>{{x.methods|join(' + ')}}</td><td>{{x.labels|join(' · ')}}</td></tr>
+{% else %}<tr><td colspan="4">لا توجد نافذة قريبة.</td></tr>{% endfor %}
+</tbody></table></div>
 {% endblock %}
