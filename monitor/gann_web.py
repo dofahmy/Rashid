@@ -104,7 +104,10 @@ def gann_analysis():
     try: per_page=int(request.args.get("per_page","100"))
     except ValueError: per_page=100
     query=request.args.get("symbol","").strip().upper()[:40]
-    data=market_page(DB,query=query,page=page,per_page=per_page)
+    market=request.args.get("market","US").strip().upper()
+    if market not in ("US","EGX","ALL"):
+        market="US"
+    data=market_page(DB,query=query,page=page,per_page=per_page,market=market)
     return render_template(
         "gann_analysis.html",
         methodology=source_methodology(),

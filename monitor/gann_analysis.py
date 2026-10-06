@@ -33,14 +33,43 @@ def load_daily(DB,symbol,limit=900):
     for c in ["o","h","l","c","v","adj_c"]: df[c]=pd.to_numeric(df[c],errors="coerce")
     return df.dropna(subset=["h","l","c"]).reset_index(drop=True)
 
-def list_symbols(DB,query="",page=1,per_page=100):
-    query=(query or "").strip().upper()[:40]; page=max(1,int(page or 1)); per_page=max(20,min(200,int(per_page or 100)))
+def normalize_market(market):
+    market=(market or "US").strip().upper()
+    if market in ("EGX","EGYPT","CA","مصر"):
+        return "EGX"
+    if market in ("ALL","كل","الكل"):
+        return "ALL"
+    return "US"
+
+def symbol_market(symbol):
+    s=(symbol or "").strip().upper()
+    return "EGX" if s.endswith(".CA") else "US"
+
+def list_symbols(DB,query="",page=1,per_page=100,market="US"):
+    query=(query or "").strip().upper()[:40]
+    market=normalize_market(market)
+    page=max(1,int(page or 1))
+    per_page=max(20,min(200,int(per_page or 100)))
     with DB() as s:
-        t=_daily_table(s); cond=[]
-        if query: cond.append(t.c.symbol.ilike(f"%{query}%"))
+        t=_daily_table(s)
+        cond=[]
+        if query:
+            cond.append(t.c.symbol.ilike(f"%{query}%"))
+        # Yahoo Finance Egypt symbols are stored with .CA suffix.
+        if market=="EGX":
+            cond.append(t.c.symbol.ilike("%.CA"))
+        elif market=="US":
+            cond.append(~t.c.symbol.ilike("%.CA"))
         sq=select(t.c.symbol).where(*cond).distinct().subquery()
         total=int(s.scalar(select(func.count()).select_from(sq)) or 0)
-        symbols=list(s.scalars(select(sq.c.symbol).order_by(sq.c.symbol).offset((page-1)*per_page).limit(per_page)).all())
+        symbols=list(
+            s.scalars(
+                select(sq.c.symbol)
+                .order_by(sq.c.symbol)
+                .offset((page-1)*per_page)
+                .limit(per_page)
+            ).all()
+        )
     pages=max(1,math.ceil(total/per_page))
     return symbols,total,min(page,pages),pages
 
@@ -366,8 +395,9 @@ def analyze_symbol(DB,symbol,limit=900):
     previous_tops,previous_lows=_historical_expected_turns(df,piv,chart_start)
     return {"symbol":symbol.upper(),"last_price":round(last,4),"last_date":df.iloc[-1]["d"],"atr14":round(atr,4),"latest_low":low,"latest_high":high,"range":rng,"price_clusters":pc,"time_clusters":tc,"next_times":next_times,"nearest_support":ns,"nearest_resistance":nr,"tops":tops,"lows":lows,"previous_tops":previous_tops,"previous_lows":previous_lows,"overall_strength":max(strengths) if strengths else 0,"overall_color":strength_color(max(strengths) if strengths else 0),"chart":{"dates":[d.isoformat() for d in candles["d"]],"open":[round(float(x),4) for x in candles["o"]],"high":[round(float(x),4) for x in candles["h"]],"low":[round(float(x),4) for x in candles["l"]],"close":[round(float(x),4) for x in candles["c"]]},"method_rows":build_method_rows(last,pc,tc)}
 
-def market_page(DB,query="",page=1,per_page=100):
-    symbols,total,page,pages=list_symbols(DB,query,page,per_page); rows=[]
+def market_page(DB,query="",page=1,per_page=100,market="US"):
+    market=normalize_market(market)
+    symbols,total,page,pages=list_symbols(DB,query,page,per_page,market=market); rows=[]
     for sym in symbols:
         try:
             a=analyze_symbol(DB,sym,420)
@@ -375,7 +405,7 @@ def market_page(DB,query="",page=1,per_page=100):
             rows.append({"symbol":sym,"last_price":a["last_price"],"last_date":a["last_date"],"support":a["nearest_support"],"resistance":a["nearest_resistance"],"next_time":a["next_times"][0] if a["next_times"] else None,"top1":a["tops"][0] if a["tops"] else None,"top2":a["tops"][1] if len(a["tops"])>1 else None,"low1":a["lows"][0] if a["lows"] else None,"low2":a["lows"][1] if len(a["lows"])>1 else None,"strength":a["overall_strength"],"color":a["overall_color"]})
         except Exception as e:
             rows.append({"symbol":sym,"error":str(e)[:180],"strength":0,"color":"#64748b"})
-    return {"rows":rows,"total":total,"page":page,"pages":pages,"query":query or ""}
+    return {"rows":rows,"total":total,"page":page,"pages":pages,"query":query or "","market":market}
 
 def source_methodology():
     return [
