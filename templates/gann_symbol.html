@@ -19,7 +19,7 @@ details.gann-details>summary{cursor:pointer;font-weight:700;padding:10px 0}
 <a class="button secondary" href="{{url_for('gann.gann_analysis',market=request.args.get('market','US'))}}">رجوع للسوق</a>
 </div>
 
-{% if a.anchor_source=='EGX_MARKET' %}
+{% if a.anchor_source=='EGX_MARKET_MAJOR' %}
 <div class="panel tablewrap">
 <h2>مرتكزات السوق المصري المستخدمة</h2>
 <p class="muted">في مصر لا نبدأ من أي قاع/قمة محلية للسهم. نبدأ فقط من قاع/قمة سوق رئيسية مؤكدة من المؤشر/مؤشر السوق البديل + اتساع السوق + القياديات + البنوك، ثم نأخذ قاع/قمة السهم داخل ±3 جلسات من تاريخ السوق.</p>
