@@ -27,7 +27,16 @@ details.gann-details>summary{cursor:pointer;font-weight:700;padding:10px 0}
 <div class="gann-turn" style="--c:#b91c1c"><strong>أقرب مقاومة رئيسية</strong><div class="metric">{{'%.2f'|format(a.nearest_resistance.level) if a.nearest_resistance else '—'}}</div>{% if a.decision_summary.resistance_distance_pct is not none %}<div class="muted">تبعد {{a.decision_summary.resistance_distance_pct}}%</div>{% endif %}</div>
 <div class="gann-turn" style="--c:#2563eb"><strong>النافذة الزمنية الأقرب</strong><div class="metric">{{a.decision_summary.next_window.date if a.decision_summary.next_window else '—'}}</div>{% if a.decision_summary.next_window %}<div class="muted">{{a.decision_summary.next_window.window_start}} → {{a.decision_summary.next_window.window_end}}</div>{% endif %}</div>
 </div>
-<div class="decision-note"><strong>ثبات الـAnchor:</strong> {{a.anchor_strength}}/100 · <strong>موثوقية الاختبار التاريخي:</strong> {{a.backtest.reliability_score}}/100 ({{a.backtest.samples}} عينة، {{a.backtest.sample_quality}}). <span class="muted">درجات قرار داخلية وليست احتمالات نجاح أو توصية تداول.</span></div>
+<div class="decision-note">
+<strong>{{a.decision_summary.message}}</strong><br>
+ثبات الـAnchor: {{a.anchor_strength}}/100 ·
+موثوقية Full: {{a.backtest.reliability_score}}/100 ·
+موثوقية Validation المتأخر: {{a.backtest.gate_reliability}}/100 ·
+Useful Validation: {{a.backtest.gate_useful_rate}}% ·
+{{a.backtest.samples}} عينة.
+{% if not a.backtest.direction_ready %}<br><strong>سبب منع الاتجاه:</strong> {{a.backtest.gate_reason}}{% endif %}
+<span class="muted">هذه درجات تحقق داخلية وليست احتمالات نجاح أو توصية تداول.</span>
+</div>
 </div>
 
 {% if a.anchor_source=='EGX_MARKET_CONSENSUS_FINAL' %}
@@ -61,20 +70,49 @@ details.gann-details>summary{cursor:pointer;font-weight:700;padding:10px 0}
 {% endif %}
 
 <div class="panel">
+<h2>نوافذ جان الزمنية للمراقبة</h2>
+<div class="gann-cards">
+{% for x in a.watch_windows %}
+<div class="gann-turn" style="--c:#64748b">
+<strong>{{x.window_start}} → {{x.window_end}}</strong>
+<div class="metric">{{x.watch_score}}/100</div>
+<div class="muted">تاريخ المركز {{x.date}} · Evidence الطرق {{x.method_evidence}}/100</div>
+<div class="muted">{{x.methods|join(' + ')}}</div>{% if x.state=='WATCH_ONLY' %}<div class="muted">مراقبة فقط: {{x.gate_reason}}</div>{% endif %}
+</div>
+{% else %}
+<div class="muted">لا توجد نافذة زمنية رئيسية قريبة.</div>
+{% endfor %}
+</div>
+
+<h2>التحقق التاريخي لكل طريقة</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>الطريقة</th><th>العينات</th><th>Hit</th><th>Useful</th><th>Reliability</th><th>الحالة</th></tr></thead>
+<tbody>
+{% for x in a.method_validation_rows %}
+<tr>
+<td>{{x.name}}</td><td>{{x.samples}}</td>
+<td>{{x.hit_rate if x.hit_rate is not none else '—'}}%</td>
+<td>{{x.useful_rate if x.useful_rate is not none else '—'}}%</td>
+<td>{{x.reliability}}/100</td>
+<td>{% if x.validated %}<strong style="color:#15803d">Validated</strong>{% else %}<span style="color:#b91c1c">غير معتمد</span>{% endif %}</td>
+</tr>
+{% endfor %}
+</tbody></table></div>
+
 <h2>المخرجات النهائية القادمة</h2>
 <div class="gann-cards">
 {% for x in a.tops %}
 <div class="gann-turn" style="--c:#b91c1c">
-<strong>قمة متوقعة {{loop.index}}</strong>
+<strong>{{x.label}} {{loop.index}}</strong>
 <div class="metric">{{'%.2f'|format(x.price)}}</div>
 <div>{% if x.date %}{{x.window_start}} → {{x.window_end}}{% else %}—{% endif %}</div>
 <span class="gann-badge" style="background:{{x.color}}">{{x.strength}}%</span>
-<div class="muted">{{x.methods|join(' + ')}}</div>
+<div class="muted">{{x.methods|join(' + ')}}</div>{% if x.state=='WATCH_ONLY' %}<div class="muted">مراقبة فقط: {{x.gate_reason}}</div>{% endif %}
 </div>
 {% endfor %}
 {% for x in a.lows %}
 <div class="gann-turn" style="--c:#15803d">
-<strong>قاع متوقع {{loop.index}}</strong>
+<strong>{{x.label}} {{loop.index}}</strong>
 <div class="metric">{{'%.2f'|format(x.price)}}</div>
 <div>{% if x.date %}{{x.window_start}} → {{x.window_end}}{% else %}—{% endif %}</div>
 <span class="gann-badge" style="background:{{x.color}}">{{x.strength}}%</span>
@@ -89,7 +127,11 @@ details.gann-details>summary{cursor:pointer;font-weight:700;padding:10px 0}
 
 <div class="panel tablewrap">
 <h2>التوقعات السابقة — هل تحققت؟</h2>
-<div class="decision-note"><strong>Backtest as-of:</strong> {{a.backtest.samples}} عينة · تحقق {{a.backtest.hits}} · جزئي {{a.backtest.partials}} · لم يتحقق {{a.backtest.misses}} · مفيد (تحقق+جزئي) {{a.backtest.useful_rate if a.backtest.useful_rate is not none else '—'}}% · Median فرق السعر {{a.backtest.median_price_error_pct if a.backtest.median_price_error_pct is not none else '—'}}% · Median فرق الزمن {{a.backtest.median_time_error_sessions if a.backtest.median_time_error_sessions is not none else '—'}} جلسة.</div>
+<div class="decision-note"><strong>Walk-forward / as-of Backtest:</strong>
+Full {{a.backtest.samples}} عينة: تحقق {{a.backtest.hits}} · جزئي {{a.backtest.partials}} · لم يتحقق {{a.backtest.misses}} · Useful {{a.backtest.useful_rate if a.backtest.useful_rate is not none else '—'}}%.
+<br>Train: {{a.backtest.train.samples}} عينة · Reliability {{a.backtest.train.reliability_score}}/100.
+Validation المتأخر: {{a.backtest.validation.samples}} عينة · Reliability {{a.backtest.validation.reliability_score}}/100 · Useful {{a.backtest.validation.useful_rate if a.backtest.validation.useful_rate is not none else '—'}}%.
+<br>Median فرق السعر {{a.backtest.median_price_error_pct if a.backtest.median_price_error_pct is not none else '—'}}% · Median فرق الزمن {{a.backtest.median_time_error_sessions if a.backtest.median_time_error_sessions is not none else '—'}} جلسة.</div>
 <table>
 <thead>
 <tr>
