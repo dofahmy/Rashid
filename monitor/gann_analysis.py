@@ -54,37 +54,101 @@ def load_daily(DB,symbol,limit=900):
     return df.dropna(subset=["h","l","c"]).reset_index(drop=True)
 
 
+def _build_synthetic_egx30(panel,leader_count=30):
+    """Build a robust market-index proxy from the 30 most liquid Egyptian shares.
+
+    Used only when the external ^CASE30 history feed is unavailable.
+    Each constituent is rebased to 100 from its first close in the loaded
+    window, then the normalized OHLC series are equal-weighted by date.
+    This is NOT the official EGX30 calculation; it is a market-turn proxy.
+    """
+    if panel.empty:
+        return pd.DataFrame(),[]
+
+    p=panel.copy().sort_values(["symbol","d"]).reset_index(drop=True)
+    p["dv"]=pd.to_numeric(p["c"],errors="coerce")*pd.to_numeric(p["v"],errors="coerce").fillna(0)
+
+    # Prefer persistent liquidity, not one-day spikes.
+    med=p.groupby("symbol")["dv"].median().sort_values(ascending=False)
+    leaders=list(med.head(leader_count).index)
+    q=p[p["symbol"].isin(leaders)].copy()
+    if q.empty:
+        return pd.DataFrame(),[]
+
+    first=q.groupby("symbol")["c"].transform("first")
+    first=first.replace(0,np.nan)
+    for col in ["o","h","l","c"]:
+        q[f"n_{col}"]=100.0*pd.to_numeric(q[col],errors="coerce")/first
+
+    agg=q.groupby("d").agg(
+        o=("n_o","mean"),
+        h=("n_h","mean"),
+        l=("n_l","mean"),
+        c=("n_c","mean"),
+        v=("v","sum"),
+        members=("symbol","nunique"),
+    ).reset_index()
+
+    # Require enough members so sparse early dates do not create fake pivots.
+    agg=agg[agg["members"]>=max(10,int(leader_count*0.50))].copy()
+    agg=agg.sort_values("d").reset_index(drop=True)
+    return agg[["d","o","h","l","c","v"]],leaders
+
+
 def _load_egx_panel(DB,limit_dates=900):
-    """Load EGX30 + Egyptian stocks for cross-sectional pivot confirmation."""
+    """Load official EGX30 if available; otherwise synthesize a market proxy.
+
+    Returns (index_df, stock_panel, source_label).
+    """
     with DB() as s:
         t=_daily_table(s)
-        idx_rows=s.execute(
-            select(t.c.session_date,t.c.o,t.c.h,t.c.l,t.c.c,t.c.v)
-            .where(t.c.symbol==EGX_INDEX_SYMBOL)
-            .order_by(t.c.session_date.desc()).limit(limit_dates)
-        ).all()
-        if not idx_rows:
-            return pd.DataFrame(),pd.DataFrame()
 
-        min_date=min(str(r[0]) for r in idx_rows)
+        # Load Egyptian stocks independently of index availability.
+        recent_dates=list(s.scalars(
+            select(t.c.session_date)
+            .where(t.c.symbol.ilike("%.CA"))
+            .distinct()
+            .order_by(t.c.session_date.desc())
+            .limit(limit_dates)
+        ).all())
+        if not recent_dates:
+            return pd.DataFrame(),pd.DataFrame(),"NONE"
+
+        min_date=min(str(x) for x in recent_dates)
         stock_rows=s.execute(
-            select(t.c.symbol,t.c.session_date,t.c.h,t.c.l,t.c.c,t.c.v)
+            select(t.c.symbol,t.c.session_date,t.c.o,t.c.h,t.c.l,t.c.c,t.c.v)
             .where(t.c.symbol.ilike("%.CA"),t.c.session_date>=min_date)
             .order_by(t.c.session_date,t.c.symbol)
         ).all()
 
-    idx=pd.DataFrame(idx_rows,columns=["d","o","h","l","c","v"]).iloc[::-1].reset_index(drop=True)
-    idx["d"]=pd.to_datetime(idx["d"]).dt.date
-    for c in ["o","h","l","c","v"]:idx[c]=pd.to_numeric(idx[c],errors="coerce")
-    idx=idx.dropna(subset=["h","l","c"]).reset_index(drop=True)
+        idx_rows=s.execute(
+            select(t.c.session_date,t.c.o,t.c.h,t.c.l,t.c.c,t.c.v)
+            .where(t.c.symbol==EGX_INDEX_SYMBOL,t.c.session_date>=min_date)
+            .order_by(t.c.session_date)
+        ).all()
 
-    panel=pd.DataFrame(stock_rows,columns=["symbol","d","h","l","c","v"])
-    if not panel.empty:
-        panel["d"]=pd.to_datetime(panel["d"]).dt.date
-        for c in ["h","l","c","v"]:panel[c]=pd.to_numeric(panel[c],errors="coerce")
-        panel=panel.dropna(subset=["h","l","c"]).reset_index(drop=True)
-        panel["dv"]=panel["c"]*panel["v"].fillna(0)
-    return idx,panel
+    panel=pd.DataFrame(stock_rows,columns=["symbol","d","o","h","l","c","v"])
+    if panel.empty:
+        return pd.DataFrame(),pd.DataFrame(),"NONE"
+    panel["d"]=pd.to_datetime(panel["d"]).dt.date
+    for c in ["o","h","l","c","v"]:
+        panel[c]=pd.to_numeric(panel[c],errors="coerce")
+    panel=panel.dropna(subset=["o","h","l","c"]).reset_index(drop=True)
+    panel["dv"]=panel["c"]*panel["v"].fillna(0)
+
+    if idx_rows:
+        idx=pd.DataFrame(idx_rows,columns=["d","o","h","l","c","v"])
+        idx["d"]=pd.to_datetime(idx["d"]).dt.date
+        for c in ["o","h","l","c","v"]:
+            idx[c]=pd.to_numeric(idx[c],errors="coerce")
+        idx=idx.dropna(subset=["h","l","c"]).reset_index(drop=True)
+        return idx,panel,"OFFICIAL_CASE30"
+
+    # Railway/Yahoo chart history for ^CASE30 can return no rows even when
+    # individual .CA shares work. Fall back to a market-wide Top-30 liquid proxy.
+    idx,leaders=_build_synthetic_egx30(panel,leader_count=30)
+    return idx,panel,"SYNTHETIC_TOP30_LIQUID"
+
 
 def _index_candidate_pivots(idx,wing=EGX_MARKET_WING):
     if len(idx)<wing*2+10:return []
@@ -137,7 +201,7 @@ def _confirmation_rate(panel,symbols,event_date,kind):
     return (good/avail if avail else 0.0),good,avail
 
 def _major_market_pivots_uncached(DB):
-    idx,panel=_load_egx_panel(DB)
+    idx,panel,index_source=_load_egx_panel(DB)
     if idx.empty or panel.empty:return []
 
     candidates=_index_candidate_pivots(idx)
@@ -186,6 +250,7 @@ def _major_market_pivots_uncached(DB):
             "banks_pct":round(100*bank_rate,1),
             "banks_count":bank_good,"banks_total":bank_n,
             "available_date":idx.iloc[available_i]["d"],
+            "index_source":index_source,
         })
 
     strong=[x for x in raw if x["score"]>=EGX_MARKET_MIN_SCORE]
