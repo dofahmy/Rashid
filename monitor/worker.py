@@ -5,7 +5,8 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from datetime import datetime
 from zoneinfo import ZoneInfo
-from sqlalchemy import select, delete, func, case, text
+from sqlalchemy import select, delete, func, case, text, MetaData, Table, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from core import database, now
 from .models import Stock, Candle, Plan, Scan, OPEN, EgxSignal, EgxOpenSignal
 from .engine import new_plan, advance, policy
@@ -71,58 +72,109 @@ def _egx_daily_sync(symbol):
     if not res:return []
     z=res[0];ts=z.get('timestamp') or []
     q=(((z.get('indicators') or {}).get('quote') or [{}])[0])
+    adj=((z.get('indicators') or {}).get('adjclose') or [{}])[0].get('adjclose') or []
     opens=q.get('open') or [];highs=q.get('high') or [];lows=q.get('low') or []
     closes=q.get('close') or [];vols=q.get('volume') or []
     n=min(len(ts),len(opens),len(highs),len(lows),len(closes),len(vols))
-    raw=[]
+    rows=[]
     for i in range(n):
         vals=(opens[i],highs[i],lows[i],closes[i])
         if any(v is None for v in vals):continue
         try:o,h,l,c=map(float,vals);v=float(vols[i] or 0)
         except (TypeError,ValueError):continue
         if min(o,h,l,c)<=0:continue
-        raw.append({
-            'ts':int(ts[i]),'ro':o,'rh':h,'rl':l,'rc':c,'v':v,
+        ac=float(adj[i]) if i<len(adj) and adj[i] not in (None,0) else c
+        factor=ac/c if c else 1.0
+        rows.append({
+            'ts':int(ts[i]),'o':o,'h':h,'l':l,'c':c,'v':v,
+            'ac':ac,'ah':h*factor,'al':l*factor,
             'date':datetime.fromtimestamp(int(ts[i]),ZoneInfo(EGX_TZ)).date().isoformat(),
         })
-    raw.sort(key=lambda r:r['ts'])
+    rows.sort(key=lambda r:r['ts'])
+    # de-duplicate by local date, keep last
     dedup={}
-    for r in raw:dedup[r['date']]=r
-    raw=list(dedup.values())
-    if not raw:return []
+    for r in rows:dedup[r['date']]=r
+    return list(dedup.values())
 
-    # Yahoo EGX history can keep pre-corporate-action nominal prices while
-    # TradingView shows a continuous adjusted chart. Build a split/bonus-share
-    # continuous price series ourselves by stitching only very large overnight
-    # discontinuities. This keeps historical signal prices on today's scale.
-    common_factors=(0.10,0.20,0.25,1/3,0.40,0.50,2/3,0.75,0.80,
-                    1.25,4/3,1.50,2.0,2.5,3.0,4.0,5.0,10.0)
-    scales=[1.0]*len(raw)
-    cumulative=1.0
-    for i in range(len(raw)-2,-1,-1):
-        nxt=raw[i+1];cur=raw[i]
-        gap=float(nxt['ro'])/float(cur['rc']) if cur['rc'] else 1.0
-        # EGX ordinary daily gaps are much smaller; a >28% mechanical jump/drop
-        # is treated as a corporate-action boundary for continuity purposes.
-        if gap < 0.72 or gap > 1.38:
-            nearest=min(common_factors,key=lambda f:abs(gap-f)/f)
-            if abs(gap-nearest)/nearest <= 0.10:
-                gap=nearest
-            cumulative*=gap
-        scales[i]=cumulative
 
-    rows=[]
-    for r,scale in zip(raw,scales):
-        o=r['ro']*scale;h=r['rh']*scale;l=r['rl']*scale;c=r['rc']*scale
-        rows.append({
-            'ts':r['ts'],'date':r['date'],'v':r['v'],
-            # Continuous split/bonus-adjusted OHLC used by signal logic/display.
-            'o':o,'h':h,'l':l,'c':c,'ac':c,'ah':h,'al':l,
-            # Preserve actual Yahoo nominal prices for turnover diagnostics.
-            'raw_o':r['ro'],'raw_h':r['rh'],'raw_l':r['rl'],'raw_c':r['rc'],
-            'corp_scale':scale,
-        })
-    return rows
+def _save_egx_daily_candles(DB,symbol,company,rows):
+    """Persist Yahoo EGX daily candles into market_candles_1d for Gann.
+
+    Canonical EGX symbols are stored with Yahoo's .CA suffix so the Gann
+    market selector can distinguish Egypt from US symbols. Existing rows are
+    updated, missing history is inserted, and the operation is committed per
+    symbol so a long EGX scan can be safely resumed.
+    """
+    if not rows:
+        return 0
+
+    canonical = symbol if str(symbol).upper().endswith('.CA') else f'{symbol}.CA'
+    canonical = canonical.upper()
+    retrieved = now()
+    metadata = json.dumps({
+        'market':'EGX',
+        'company':str(company or symbol),
+        'source_symbol':str(symbol).upper(),
+    }, ensure_ascii=False)
+
+    payload = [{
+        'symbol':canonical,
+        'session_date':r['date'],
+        'ts':int(r['ts']),
+        'o':float(r['o']),
+        'h':float(r['h']),
+        'l':float(r['l']),
+        'c':float(r['c']),
+        'v':float(r['v']),
+        'adj_c':float(r['ac']),
+        'feed_symbol':canonical,
+        'source':'Yahoo public chart',
+        'retrieved_at':retrieved,
+        'metadata_json':metadata,
+    } for r in rows]
+
+    with DB.begin() as s:
+        bind=s.get_bind()
+        t=Table('market_candles_1d', MetaData(), autoload_with=bind)
+
+        # Keep transactions reasonably small.
+        for start in range(0,len(payload),500):
+            batch=payload[start:start+500]
+
+            if bind.dialect.name=='postgresql':
+                stmt=pg_insert(t).values(batch)
+                ex=stmt.excluded
+                stmt=stmt.on_conflict_do_update(
+                    index_elements=[t.c.symbol,t.c.session_date],
+                    set_={
+                        'ts':ex.ts,'o':ex.o,'h':ex.h,'l':ex.l,'c':ex.c,'v':ex.v,
+                        'adj_c':ex.adj_c,'feed_symbol':ex.feed_symbol,'source':ex.source,
+                        'retrieved_at':ex.retrieved_at,'metadata_json':ex.metadata_json,
+                    }
+                )
+                s.execute(stmt)
+            else:
+                # Test/local fallback for SQLite or another SQLAlchemy dialect.
+                for row in batch:
+                    exists=s.execute(
+                        select(t.c.symbol).where(
+                            t.c.symbol==row['symbol'],
+                            t.c.session_date==row['session_date']
+                        )
+                    ).first()
+                    if exists:
+                        s.execute(
+                            update(t).where(
+                                t.c.symbol==row['symbol'],
+                                t.c.session_date==row['session_date']
+                            ).values(**{k:v for k,v in row.items()
+                                      if k not in ('symbol','session_date')})
+                        )
+                    else:
+                        s.execute(t.insert().values(**row))
+
+    return len(payload)
+
 
 def _egx_linreg(values,end_idx,window=EGX_LOOKBACK):
     # Previous window only; current bar excluded, exactly like the research script.
@@ -138,16 +190,6 @@ def _egx_linreg(values,end_idx,window=EGX_LOOKBACK):
     r2=1-ssr/sst if sst>0 else 0.0
     slope_pct=100*(b*(window-1))/ym
     return slope_pct,r2
-
-def _egx_price_confirm(rows, i):
-    if i <= 0:
-        return False
-    r=rows[i]; prev=rows[i-1]
-    return bool(
-        r['c'] > prev['h']
-        and r['c'] > r['o']
-        and (r['c'] - r['o']) > (r['h'] - r['c'])
-    )
 
 def _egx_trade_exit(rows, metrics, signal_idx):
     """Return the first approved exit after an EGX entry, or None if still open.
@@ -260,17 +302,7 @@ def _egx_analyze_signals(rows):
     for i,r in enumerate(rows):
         slope,r2=_egx_linreg(ac,i)
         metrics.append((slope,r2))
-        # Entry confirmation added to the standalone R2+Slope signal:
-        # 1) today's corporate-action-adjusted close must break above yesterday's adjusted high;
-        # 2) today's candle must be positive (close > open);
-        # 3) the real body must be larger than the upper wick:
-        #    (close - open) > (high - close).
-        price_confirm = _egx_price_confirm(rows, i)
-        rule.append(bool(
-            slope is not None and r2 is not None
-            and r2 >= EGX_R2_MIN and slope >= EGX_SLOPE_MIN
-            and price_confirm
-        ))
+        rule.append(bool(slope is not None and r2 is not None and r2>=EGX_R2_MIN and slope>=EGX_SLOPE_MIN))
 
     new_rule=[rule[i] and (i==0 or not rule[i-1]) for i in range(len(rule))]
     last_kept=-10**9;kept=[]
@@ -280,7 +312,7 @@ def _egx_analyze_signals(rows):
         r=rows[i]
         if r['c']<EGX_MIN_PRICE or i<21:continue
         prior=rows[i-20:i]
-        adv20=sum(x.get('raw_c',x['c'])*x['v'] for x in prior)/20
+        adv20=sum(x['c']*x['v'] for x in prior)/20
         avgvol20=sum(x['v'] for x in prior)/20
         if adv20<EGX_MIN_ADV20 or avgvol20<EGX_MIN_AVGVOL20:continue
         last_kept=i
@@ -290,10 +322,6 @@ def _egx_analyze_signals(rows):
     latest=rows[-1]
     open_candidates=[]
     for i,adv20,avgvol20,slope,r2 in kept:
-        # Defensive revalidation: an OPEN row can never survive unless the
-        # signal candle itself still satisfies every price-confirmation rule.
-        if not _egx_price_confirm(rows, i):
-            continue
         exit_info=_egx_trade_exit(rows,metrics,i)
         if exit_info is not None:
             continue
@@ -316,7 +344,7 @@ def _egx_analyze_signals(rows):
     open_rows=[max(open_candidates,key=lambda x:x['signal_ts'])] if open_candidates else []
 
     latest_activation=None
-    if kept and kept[-1][0]==len(rows)-1 and _egx_price_confirm(rows, kept[-1][0]):
+    if kept and kept[-1][0]==len(rows)-1:
         i,adv20,avgvol20,slope,r2=kept[-1];r=rows[i]
         latest_activation={
             'symbol_date':r['date'],'signal_ts':r['ts'],'signal_price':r['c'],
@@ -329,10 +357,6 @@ async def scan_egx_daily(DB,clock):
     boundary=int(clock)//86400*86400
     with DB.begin() as s:
         scan=Scan(market='EG',boundary=boundary,status='running');s.add(scan);s.flush();scan_id=scan.id
-        # Clear stale rows immediately. The page stays empty while the fresh
-        # backfill runs rather than showing positions calculated by older rules.
-        s.execute(delete(EgxOpenSignal))
-    log.info('EGX v7 strict rebuild started; old open rows cleared')
     try:
         symbols=await asyncio.to_thread(_egx_discover_sync)
         sem=asyncio.Semaphore(max(2,min(16,int(os.getenv('EGX_SCAN_CONCURRENCY','8')))))
@@ -341,20 +365,36 @@ async def scan_egx_daily(DB,clock):
             async with sem:
                 try:
                     rows=await asyncio.to_thread(_egx_daily_sync,symbol)
-                    return symbol,company,_egx_analyze_signals(rows),None
+                    return symbol,company,rows,_egx_analyze_signals(rows),None
                 except Exception as exc:
-                    return symbol,company,None,type(exc).__name__
+                    return symbol,company,[],None,f'{type(exc).__name__}:{exc}'
         tasks=[asyncio.create_task(one(item)) for item in symbols]
-        counts={'total':len(tasks),'ok':0,'errors':0,'new_plans':0,'transitions':0}
+        counts={'total':len(tasks),'ok':0,'errors':0,'new_plans':0,'transitions':0,
+                'gann_symbols_saved':0,'gann_candles_saved':0,'gann_save_errors':0}
         open_total=0
         rebuilt_open_rows=[]
         latest_activations=[]
         for n,task in enumerate(asyncio.as_completed(tasks),1):
-            symbol,company,analysis,error=await task
+            symbol,company,rows,analysis,error=await task
             if error:
                 counts['errors']+=1
+                log.warning('EGX fetch/analyze failed %s: %s',symbol,error)
             else:
                 counts['ok']+=1
+
+                # Save every successfully fetched Egyptian daily history for Gann.
+                # This is independent from whether the R2+Slope detector finds a signal.
+                try:
+                    saved=await asyncio.to_thread(
+                        _save_egx_daily_candles,DB,symbol,company,rows
+                    )
+                    if saved:
+                        counts['gann_symbols_saved']+=1
+                        counts['gann_candles_saved']+=saved
+                except Exception as exc:
+                    counts['gann_save_errors']+=1
+                    log.exception('EGX Gann candle save failed for %s',symbol)
+
                 opens=analysis['open']
                 open_total+=len(opens)
                 for e in opens:
@@ -362,7 +402,13 @@ async def scan_egx_daily(DB,clock):
                 signal=analysis['latest_activation']
                 if signal:
                     latest_activations.append((symbol,company,signal))
-            if n%25==0:log.info('EGX daily progress %s/%s open=%s',n,len(tasks),open_total)
+
+            if n%25==0:
+                log.info(
+                    'EGX daily progress %s/%s open=%s gann_symbols=%s gann_candles=%s save_errors=%s',
+                    n,len(tasks),open_total,counts['gann_symbols_saved'],
+                    counts['gann_candles_saved'],counts['gann_save_errors']
+                )
 
         # Replace the OPEN table in one transaction. This also removes stale
         # rows left by older code or symbols whose previous record no longer
@@ -391,15 +437,25 @@ async def scan_egx_daily(DB,clock):
         with DB.begin() as s:
             scan=s.get(Scan,scan_id)
             for k,v in counts.items():setattr(scan,k,v)
-            scan.status='partial' if counts['errors'] else 'complete'
+            scan.status='partial' if (counts['errors'] or counts['gann_save_errors']) else 'complete'
             scan.finished_at=now()
-            scan.summary_json=json.dumps({'scanner':'EGX_R2_SLOPE_DAILY_V7_STRICT_CANDLE','new_signals':counts['new_plans'],'open_signals':open_total})
-        log.info('EGX daily scan %s open_signals=%s',counts,open_total)
+            scan.summary_json=json.dumps({
+                'scanner':'EGX_R2_SLOPE_DAILY',
+                'new_signals':counts['new_plans'],
+                'open_signals':open_total,
+                'gann_symbols_saved':counts['gann_symbols_saved'],
+                'gann_candles_saved':counts['gann_candles_saved'],
+                'gann_save_errors':counts['gann_save_errors'],
+            })
+        log.info(
+            'EGX daily scan complete %s open_signals=%s gann_symbols=%s gann_candles=%s',
+            counts,open_total,counts['gann_symbols_saved'],counts['gann_candles_saved']
+        )
     except Exception as exc:
         with DB.begin() as s:
             scan=s.get(Scan,scan_id)
             scan.status='waiting_feed';scan.finished_at=now()
-            scan.summary_json=json.dumps({'scanner':'EGX_R2_SLOPE_DAILY_V7_STRICT_CANDLE','reason':type(exc).__name__})
+            scan.summary_json=json.dumps({'scanner':'EGX_R2_SLOPE_DAILY','reason':type(exc).__name__})
         log.exception('EGX daily scanner failed')
 
 def egx_due(clock):
@@ -411,10 +467,6 @@ def egx_due(clock):
 def initialize(DB):
     EgxSignal.__table__.create(bind=DB.kw['bind'],checkfirst=True)
     EgxOpenSignal.__table__.create(bind=DB.kw['bind'],checkfirst=True)
-    # Never expose OPEN rows produced by an older filter after a worker restart.
-    with DB.begin() as s:
-        s.execute(delete(EgxOpenSignal))
-    log.info('EGX v7 startup purge complete; open table will be rebuilt')
     universe=json.loads((DATA/'universe.json').read_text(encoding='utf-8'))
     counts={m:sum(r['market_key']==m for r in universe) for m in ('SA','US')}
     if counts!={'SA':375,'US':5691} or len({r['symbol'] for r in universe})!=6066:
