@@ -2,6 +2,7 @@
 from __future__ import annotations
 import math
 import time
+import bisect
 from datetime import date, datetime, timedelta
 from typing import Any
 import numpy as np
@@ -166,44 +167,84 @@ def _index_candidate_pivots(idx,wing=EGX_MARKET_WING):
             out.append({"i":i,"kind":"L","date":idx.iloc[i]["d"],"price":float(l[i])})
     return sorted(out,key=lambda x:(x["i"],0 if x["kind"]=="L" else 1))
 
-def _symbol_confirms_market_turn(sdf,event_date,kind,event_window=EGX_MARKET_EVENT_WINDOW,
-                                 local_window=EGX_MARKET_LOCAL_WINDOW):
-    """Did this stock make a local extreme close to the index turning date?"""
-    if sdf.empty:return False
-    sdf=sdf.sort_values("d").reset_index(drop=True)
-    dates=list(sdf["d"])
-    # nearest trading session to event date
-    j=min(range(len(dates)),key=lambda k:abs((dates[k]-event_date).days))
-    lo=max(0,j-local_window); hi=min(len(sdf)-1,j+local_window)
-    elo=max(0,j-event_window); ehi=min(len(sdf)-1,j+event_window)
-    local=sdf.iloc[lo:hi+1]; event=sdf.iloc[elo:ehi+1]
-    if local.empty or event.empty:return False
+def _prepare_symbol_turn_data(panel):
+    """Prepare each EGX symbol once for very fast pivot confirmation.
+
+    The previous implementation filtered the full ~385k-row panel separately
+    for every symbol and every candidate pivot. That is correct but extremely
+    slow. Here we group once and keep compact Python/numpy arrays.
+    """
+    out={}
+    if panel.empty:
+        return out
+    for sym,sdf in panel.groupby("symbol",sort=False):
+        sdf=sdf.sort_values("d")
+        dates=list(sdf["d"])
+        if len(dates)<20:
+            continue
+        out[str(sym)]={
+            "dates":dates,
+            "ord":[d.toordinal() for d in dates],
+            "h":sdf["h"].to_numpy(float),
+            "l":sdf["l"].to_numpy(float),
+        }
+    return out
+
+def _nearest_pos(ordinals,target_ord):
+    """Nearest sorted ordinal position using binary search."""
+    n=len(ordinals)
+    if n==0:return None
+    j=bisect.bisect_left(ordinals,target_ord)
+    if j<=0:return 0
+    if j>=n:return n-1
+    return j-1 if abs(ordinals[j-1]-target_ord)<=abs(ordinals[j]-target_ord) else j
+
+def _symbol_confirms_market_turn_fast(data,event_date,kind,
+                                      event_window=EGX_MARKET_EVENT_WINDOW,
+                                      local_window=EGX_MARKET_LOCAL_WINDOW):
+    if not data:
+        return False
+    j=_nearest_pos(data["ord"],event_date.toordinal())
+    if j is None:
+        return False
+    n=len(data["dates"])
+    lo=max(0,j-local_window); hi=min(n,j+local_window+1)
+    elo=max(0,j-event_window); ehi=min(n,j+event_window+1)
+    if hi<=lo or ehi<=elo:
+        return False
+
     if kind=="L":
-        event_ext=float(event["l"].min()); local_ext=float(local["l"].min())
-        # allow a tiny tolerance for near-equal lows.
-        return event_ext <= local_ext*1.01
-    event_ext=float(event["h"].max()); local_ext=float(local["h"].max())
-    return event_ext >= local_ext*0.99
+        local_ext=float(np.nanmin(data["l"][lo:hi]))
+        event_ext=float(np.nanmin(data["l"][elo:ehi]))
+        return math.isfinite(local_ext) and math.isfinite(event_ext) and event_ext<=local_ext*1.01
+
+    local_ext=float(np.nanmax(data["h"][lo:hi]))
+    event_ext=float(np.nanmax(data["h"][elo:ehi]))
+    return math.isfinite(local_ext) and math.isfinite(event_ext) and event_ext>=local_ext*0.99
 
 def _leaders_for_date(panel,event_date,count=EGX_LEADER_COUNT):
-    """Dynamic leaders = highest median EGP turnover in the prior ~60 sessions."""
+    """Dynamic leaders = highest median EGP turnover in prior ~120 calendar days."""
     if panel.empty:return []
     start=event_date-timedelta(days=120)
     sub=panel[(panel["d"]<event_date)&(panel["d"]>=start)]
     if sub.empty:return []
-    med=sub.groupby("symbol")["dv"].median().sort_values(ascending=False)
-    return list(med.head(count).index)
+    med=sub.groupby("symbol",sort=False)["dv"].median().nlargest(count)
+    return list(med.index)
 
-def _confirmation_rate(panel,symbols,event_date,kind):
-    if panel.empty or not symbols:return 0.0,0,0
+def _confirmation_rate_prepared(prepared,symbols,event_date,kind):
+    """Cross-sectional confirmation rate without repeatedly filtering DataFrames."""
+    if not prepared or not symbols:
+        return 0.0,0,0
     good=0;avail=0
     for sym in symbols:
-        sdf=panel[panel["symbol"]==sym]
-        if len(sdf)<20:continue
+        data=prepared.get(str(sym))
+        if not data:
+            continue
         avail+=1
-        if _symbol_confirms_market_turn(sdf,event_date,kind):
+        if _symbol_confirms_market_turn_fast(data,event_date,kind):
             good+=1
     return (good/avail if avail else 0.0),good,avail
+
 
 def _major_market_pivots_uncached(DB):
     idx,panel,index_source=_load_egx_panel(DB)
@@ -212,7 +253,12 @@ def _major_market_pivots_uncached(DB):
 
     candidates=_index_candidate_pivots(idx)
     all_symbols=sorted(panel["symbol"].dropna().unique().tolist())
+
+    # Critical performance optimization: group the 2019+ stock history once.
+    prepared=_prepare_symbol_turn_data(panel)
+    all_symbols=[s for s in all_symbols if s in prepared]
     raw=[]
+
 
     for c in candidates:
         i=c["i"];event_date=c["date"];kind=c["kind"]
@@ -237,11 +283,17 @@ def _major_market_pivots_uncached(DB):
             fwd_ext=float(fwd["l"].min())
             follow_pct=max(0.0,(1-fwd_ext/c["price"])*100) if c["price"] else 0.0
 
-        breadth_rate,breadth_good,breadth_n=_confirmation_rate(panel,all_symbols,event_date,kind)
+        breadth_rate,breadth_good,breadth_n=_confirmation_rate_prepared(
+            prepared,all_symbols,event_date,kind
+        )
         leaders=_leaders_for_date(panel,event_date)
-        leader_rate,leader_good,leader_n=_confirmation_rate(panel,leaders,event_date,kind)
+        leader_rate,leader_good,leader_n=_confirmation_rate_prepared(
+            prepared,leaders,event_date,kind
+        )
         banks=sorted(EGX_BANK_SYMBOLS.intersection(all_symbols))
-        bank_rate,bank_good,bank_n=_confirmation_rate(panel,banks,event_date,kind)
+        bank_rate,bank_good,bank_n=_confirmation_rate_prepared(
+            prepared,banks,event_date,kind
+        )
 
         # Stronger score: index + breadth + leaders + banks + follow-through.
         # Total observable points = 100.
