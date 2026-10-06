@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
+import time
 from core import database
 from monitor.gann_analysis import get_egx_market_pivots
 
 DB=database()
+print("Calculating principal EGX market pivots...",flush=True)
+started=time.time()
 pivots=get_egx_market_pivots(DB,cache_seconds=0)
+elapsed=time.time()-started
+
+print(f"Calculation time: {elapsed:.2f} sec")
 if not pivots:
     print("NO PRINCIPAL EGX MARKET PIVOTS FOUND")
     print("Current hard filters: score>=90, follow-through>=10%, major swing>=15%.")
