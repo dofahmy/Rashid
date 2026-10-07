@@ -370,7 +370,18 @@ def create_app(db=None,test_config=None):
         selected_date=request.args.get('date','').strip()
         with DB() as s:refresh_status=get_refresh_status(s)
         if mode!='date':
-            with DB() as s:state=load_state(s)
+            from monitor.egx_live import save_state
+            with DB() as s:
+                state=load_state(s)
+            # Safety fallback: after a deploy/key change there may be a completed
+            # refresh status but no cached state under the new key.
+            if state is None:
+                try:
+                    state=compute_state(None)
+                    save_state(DB,state)
+                except Exception as exc:
+                    flash(f'فشل حساب Now: {type(exc).__name__}: {exc}')
+                    state=None
             return render_template('egx_market.html',state=state,refresh_status=refresh_status,selected_mode='now',selected_date='')
         if not selected_date:
             flash('اختاري التاريخ أولًا.');return redirect(url_for('egx_market'))

@@ -31,3 +31,11 @@ yfinance>=0.2.54
 
 Dockerfile if pyswisseph needs compilation:
 RUN apt-get update && apt-get install -y gcc g++ make && rm -rf /var/lib/apt/lists/*
+
+
+V2.1 FIX
+--------
+- Historical date selection now uses the actual EGX stock calendar, not the
+  synthetic index proxy. This fixes false "No market data exists..." errors.
+- NOW mode automatically rebuilds and saves state if the cache is missing after
+  a deploy/version-key change.
