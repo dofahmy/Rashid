@@ -1,88 +1,90 @@
 {% extends 'base.html' %}{% block content %}
 <h1>السوق المصري · Market Turn</h1>
 
+<div class="panel">
+<h2>اختيار وقت التحليل</h2>
+<form method="get" action="{{url_for('egx_market')}}" class="filters">
+<label><input type="radio" name="mode" value="now" {{'checked' if selected_mode!='date' else ''}}> Now / أحدث داتا</label>
+<label><input type="radio" name="mode" value="date" {{'checked' if selected_mode=='date' else ''}}> تاريخ محدد</label>
+<input type="date" name="date" value="{{selected_date or ''}}">
+<button type="submit">احسب Market Turn</button>
+</form>
+<p class="muted">عند اختيار تاريخ، الحساب AS-OF: لا يستخدم أي أسعار بعد التاريخ المختار. لو التاريخ إجازة، يستخدم آخر جلسة متاحة قبله.</p>
+<form method="post" action="{{url_for('egx_refresh_market')}}" style="margin-top:12px">
+<input type="hidden" name="csrf" value="{{csrf()}}">
+<button type="submit">تحديث بيانات السوق + إعادة الحساب الآن</button>
+</form>
+{% if refresh_status %}
+<p class="{{'notice' if refresh_status.status=='complete' else ('warning' if refresh_status.status=='failed' else 'muted')}}">
+{{refresh_status.message}}{% if refresh_status.market_date %} — آخر جلسة: {{refresh_status.market_date}}{% endif %}
+</p>
+{% endif %}
+</div>
+
 {% if not state %}
-<div class="panel warning">
-  لا توجد نتيجة محفوظة حتى الآن. شغّلي خدمة EGX Monitor:
-  <code>python -m monitor.egx_worker</code>
-</div>
+<div class="panel warning">لا توجد نتيجة محفوظة حتى الآن. استخدمي زر التحديث أو شغّلي خدمة EGX Monitor.</div>
 {% else %}
+
+{% if state.mode=='AS_OF' %}
+<div class="panel notice"><strong>Historical AS-OF:</strong> طلبتِ {{state.requested_date}} · الجلسة المستخدمة {{state.effective_market_date}}.</div>
+{% endif %}
+
 <div class="cards">
-  <div class="panel accent"><div class="muted">الحالة الحالية</div><div class="metric">{{state.action_ar}}</div></div>
-  <div class="panel"><div class="muted">إشارات القاع</div><div class="metric">{{state.low_alert_count}} / 3</div></div>
-  <div class="panel"><div class="muted">إشارات القمة</div><div class="metric">{{state.high_alert_count}} / 3</div></div>
-  <div class="panel"><div class="muted">تاريخ السوق</div><div class="metric">{{state.market_date}}</div></div>
+<div class="panel accent"><div class="muted">الحالة الحالية</div><div class="metric">{{state.action_ar}}</div></div>
+<div class="panel"><div class="muted">إشارات القاع</div><div class="metric">{{state.low_alert_count}} / 3</div></div>
+<div class="panel"><div class="muted">إشارات القمة</div><div class="metric">{{state.high_alert_count}} / 3</div></div>
+<div class="panel"><div class="muted">تاريخ السوق</div><div class="metric">{{state.market_date}}</div></div>
 </div>
 
 <div class="panel">
-  <h2>احتمالات Market Turn</h2>
-  <p class="muted">
-    LOW يعتمد على السعر + breadth + القطاعات فقط.
-    HIGH يضيف planetary layer لأنها حسّنت اختبار القمم خارج العينة.
-  </p>
-  <div class="tablewrap">
-  <table>
-    <thead><tr><th>الاتجاه</th><th>خلال</th><th>النموذج</th><th>Probability</th><th>Threshold</th><th>Alert</th><th>Calibration AUC</th><th>Lift</th></tr></thead>
-    <tbody>
-    {% for s in state.scores %}
-      <tr>
-        <td>{{'قاع / شراء' if s.turn_type=='LOW' else 'قمة / بيع'}}</td>
-        <td>{{s.horizon_sessions}} جلسات</td>
-        <td>{{'Price/Breadth' if s.model_type=='PRICE_BREADTH_ONLY' else 'Price/Breadth + Planetary'}}</td>
-        <td>{{"%.1f"|format(100*s.probability)}}%</td>
-        <td>{{"%.1f"|format(100*s.threshold)}}%</td>
-        <td>{{'⚠️ نعم' if s.alert else 'لا'}}</td>
-        <td>{{"%.3f"|format(s.calibration_auc) if s.calibration_auc is not none else '—'}}</td>
-        <td>{{"%.2f"|format(s.calibration_lift) if s.calibration_lift is not none else '—'}}x</td>
-      </tr>
-    {% endfor %}
-    </tbody>
-  </table>
-  </div>
-</div>
-
-<div class="panel">
-  <h2>أهم Breadth الآن</h2>
-  <div class="cards">
-    {% for key,label in [
-      ('pct_above_ma20','فوق MA20'),
-      ('pct_near_20d_low','قرب قاع 20 يوم'),
-      ('pct_near_20d_high','قرب قمة 20 يوم'),
-      ('pct_higher_low_5','Higher Low'),
-      ('pct_lower_high_5','Lower High'),
-      ('sector_low_consensus','تزامن قيعان القطاعات'),
-      ('sector_high_consensus','تزامن قمم القطاعات')
-    ] %}
-      <div class="panel"><div class="muted">{{label}}</div><div class="metric">
-      {% set v=state.breadth_snapshot.get(key) %}
-      {{("%.1f"|format(v))+"%" if v is not none else "—"}}
-      </div></div>
-    {% endfor %}
-  </div>
-</div>
-
-<div class="panel tablewrap">
-<h2>{{'أسهم مرشحة للمراقبة الشرائية' if state.market_bias=='BUY_WATCH' else ('أسهم مرشحة لمراقبة الخروج/البيع' if state.market_bias=='SELL_WATCH' else 'ترتيب الأسهم الحالي')}}</h2>
-<p class="muted">الترتيب Live/Causal ولا يستخدم pivot مستقبلي. اختبار «هل الأسهم المتوافقة مع القاع/القمة تفوقت بعد سنة؟» منفصل ولن يُستخدم كعامل ترتيب إلا إذا نجح.</p>
-<table>
-<thead><tr><th>السهم</th><th>القطاع</th><th>آخر سعر</th><th>5 أيام</th><th>Higher Low</th><th>Lower High</th><th>Buy score</th><th>Sell score</th></tr></thead>
+<h2>احتمالات Market Turn</h2>
+<p class="muted">LOW: السعر + breadth + القطاعات. HIGH: يضيف Planetary layer.</p>
+<div class="tablewrap"><table>
+<thead><tr><th>الاتجاه</th><th>خلال</th><th>النموذج</th><th>Probability</th><th>Threshold</th><th>Alert</th><th>Calibration AUC</th><th>Lift</th></tr></thead>
 <tbody>
-{% for r in state.top_stocks %}
+{% for s in state.scores %}
 <tr>
-<td>{{r.symbol}}</td><td>{{r.sector}}</td><td>{{"%.2f"|format(r.last_close)}}</td>
-<td>{{"%.2f"|format(r.ret5_pct)}}%</td>
-<td>{{'✓' if r.higher_low_5 else '—'}}</td>
-<td>{{'✓' if r.lower_high_5 else '—'}}</td>
-<td>{{r.buy_rank_score}}</td><td>{{r.sell_rank_score}}</td>
+<td>{{'قاع / شراء' if s.turn_type=='LOW' else 'قمة / بيع'}}</td>
+<td>{{s.horizon_sessions}} جلسات</td>
+<td>{{'Price/Breadth' if s.model_type=='PRICE_BREADTH_ONLY' else 'Price/Breadth + Planetary'}}</td>
+<td>{{"%.1f"|format(100*s.probability)}}%</td><td>{{"%.1f"|format(100*s.threshold)}}%</td>
+<td>{{'⚠️ نعم' if s.alert else 'لا'}}</td>
+<td>{{"%.3f"|format(s.calibration_auc) if s.calibration_auc is not none else '—'}}</td>
+<td>{{"%.2f"|format(s.calibration_lift) if s.calibration_lift is not none else '—'}}x</td>
 </tr>
 {% endfor %}
-</tbody>
-</table>
+</tbody></table></div>
 </div>
 
+<div class="panel"><h2>أهم Breadth الآن</h2><div class="cards">
+{% for key,label in [('pct_above_ma20','فوق MA20'),('pct_near_20d_low','قرب قاع 20 يوم'),('pct_near_20d_high','قرب قمة 20 يوم'),('pct_higher_low_5','Higher Low'),('pct_lower_high_5','Lower High'),('sector_low_consensus','تزامن قيعان القطاعات'),('sector_high_consensus','تزامن قمم القطاعات')] %}
+<div class="panel"><div class="muted">{{label}}</div><div class="metric">{% set v=state.breadth_snapshot.get(key) %}{{("%.1f"|format(v))+"%" if v is not none else "—"}}</div></div>
+{% endfor %}
+</div></div>
+
+{% macro stock_table(rows,title) -%}
+<div class="panel tablewrap"><h2>{{title}}</h2>
+<table><thead><tr><th>السهم</th><th>القطاع</th><th>آخر سعر</th><th>5 أيام</th><th>Higher Low</th><th>Lower High</th><th>Buy score</th><th>Sell score</th></tr></thead><tbody>
+{% for r in rows %}
+<tr><td>{{r.symbol}}</td><td>{{r.sector}}</td><td>{{"%.2f"|format(r.last_close)}}</td><td>{{"%.2f"|format(r.ret5_pct)}}%</td><td>{{'✓' if r.higher_low_5 else '—'}}</td><td>{{'✓' if r.lower_high_5 else '—'}}</td><td><strong>{{r.buy_rank_score}}</strong></td><td><strong>{{r.sell_rank_score}}</strong></td></tr>
+{% else %}<tr><td colspan="8">لا توجد بيانات كافية.</td></tr>{% endfor %}
+</tbody></table></div>
+{%- endmacro %}
+
+{% if state.market_bias=='BUY_WATCH' %}
+{{stock_table(state.top_buy_stocks,'مرشحو المراقبة الشرائية')}}
+{% elif state.market_bias=='SELL_WATCH' %}
+{{stock_table(state.top_sell_stocks,'مرشحو الخروج / البيع')}}
+{% else %}
+<div class="panel notice">الحالة {{'متعارضة زمنيًا' if state.market_bias=='CONFLICT' else 'محايدة'}}؛ لذلك نعرض قائمتي الشراء والبيع منفصلتين.</div>
+{{stock_table(state.top_buy_stocks,'أفضل مرشحي الشراء حاليًا')}}
+{{stock_table(state.top_sell_stocks,'أفضل مرشحي البيع / الخروج حاليًا')}}
+{% endif %}
+
 <div class="panel">
-  <div class="muted">آخر تحديث UTC: {{state.generated_at_utc}}</div>
-  <div class="muted">Index source: {{state.index_source}} — {% if not state.index_independent %}Synthetic/diagnostic فقط{% else %}Independent{% endif %}</div>
+<div class="muted">آخر حساب UTC: {{state.generated_at_utc}}</div>
+<div class="muted">أحدث جلسة موجودة في قاعدة البيانات: {{state.latest_available_date}}</div>
+<div class="muted">Index source: {{state.index_source}} — {% if not state.index_independent %}Synthetic/diagnostic فقط{% else %}Independent{% endif %}</div>
 </div>
 {% endif %}
 {% endblock %}
