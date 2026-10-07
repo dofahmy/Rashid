@@ -219,6 +219,7 @@ def _rank_all_stocks(base, stocks, sectors, daily_date):
             "lower_high_5": bool(lower_high),
             "buy_rank_score": round(buy_score, 2),
             "sell_rank_score": round(sell_score, 2),
+            "net_buy_score": round(buy_score - sell_score, 2),
         })
 
     buy = sorted(rows, key=lambda r: r["buy_rank_score"], reverse=True)[:40]
