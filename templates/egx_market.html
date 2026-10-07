@@ -62,23 +62,24 @@
 {% endfor %}
 </div></div>
 
-{% macro stock_table(rows,title) -%}
+{% macro stock_table(rows,title,table_id) -%}
 <div class="panel tablewrap"><h2>{{title}}</h2>
-<table><thead><tr><th>السهم</th><th>القطاع</th><th>آخر سعر</th><th>5 أيام</th><th>Higher Low</th><th>Lower High</th><th>Buy score</th><th>Sell score</th></tr></thead><tbody>
+<p class="muted">اضغطي على Buy score أو Sell score أو Net Buy Score لترتيب الجدول تصاعدي/تنازلي.</p>
+<table id="{{table_id}}" class="sortable-egx"><thead><tr><th>السهم</th><th>القطاع</th><th>آخر سعر</th><th>5 أيام</th><th>Higher Low</th><th>Lower High</th><th class="sortable-num" data-col="6" style="cursor:pointer">Buy score ⇅</th><th class="sortable-num" data-col="7" style="cursor:pointer">Sell score ⇅</th><th class="sortable-num" data-col="8" style="cursor:pointer">Net Buy Score ⇅</th></tr></thead><tbody>
 {% for r in rows %}
-<tr><td>{{r.symbol}}</td><td>{{r.sector}}</td><td>{{"%.2f"|format(r.last_close)}}</td><td>{{"%.2f"|format(r.ret5_pct)}}%</td><td>{{'✓' if r.higher_low_5 else '—'}}</td><td>{{'✓' if r.lower_high_5 else '—'}}</td><td><strong>{{r.buy_rank_score}}</strong></td><td><strong>{{r.sell_rank_score}}</strong></td></tr>
-{% else %}<tr><td colspan="8">لا توجد بيانات كافية.</td></tr>{% endfor %}
+<tr><td>{{r.symbol}}</td><td>{{r.sector}}</td><td>{{"%.2f"|format(r.last_close)}}</td><td>{{"%.2f"|format(r.ret5_pct)}}%</td><td>{{'✓' if r.higher_low_5 else '—'}}</td><td>{{'✓' if r.lower_high_5 else '—'}}</td><td data-sort="{{r.buy_rank_score}}"><strong>{{r.buy_rank_score}}</strong></td><td data-sort="{{r.sell_rank_score}}"><strong>{{r.sell_rank_score}}</strong></td><td data-sort="{{r.net_buy_score}}"><strong>{{r.net_buy_score}}</strong></td></tr>
+{% else %}<tr><td colspan="9">لا توجد بيانات كافية.</td></tr>{% endfor %}
 </tbody></table></div>
 {%- endmacro %}
 
 {% if state.market_bias=='BUY_WATCH' %}
-{{stock_table(state.top_buy_stocks,'مرشحو المراقبة الشرائية')}}
+{{stock_table(state.top_buy_stocks,'مرشحو المراقبة الشرائية','egx-buy-table')}}
 {% elif state.market_bias=='SELL_WATCH' %}
-{{stock_table(state.top_sell_stocks,'مرشحو الخروج / البيع')}}
+{{stock_table(state.top_sell_stocks,'مرشحو الخروج / البيع','egx-sell-table')}}
 {% else %}
 <div class="panel notice">الحالة {{'متعارضة زمنيًا' if state.market_bias=='CONFLICT' else 'محايدة'}}؛ لذلك نعرض قائمتي الشراء والبيع منفصلتين.</div>
-{{stock_table(state.top_buy_stocks,'أفضل مرشحي الشراء حاليًا')}}
-{{stock_table(state.top_sell_stocks,'أفضل مرشحي البيع / الخروج حاليًا')}}
+{{stock_table(state.top_buy_stocks,'أفضل مرشحي الشراء حاليًا','egx-buy-table')}}
+{{stock_table(state.top_sell_stocks,'أفضل مرشحي البيع / الخروج حاليًا','egx-sell-table')}}
 {% endif %}
 
 <div class="panel">
@@ -87,4 +88,28 @@
 <div class="muted">Index source: {{state.index_source}} — {% if not state.index_independent %}Synthetic/diagnostic فقط{% else %}Independent{% endif %}</div>
 </div>
 {% endif %}
+
+<script>
+(function(){
+  document.querySelectorAll('table.sortable-egx').forEach(function(table){
+    table.querySelectorAll('th.sortable-num').forEach(function(th){
+      th.addEventListener('click', function(){
+        const col=parseInt(th.dataset.col,10);
+        const tbody=table.querySelector('tbody');
+        const rows=Array.from(tbody.querySelectorAll('tr')).filter(function(r){return r.children.length>=9;});
+        const dir=(th.dataset.dir==='desc')?'asc':'desc';
+        table.querySelectorAll('th.sortable-num').forEach(function(x){x.dataset.dir='none';});
+        th.dataset.dir=dir;
+        rows.sort(function(a,b){
+          const av=parseFloat(a.children[col].dataset.sort||a.children[col].textContent)||0;
+          const bv=parseFloat(b.children[col].dataset.sort||b.children[col].textContent)||0;
+          return dir==='asc'?av-bv:bv-av;
+        });
+        rows.forEach(function(r){tbody.appendChild(r);});
+      });
+    });
+  });
+})();
+</script>
+
 {% endblock %}
