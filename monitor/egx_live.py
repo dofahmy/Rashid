@@ -1,7 +1,8 @@
 # monitor/egx_live.py
-# Production EGX market-turn scorer built from the validated V2 research architecture.
+# Production EGX market-turn scorer with NOW + historical AS-OF analysis.
 
 from __future__ import annotations
+
 import importlib.util
 import json
 import math
@@ -15,17 +16,18 @@ from sqlalchemy import select
 
 from core import Setting
 
-STATE_KEY = "egx_live_market_turn_state_v1"
-MODEL_VERSION = "egx-turn-v2-production-1"
+STATE_KEY = "egx_live_market_turn_state_v2"
+REFRESH_STATUS_KEY = "egx_live_refresh_status_v1"
+MODEL_VERSION = "egx-turn-v2-production-2"
 
 BASE_SCRIPT = Path(os.getenv(
     "EGX_RESEARCH_SCRIPT",
     "/app/egx_final_decision_experiment_v2.py"
 ))
 
-# Validated production architecture from the final experiment:
-# LOW  -> price/breadth only
-# HIGH -> price/breadth + planetary
+# Validated architecture from the final experiment:
+# LOW  -> Price/Breadth/Sectors only.
+# HIGH -> Price/Breadth/Sectors + Planetary.
 MODEL_SPECS = (
     ("LOW", 3, "PRICE_BREADTH_ONLY"),
     ("LOW", 5, "PRICE_BREADTH_ONLY"),
@@ -49,14 +51,10 @@ def _load_base():
 
 def _fit_current_model(base, data, label, model_type, horizon):
     """
-    Production calibration:
-    1) Remove the last `horizon` sessions from labeled training because their
-       future label is not fully observable yet.
-    2) Chronological 80/20 train/calibration split.
-    3) Choose alert rate / threshold on calibration only.
-    4) Refit on all fully-labeled history.
-    5) Recalibrate final threshold to the same calibration alert-rate.
-    6) Score the latest row.
+    As-of-safe calibration.
+
+    The last `horizon` sessions are excluded from labeled training because
+    their future outcome is not fully observable at the selected AS-OF date.
     """
     price_cols = [
         c for c in data.columns
@@ -80,7 +78,6 @@ def _fit_current_model(base, data, label, model_type, horizon):
     z = z.replace([np.inf, -np.inf], np.nan)
     z = z.iloc[80:].reset_index(drop=True)
 
-    # latest row is for live scoring; labeled history excludes last horizon sessions
     latest = z.iloc[[-1]].copy()
     hist = z.iloc[:-horizon].copy() if len(z) > horizon else z.iloc[0:0].copy()
     if len(hist) < 400:
@@ -128,7 +125,6 @@ def _fit_current_model(base, data, label, model_type, horizon):
     w2 = base.fit_logit(Xall_i, yall)
     pall = base.sigmoid(Xall_i @ w2)
 
-    # Use recent fitted probability distribution to reproduce validated alert rate.
     recent = pall[-min(504, len(pall)):]
     if alert_rate <= 0:
         threshold = 1.0
@@ -142,6 +138,8 @@ def _fit_current_model(base, data, label, model_type, horizon):
     Xlive = np.column_stack([np.ones(len(Xlive)), Xlive])
     probability = float(base.sigmoid(Xlive @ w2)[0])
 
+    auc = base.auc_score(yva, pva)
+
     return {
         "turn_type": label.split("_")[1],
         "horizon_sessions": int(horizon),
@@ -154,32 +152,21 @@ def _fit_current_model(base, data, label, model_type, horizon):
         "calibration_precision": float(cal_metrics["precision"]),
         "calibration_recall": float(cal_metrics["recall"]),
         "calibration_lift": float(cal_metrics["precision_lift"]) if np.isfinite(cal_metrics["precision_lift"]) else None,
-        "calibration_auc": float(base.auc_score(yva, pva)) if np.isfinite(base.auc_score(yva, pva)) else None,
+        "calibration_auc": float(auc) if np.isfinite(auc) else None,
         "training_rows": int(len(hist)),
         "feature_count": int(len(cols)),
     }
 
 
-def _current_stock_rankings(base, stocks, sectors, daily_date, market_bias):
+def _rank_all_stocks(base, stocks, sectors, daily_date):
     """
-    Causal ranking only.  No future-confirmed stock pivot is used live.
-
-    During LOW/buy watch:
-      reward stocks near 20/60d low, making higher lows, recovering above MA20,
-      and positive 5d momentum.
-
-    During HIGH/sell watch:
-      reward stocks near 20/60d high, making lower highs, losing MA20,
-      and negative 5d momentum.
+    Live causal stock ranking only. No future-confirmed pivot is used.
+    Returns independent BUY and SELL lists.
     """
     rows = []
 
     for sym, df in stocks.items():
         x = df.copy().sort_values("date").reset_index(drop=True)
-        if len(x) < 70:
-            continue
-
-        # latest session on/before live date
         x = x[pd.to_datetime(x["date"]) <= pd.Timestamp(daily_date)].copy()
         if len(x) < 70:
             continue
@@ -234,23 +221,56 @@ def _current_stock_rankings(base, stocks, sectors, daily_date, market_bias):
             "sell_rank_score": round(sell_score, 2),
         })
 
-    rows.sort(
-        key=lambda r: r["buy_rank_score"] if market_bias == "BUY_WATCH" else r["sell_rank_score"],
-        reverse=True
-    )
-    return rows[:40]
+    buy = sorted(rows, key=lambda r: r["buy_rank_score"], reverse=True)[:40]
+    sell = sorted(rows, key=lambda r: r["sell_rank_score"], reverse=True)[:40]
+    return buy, sell
 
 
-def compute_live_state():
+def _truncate_to_asof(stocks, index_df, requested_date):
+    requested = pd.Timestamp(requested_date).normalize()
+
+    idx = index_df[pd.to_datetime(index_df["date"]) <= requested].copy()
+    if idx.empty:
+        raise ValueError("No market data exists on or before the selected date.")
+
+    # Effective market date is the latest available market-index/proxy date.
+    effective = pd.Timestamp(idx["date"].max()).normalize()
+
+    truncated = {}
+    for sym, df in stocks.items():
+        x = df[pd.to_datetime(df["date"]) <= effective].copy()
+        if len(x) >= 250:
+            truncated[sym] = x.reset_index(drop=True)
+
+    return truncated, idx.reset_index(drop=True), effective
+
+
+def compute_state(as_of_date=None):
+    """
+    If as_of_date is provided, rebuild the complete model using ONLY data
+    available on or before that date. This is a true historical AS-OF view.
+    """
     base = _load_base()
 
-    stocks = base.load_stocks(None)
-    index_df, index_source = base.load_index()
+    all_stocks = base.load_stocks(None)
+    full_index_df, index_source = base.load_index()
     sectors = base.fetch_sector_map()
+
+    latest_available = pd.Timestamp(full_index_df["date"].max()).normalize()
+
+    if as_of_date is None:
+        requested_date = latest_available
+        mode = "NOW"
+    else:
+        requested_date = pd.Timestamp(as_of_date).normalize()
+        mode = "AS_OF"
+
+    stocks, index_df, effective_date = _truncate_to_asof(
+        all_stocks, full_index_df, requested_date
+    )
 
     cal = base.market_calendar(stocks, index_df)
 
-    # Historical market-turn labels.
     pframes = []
     ranges = []
     for sym, df in stocks.items():
@@ -275,11 +295,15 @@ def compute_live_state():
     pivots = base.add_cal_index(pivots, cal)
     _, market_turns = base.build_market_turns(pivots, ranges, cal)
 
+    # Ephemeris only through the selected AS-OF date.
     base.prepare_ephemeris(cal["date"])
     daily = base.build_daily_panel(stocks, cal, sectors)
     dailyp = base.add_planetary_daily_features(daily)
     labels = base.build_future_turn_labels(daily, market_turns)
     data = dailyp.merge(labels, on="date", how="inner").sort_values("date").reset_index(drop=True)
+
+    if data.empty:
+        raise RuntimeError("No daily causal feature rows were built for this date.")
 
     scores = []
     for turn_type, h, model_type in MODEL_SPECS:
@@ -298,20 +322,24 @@ def compute_live_state():
     elif high_alerts >= 2 and high_alerts > low_alerts:
         bias = "SELL_WATCH"
         action_ar = "مراقبة بيع / احتمال قمة سوق قريبة"
-    elif low_alerts == 3 and high_alerts == 3:
+    elif low_alerts and high_alerts:
         bias = "CONFLICT"
-        action_ar = "تعارض إشارات — لا قرار اتجاهي"
+        action_ar = "تعارض زمني — إشارات شراء وبيع على آفاق مختلفة"
     else:
         bias = "NEUTRAL"
         action_ar = "محايد — لا توجد إشارة سوق كافية"
 
     latest_date = pd.Timestamp(data.iloc[-1]["date"])
-    rankings = _current_stock_rankings(base, stocks, sectors, latest_date, bias)
+    top_buy, top_sell = _rank_all_stocks(base, stocks, sectors, latest_date)
 
     latest_features = daily.iloc[-1].to_dict()
 
     return {
         "model_version": MODEL_VERSION,
+        "mode": mode,
+        "requested_date": requested_date.date().isoformat(),
+        "effective_market_date": effective_date.date().isoformat(),
+        "latest_available_date": latest_available.date().isoformat(),
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
         "market_date": latest_date.date().isoformat(),
         "index_source": index_source,
@@ -326,11 +354,11 @@ def compute_live_state():
             for k, v in latest_features.items()
             if k != "date" and isinstance(v, (int, float, np.integer, np.floating))
         },
-        "top_stocks": rankings,
+        "top_buy_stocks": top_buy,
+        "top_sell_stocks": top_sell,
         "note": (
-            "LOW production model uses price/breadth/sector features only. "
-            "HIGH production model adds planetary features because that was the "
-            "only side where planets improved out-of-sample performance."
+            "Historical AS-OF mode truncates all price data at the selected date. "
+            "LOW uses price/breadth/sector features. HIGH adds the planetary layer."
         ),
     }
 
@@ -356,7 +384,28 @@ def load_state(session):
         return None
 
 
+def set_refresh_status(DB, status):
+    payload = json.dumps(status, ensure_ascii=False)
+    with DB.begin() as s:
+        row = s.get(Setting, REFRESH_STATUS_KEY)
+        if row is None:
+            row = Setting(key=REFRESH_STATUS_KEY, value=payload)
+            s.add(row)
+        else:
+            row.value = payload
+
+
+def get_refresh_status(session):
+    row = session.get(Setting, REFRESH_STATUS_KEY)
+    if row is None or not row.value:
+        return None
+    try:
+        return json.loads(row.value)
+    except Exception:
+        return None
+
+
 def refresh(DB):
-    state = compute_live_state()
+    state = compute_state(None)
     save_state(DB, state)
     return state
