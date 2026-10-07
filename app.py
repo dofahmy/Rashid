@@ -360,12 +360,35 @@ def create_app(db=None,test_config=None):
             rows=s.scalars(select(Stock).where(*conditions).order_by(Stock.market,Stock.symbol).limit(250)).all()
         return render_template('stock_feed.html',rows=rows)
 
+
+
     @app.get('/egx-market')
     @auth
     def egx_market():
-        from monitor.egx_live import load_state
-        with DB() as s:
-            state=load_state(s)
-        return render_template('egx_market.html',state=state)
+        from monitor.egx_live import load_state,get_refresh_status,compute_state
+        mode=request.args.get('mode','now')
+        selected_date=request.args.get('date','').strip()
+        with DB() as s:refresh_status=get_refresh_status(s)
+        if mode!='date':
+            with DB() as s:state=load_state(s)
+            return render_template('egx_market.html',state=state,refresh_status=refresh_status,selected_mode='now',selected_date='')
+        if not selected_date:
+            flash('اختاري التاريخ أولًا.');return redirect(url_for('egx_market'))
+        try:dt=datetime.strptime(selected_date,'%Y-%m-%d').date()
+        except ValueError:abort(400,description='تاريخ غير صحيح.')
+        try:state=compute_state(dt)
+        except Exception as exc:
+            flash(f'فشل حساب التاريخ المحدد: {type(exc).__name__}: {exc}');state=None
+        return render_template('egx_market.html',state=state,refresh_status=refresh_status,selected_mode='date',selected_date=selected_date)
+
+    @app.post('/egx-market/refresh')
+    @auth
+    def egx_refresh_market():
+        import subprocess,sys
+        from monitor.egx_live import set_refresh_status
+        set_refresh_status(DB,{'status':'queued','started_at_utc':datetime.now(timezone.utc).isoformat(),'message':'تم طلب التحديث. سيبدأ تحديث الأسعار وإعادة الحساب الآن.'})
+        subprocess.Popen([sys.executable,'-m','monitor.egx_refresh_once'],cwd='/app',stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True)
+        flash('بدأ تحديث بيانات السوق المصري وإعادة الحساب. أعيدي فتح الصفحة بعد قليل.')
+        return redirect(url_for('egx_market'))
 
     return app
