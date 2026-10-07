@@ -227,20 +227,55 @@ def _rank_all_stocks(base, stocks, sectors, daily_date):
 
 
 def _truncate_to_asof(stocks, index_df, requested_date):
+    """
+    Historical AS-OF must be driven by the STOCK database calendar, not by the
+    synthetic index proxy.  The proxy can have a shorter history than the
+    underlying stocks, which previously caused valid historical dates to fail.
+    """
     requested = pd.Timestamp(requested_date).normalize()
 
-    idx = index_df[pd.to_datetime(index_df["date"]) <= requested].copy()
-    if idx.empty:
-        raise ValueError("No market data exists on or before the selected date.")
+    # Find the latest REAL stock session on/before the requested date.
+    candidate_dates = []
+    for df in stocks.values():
+        if df is None or len(df) == 0:
+            continue
+        d = pd.to_datetime(df["date"], errors="coerce")
+        d = d[d <= requested]
+        if len(d):
+            candidate_dates.append(pd.Timestamp(d.max()).normalize())
 
-    # Effective market date is the latest available market-index/proxy date.
-    effective = pd.Timestamp(idx["date"].max()).normalize()
+    if not candidate_dates:
+        earliest = []
+        for df in stocks.values():
+            if df is not None and len(df):
+                d = pd.to_datetime(df["date"], errors="coerce").dropna()
+                if len(d):
+                    earliest.append(pd.Timestamp(d.min()).normalize())
+        first = min(earliest).date().isoformat() if earliest else "unknown"
+        raise ValueError(
+            f"No EGX stock data exists on or before {requested.date().isoformat()}. "
+            f"Earliest available stock date: {first}"
+        )
+
+    effective = max(candidate_dates)
 
     truncated = {}
     for sym, df in stocks.items():
         x = df[pd.to_datetime(df["date"]) <= effective].copy()
         if len(x) >= 250:
             truncated[sym] = x.reset_index(drop=True)
+
+    if not truncated:
+        raise ValueError(
+            f"Stocks exist near {effective.date().isoformat()}, but none has the "
+            "minimum history required for this model."
+        )
+
+    # The index/proxy is diagnostic only.  Keep whatever history it has; an
+    # empty proxy is allowed because market_calendar() also uses every stock.
+    idx = index_df[pd.to_datetime(index_df["date"]) <= effective].copy()
+    if idx.empty:
+        idx = pd.DataFrame(columns=["date", "open", "high", "low", "close"])
 
     return truncated, idx.reset_index(drop=True), effective
 
@@ -256,7 +291,16 @@ def compute_state(as_of_date=None):
     full_index_df, index_source = base.load_index()
     sectors = base.fetch_sector_map()
 
-    latest_available = pd.Timestamp(full_index_df["date"].max()).normalize()
+    # NOW must also follow the newest stock session rather than the synthetic
+    # proxy's last row.
+    latest_stock_dates = [
+        pd.Timestamp(pd.to_datetime(df["date"], errors="coerce").max()).normalize()
+        for df in all_stocks.values()
+        if df is not None and len(df)
+    ]
+    if not latest_stock_dates:
+        raise RuntimeError("No EGX stock history is available.")
+    latest_available = max(latest_stock_dates)
 
     if as_of_date is None:
         requested_date = latest_available
