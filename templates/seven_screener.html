@@ -57,7 +57,7 @@
 <th>السعر الحالي</th>
 <th>الحالي مقابل Repeat %</th>
 <th>من كام يوم</th>
-<th>Max Rise 20D</th><th>Max Drawdown 20D</th><th>+5% قبل -3%</th><th>أول حسم ±3% (جلسة)</th><th>+5% قبل -5%</th><th>أول حسم ±5% (جلسة)</th><th>متابعة 20 جلسة</th>
+<th>خروج +30%</th><th>جلسة +30%</th><th>تاريخ +30%</th><th>خروج +50%</th><th>جلسة +50%</th><th>تاريخ +50%</th><th>أقصى صعود منذ Repeat</th><th>Max Rise 20D</th><th>Max Drawdown 20D</th><th>+5% قبل -3%</th><th>أول حسم ±3% (جلسة)</th><th>+5% قبل -5%</th><th>أول حسم ±5% (جلسة)</th><th>متابعة 20 جلسة</th>
 <th>كل التواريخ</th>
 <th>كل الأسعار</th>
 </tr>
@@ -79,12 +79,12 @@
 {% else %}—{% endif %}
 </td>
 <td>{{r.days_ago if r.days_ago is not none else '—'}}</td>
-<td>{% if r.max_rise_20d_pct is not none %}{{'%+.2f'|format(r.max_rise_20d_pct)}}%{% else %}—{% endif %}</td><td>{% if r.max_drawdown_20d_pct is not none %}{{'%+.2f'|format(r.max_drawdown_20d_pct)}}%{% else %}—{% endif %}</td><td>{{r.plus5_before_minus3}}</td><td>{{r.first_hit_minus3 if r.first_hit_minus3 is not none else '—'}}</td><td>{{r.plus5_before_minus5}}</td><td>{{r.first_hit_minus5 if r.first_hit_minus5 is not none else '—'}}</td><td>{{r.observed_20d_sessions}}/20 {% if not r.complete_20d %}⏳{% endif %}</td>
+<td>{{ '✅ EXIT' if r.exit_30_status == 'EXIT' else ('⏳ OPEN' if r.exit_30_status == 'OPEN' else 'NO_DATA') }}</td><td>{{r.exit_30_session or '—'}}</td><td>{{r.exit_30_date or '—'}}</td><td>{{ '✅ EXIT' if r.exit_50_status == 'EXIT' else ('⏳ OPEN' if r.exit_50_status == 'OPEN' else 'NO_DATA') }}</td><td>{{r.exit_50_session or '—'}}</td><td>{{r.exit_50_date or '—'}}</td><td>{{ ('%+.2f'|format(r.exit_max_rise_pct)) ~ '%' if r.exit_max_rise_pct is not none else '—' }}</td><td>{% if r.max_rise_20d_pct is not none %}{{'%+.2f'|format(r.max_rise_20d_pct)}}%{% else %}—{% endif %}</td><td>{% if r.max_drawdown_20d_pct is not none %}{{'%+.2f'|format(r.max_drawdown_20d_pct)}}%{% else %}—{% endif %}</td><td>{{r.plus5_before_minus3}}</td><td>{{r.first_hit_minus3 if r.first_hit_minus3 is not none else '—'}}</td><td>{{r.plus5_before_minus5}}</td><td>{{r.first_hit_minus5 if r.first_hit_minus5 is not none else '—'}}</td><td>{{r.observed_20d_sessions}}/20 {% if not r.complete_20d %}⏳{% endif %}</td>
 <td dir="ltr">{{r.dates}}</td>
 <td dir="ltr">{{r.prices}}</td>
 </tr>
 {% else %}
-<tr><td colspan="19">مفيش أسهم مطابقة للشروط المختارة.</td></tr>
+<tr><td colspan="30">مفيش أسهم مطابقة للشروط المختارة.</td></tr>
 {% endfor %}
 </tbody>
 </table>
