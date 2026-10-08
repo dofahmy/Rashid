@@ -5,6 +5,7 @@ from sqlalchemy import select
 from core import database
 from monitor.gann_analysis import _daily_table, _load_egx_panel
 from monitor.seven_forward_20d import forward_20d
+from monitor.seven_breakout_rule import classify_repeat
 
 PRICE_SCALE=100
 
@@ -312,6 +313,7 @@ def repeat_price_time_screener(price_tolerance_pct=1.0, max_gap_sessions=20, rec
             'dates':latest['dates'],
             'prices':latest['prices'],
             'days_ago':age,
+            **classify_repeat(df, latest['end_date'], latest['max_session_gap'], latest['touches']),
             **forward_20d(df,latest['end_date'],latest['avg_price']),
             'current_close':round(current_close,4) if current_close is not None else None,
             'current_date':current_date,

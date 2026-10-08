@@ -9,6 +9,7 @@ from sqlalchemy import text
 from core import database
 from monitor.sp500_seven_data import ensure_tables, DAILY_TABLE, CONSTIT_TABLE, INDEX_TABLE
 from monitor.seven_forward_20d import forward_20d
+from monitor.seven_breakout_rule import classify_repeat
 from monitor.seven_system import (
     _single, _repeat_double7_levels, _filter, _chart_payload
 )
@@ -199,7 +200,7 @@ def repeat_price_time_screener(price_tolerance_pct=1.0,max_gap_sessions=20,recen
             if actual_gap<=0:actual_gap=int(z["max_session_gap"])
         else:actual_gap=int(z["max_session_gap"])
         perf=_gap_matched_return(df,z["end_date"],actual_gap,direction)
-        rows.append({"symbol":sym,"latest_repeat_date":z["end_date"],"first_repeat_date":z["start_date"],"repeat_price":z["avg_price"],"touches":z["touches"],"price_spread_pct":z["price_spread_pct"],"dates":z["dates"],"prices":z["prices"],"days_ago":age,"repeat_direction":direction,"direction_reason":reason,"candle_open":o,"candle_high":h,"candle_low":l,"candle_close":c,"actual_repeat_gap_sessions":actual_gap,**perf,**forward_20d(df,z["end_date"],z["avg_price"])})
+        rows.append({"symbol":sym,"latest_repeat_date":z["end_date"],"first_repeat_date":z["start_date"],"repeat_price":z["avg_price"],"touches":z["touches"],"price_spread_pct":z["price_spread_pct"],"dates":z["dates"],"prices":z["prices"],"days_ago":age,"repeat_direction":direction,"direction_reason":reason,"candle_open":o,"candle_high":h,"candle_low":l,"candle_close":c,"actual_repeat_gap_sessions":actual_gap,**classify_repeat(df,z["end_date"],z["max_session_gap"],z["touches"]),**perf,**forward_20d(df,z["end_date"],z["avg_price"])})
     rows.sort(key=lambda r:(pd.Timestamp(r["latest_repeat_date"]),r["touches"]),reverse=True)
     return {"rows":rows,"count":len(rows),"latest_market_date":latest.date().isoformat() if latest is not None else None,"price_tolerance_pct":float(price_tolerance_pct),"max_gap_sessions":int(max_gap_sessions),"recent_days":recent_days}
 
