@@ -461,4 +461,20 @@ def create_app(db=None,test_config=None):
             day=day,month=month,start=start,end=end,signals_only=signals_only
         )
 
+
+    @app.get('/egx-seven/day/<day>')
+    @auth
+    def egx_seven_day(day):
+        from monitor.seven_system import market_day_stock_details
+        try:
+            dt=datetime.strptime(day,'%Y-%m-%d').date()
+        except ValueError:
+            abort(400,description='تاريخ غير صحيح.')
+        try:
+            rows=market_day_stock_details(dt)
+            error=None
+        except Exception as exc:
+            rows=[]
+            error=f'{type(exc).__name__}: {exc}'
+        return render_template('seven_day_stocks.html',day=day,rows=rows,error=error)
     return app
