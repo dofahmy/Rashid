@@ -539,4 +539,122 @@ def create_app(db=None,test_config=None):
             recent_days=recent_days if recent_days is not None else 'all',
         )
 
+
+    @app.get('/sp500-seven')
+    @auth
+    def sp500_seven():
+        from monitor.sp500_seven_system import run,list_symbols
+        from monitor.sp500_seven_data import get_status
+
+        scope=request.args.get('scope','market')
+        symbol=request.args.get('symbol','').strip().upper()
+        metric=request.args.get('metric','both')
+        date_mode=request.args.get('date_mode','all')
+        day=request.args.get('day','').strip()
+        month=request.args.get('month','').strip()
+        start=request.args.get('start','').strip()
+        end=request.args.get('end','').strip()
+        signals_only=request.args.get('signals_only')=='1'
+        try: repeat_price_tolerance_pct=float(request.args.get('repeat_price_tolerance_pct','1.0'))
+        except Exception: repeat_price_tolerance_pct=1.0
+        try: repeat_max_gap_sessions=int(request.args.get('repeat_max_gap_sessions','20'))
+        except Exception: repeat_max_gap_sessions=20
+
+        repeat_price_tolerance_pct=max(0.0,min(repeat_price_tolerance_pct,20.0))
+        repeat_max_gap_sessions=max(1,min(repeat_max_gap_sessions,252))
+
+        result=None;error=None
+        try:
+            symbols=list_symbols()
+        except Exception:
+            symbols=[]
+
+        with DB() as s:
+            refresh_status=get_status(s)
+
+        if request.args:
+            try:
+                result=run(
+                    scope=scope,symbol=symbol or None,metric=metric,
+                    date_mode=date_mode,day=day or None,month=month or None,
+                    start=start or None,end=end or None,signals_only=signals_only,
+                    repeat_price_tolerance_pct=repeat_price_tolerance_pct,
+                    repeat_max_gap_sessions=repeat_max_gap_sessions,
+                )
+            except Exception as exc:
+                app.logger.exception('SP500 Seven calculation failed')
+                error=f'{type(exc).__name__}: {exc}'
+
+        return render_template(
+            'sp500_seven.html',
+            result=result,error=error,symbols=symbols,
+            scope=scope,symbol=symbol,metric=metric,date_mode=date_mode,
+            day=day,month=month,start=start,end=end,signals_only=signals_only,
+            repeat_price_tolerance_pct=repeat_price_tolerance_pct,
+            repeat_max_gap_sessions=repeat_max_gap_sessions,
+            refresh_status=refresh_status,
+        )
+
+    @app.post('/sp500-seven/refresh')
+    @auth
+    def sp500_seven_refresh():
+        import subprocess,sys
+        subprocess.Popen(
+            [sys.executable,'-m','monitor.sp500_seven_refresh_once'],
+            cwd='/app',
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        flash('بدأ تحديث قائمة وأسعار S&P 500. أول تحميل قد يأخذ وقتًا لأنه يبني التاريخ.')
+        return redirect(url_for('sp500_seven'))
+
+    @app.get('/sp500-seven/screener')
+    @auth
+    def sp500_seven_screener():
+        from monitor.sp500_seven_system import repeat_price_time_screener
+        try: price_tolerance_pct=float(request.args.get('price_tolerance_pct','1.0'))
+        except Exception: price_tolerance_pct=1.0
+        try: max_gap_sessions=int(request.args.get('max_gap_sessions','20'))
+        except Exception: max_gap_sessions=20
+        recent_raw=request.args.get('recent_days','90').strip()
+        if recent_raw.lower() in ('','all','none'): recent_days=None
+        else:
+            try: recent_days=int(recent_raw)
+            except Exception: recent_days=90
+
+        error=None;result=None
+        try:
+            result=repeat_price_time_screener(
+                price_tolerance_pct=price_tolerance_pct,
+                max_gap_sessions=max_gap_sessions,
+                recent_days=recent_days,
+            )
+        except Exception as exc:
+            app.logger.exception('SP500 repeat screener failed')
+            error=f'{type(exc).__name__}: {exc}'
+
+        return render_template(
+            'sp500_seven_screener.html',
+            result=result,error=error,
+            price_tolerance_pct=price_tolerance_pct,
+            max_gap_sessions=max_gap_sessions,
+            recent_days=recent_days if recent_days is not None else 'all',
+        )
+
+    @app.get('/sp500-seven/day/<day>')
+    @auth
+    def sp500_seven_day(day):
+        from monitor.sp500_seven_system import market_day_stock_details
+        try:
+            dt=datetime.strptime(day,'%Y-%m-%d').date()
+        except ValueError:
+            abort(400,description='Invalid date.')
+        kind=request.args.get('kind','double')
+        try:
+            rows=market_day_stock_details(dt,kind=kind);error=None
+        except Exception as exc:
+            rows=[];error=f'{type(exc).__name__}: {exc}'
+        return render_template('sp500_seven_day_stocks.html',day=day,rows=rows,error=error,kind=kind)
+
     return app
