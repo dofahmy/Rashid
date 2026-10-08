@@ -1,5 +1,9 @@
 {% extends 'base.html' %}{% block content %}
 <h1>SCREEN SP500 · Repeat Price + Time</h1>
+<div class="panel">
+<a class="button secondary" href="{{url_for('sp500_seven')}}">نظام S&P 500</a>
+<a class="button secondary" href="{{url_for('egx_seven_screener')}}">SCREEN EGYPT</a>
+</div>
 
 <div class="panel">
 <p class="muted">
@@ -53,7 +57,7 @@
 <th>Max Gap</th>
 <th>Price Spread %</th>
 <th>السعر الحالي</th>
-<th>الحالي مقابل Repeat %</th>
+<th>السعر الحالي مقابل Repeat %</th>
 <th>من كام يوم</th>
 <th>كل التواريخ</th>
 <th>كل الأسعار</th>

@@ -1,11 +1,14 @@
 {% extends 'base.html' %}{% block content %}
-<h1>Screening السوق كله · Repeat Price + Time</h1>
+<h1>SCREEN EGYPT · Repeat Price + Time</h1>
+<div class="panel">
+<a class="button secondary" href="{{url_for('egx_seven')}}">نظام مصر</a>
+<a class="button secondary" href="{{url_for('sp500_seven_screener')}}">SCREEN SP500</a>
+</div>
 
 <div class="panel">
 <p class="muted">
-يطلع آخر Cluster لكل سهم عمل فيه Double 7 عند نفس المستوى السعري وفي مسافة زمنية متقاربة.
-اتجاه Repeat: الشمعة السلبية = SELL، والشمعة الإيجابية تُصبح SELL لو High-Close أكبر من جسم الشمعة؛ غير ذلك BUY.
-النتيجة تُقاس لنفس عدد جلسات الـRepeat Gap، وليس حتى اليوم. لو الفترة لم تكتمل يظهر ⏳ حتى تكتمل.
+يطلع آخر Cluster لكل سهم عمل فيه Double 7 عند نفس المستوى السعري تقريبًا وفي مسافة زمنية متقاربة.
+النتائج مرتبة من أحدث تاريخ للأقدم.
 </p>
 
 <form method="get" action="{{url_for('egx_seven_screener')}}" class="filters">
@@ -44,68 +47,44 @@
 <div class="panel tablewrap">
 <h2>آخر الأسهم عند Repeat Price + Time</h2>
 <table class="sortable-egx">
-<thead><tr>
+<thead>
+<tr>
 <th>السهم</th>
 <th>آخر Repeat Date</th>
+<th>أول تاريخ في الـCluster</th>
 <th>Repeat Price</th>
-<th>اتجاه Repeat</th>
-<th>سبب الاتجاه</th>
-<th>Open</th><th>High</th><th>Low</th><th>Close</th>
-<th>Repeat Gap</th>
-<th>المحسوب / المطلوب</th>
-<th>تاريخ نهاية القياس</th>
-<th>العائد الخام %</th>
-<th>العائد حسب اتجاه الإشارة %</th>
 <th>Touches</th>
+<th>Max Gap</th>
 <th>Price Spread %</th>
+<th>السعر الحالي</th>
+<th>السعر الحالي مقابل Repeat %</th>
+<th>من كام يوم</th>
 <th>كل التواريخ</th>
 <th>كل الأسعار</th>
-</tr></thead>
+</tr>
+</thead>
 <tbody>
 {% for r in result.rows %}
 <tr>
 <td><strong>{{r.symbol}}</strong></td>
 <td><strong>{{r.latest_repeat_date}}</strong></td>
+<td>{{r.first_repeat_date}}</td>
 <td><strong>{{r.repeat_price}}</strong></td>
-<td>
-{% if r.repeat_direction=='SELL' %}
-<strong style="color:#b42318">SELL</strong>
-{% elif r.repeat_direction=='BUY' %}
-<strong style="color:#067647">BUY</strong>
-{% else %}
-<strong>{{r.repeat_direction}}</strong>
-{% endif %}
-</td>
-<td>{{r.direction_reason}}</td>
-<td>{{r.candle_open if r.candle_open is not none else '—'}}</td>
-<td>{{r.candle_high if r.candle_high is not none else '—'}}</td>
-<td>{{r.candle_low if r.candle_low is not none else '—'}}</td>
-<td>{{r.candle_close if r.candle_close is not none else '—'}}</td>
-<td><strong>{{r.actual_repeat_gap_sessions}}</strong> جلسة</td>
-<td>
-{{r.gap_elapsed_sessions if r.gap_elapsed_sessions is not none else '—'}}
-/
-{{r.gap_target_sessions if r.gap_target_sessions is not none else '—'}}
-{% if r.gap_complete %}✅{% else %}⏳{% endif %}
-</td>
-<td>{{r.gap_end_date or '—'}}</td>
-<td>
-{% if r.gap_raw_return_pct is not none %}
-{{'%+.2f'|format(r.gap_raw_return_pct)}}%
-{% else %}—{% endif %}
-</td>
-<td>
-{% if r.gap_direction_return_pct is not none %}
-<strong>{{'%+.2f'|format(r.gap_direction_return_pct)}}%</strong>
-{% else %}—{% endif %}
-</td>
 <td>{{r.touches}}</td>
+<td>{{r.max_session_gap}}</td>
 <td>{{r.price_spread_pct}}%</td>
+<td>{{r.current_close if r.current_close is not none else '—'}}</td>
+<td>
+{% if r.current_vs_repeat_pct is not none %}
+  {{'%+.2f'|format(r.current_vs_repeat_pct)}}%
+{% else %}—{% endif %}
+</td>
+<td>{{r.days_ago if r.days_ago is not none else '—'}}</td>
 <td dir="ltr">{{r.dates}}</td>
 <td dir="ltr">{{r.prices}}</td>
 </tr>
 {% else %}
-<tr><td colspan="18">مفيش أسهم مطابقة للشروط المختارة.</td></tr>
+<tr><td colspan="12">مفيش أسهم مطابقة للشروط المختارة.</td></tr>
 {% endfor %}
 </tbody>
 </table>

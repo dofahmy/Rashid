@@ -1,5 +1,7 @@
 {% extends 'base.html' %}{% block content %}
 <h1>متابعة الأسهم · ربع الساعة</h1>
+<div class="panel"><a class="button" href="{{url_for('sp500_seven')}}">S&P 500 · نظام الـ 7</a></div>
+
 <div class="panel"><a class="button" href="{{url_for('egx_seven')}}">نظام الـ 7</a></div>
 
 <div class="panel"><a class="button" href="{{url_for('egx_market')}}">السوق المصري · Market Turn</a><p class="muted">LOW: Price/Breadth/Sectors · HIGH: Price/Breadth/Sectors + Planetary.</p></div>
