@@ -26,52 +26,19 @@ def _load_stocks():
         t=_daily_table(s)
         cs=_pick(t,['symbol','ticker','sym'])
         cd=_pick(t,['session_date','date','d','datetime','timestamp','ts'])
-
-        cadj=_pick(t,['adj_c','adj_close','adjusted_close'],False)
-        cc=_pick(t,['c','close'])
-        co=_pick(t,['o','open'],False)
-        ch=_pick(t,['h','high'],False)
-        cl=_pick(t,['l','low'],False)
+        cc=_pick(t,['adj_c','adj_close','adjusted_close'],False)
+        if cc is None:cc=_pick(t,['c','close'])
         cv=_pick(t,['v','volume'],False)
-
-        syms=[r[0] for r in s.execute(
-            select(cs).where(cs.ilike('%.CA')).distinct().order_by(cs)
-        ).all() if r and r[0]]
-
+        syms=[r[0] for r in s.execute(select(cs).where(cs.ilike('%.CA')).distinct().order_by(cs)).all() if r and r[0]]
         for sym in syms:
-            cols=[cd,cc]
-            names=['date','raw_close']
-
-            if cadj is not None:
-                cols.append(cadj);names.append('adj_close')
-            if co is not None:
-                cols.append(co);names.append('open')
-            if ch is not None:
-                cols.append(ch);names.append('high')
-            if cl is not None:
-                cols.append(cl);names.append('low')
-            if cv is not None:
-                cols.append(cv);names.append('volume')
-
+            cols=[cd,cc];names=['date','close']
+            if cv is not None:cols.append(cv);names.append('volume')
             rows=s.execute(select(*cols).where(cs==sym).order_by(cd)).all()
             if not rows:continue
-
             df=pd.DataFrame(rows,columns=names)
             df['date']=pd.to_datetime(df['date'],errors='coerce')
-            df['raw_close']=pd.to_numeric(df['raw_close'],errors='coerce')
-
-            if 'adj_close' in df:
-                df['close']=pd.to_numeric(df['adj_close'],errors='coerce')
-                df['close']=df['close'].where(df['close'].notna(),df['raw_close'])
-            else:
-                df['close']=df['raw_close']
-
-            for col in ('open','high','low','volume'):
-                if col in df:
-                    df[col]=pd.to_numeric(df[col],errors='coerce')
-                else:
-                    df[col]=np.nan
-
+            df['close']=pd.to_numeric(df['close'],errors='coerce')
+            df['volume']=pd.to_numeric(df['volume'],errors='coerce') if 'volume' in df else np.nan
             df=df.dropna(subset=['date','close']).sort_values('date').drop_duplicates('date',keep='last').reset_index(drop=True)
             if len(df):out[str(sym).upper()]=df
     return out
@@ -113,10 +80,7 @@ def _market(frames):
 
 def _single(df,volume=True):
     x=df.copy().sort_values('date').reset_index(drop=True)
-    if 'raw_close' not in x.columns:
-        x['raw_close']=x['close'].astype(float)
-    else:
-        x['raw_close']=pd.to_numeric(x['raw_close'],errors='coerce')
+    x['raw_close']=x['close'].astype(float)
     x['price_units']=x.close.map(_units)
 
     pa=next((i for i,v in enumerate(x.price_units) if v is not None and v%7==0),None)
@@ -275,124 +239,24 @@ def _chart_payload(price_df,signal_mask,value_col):
     return {'points':points,'markers':markers,'min':mn,'max':mx}
 
 
-
-def _repeat_direction_from_candle(row):
-    """
-    Direction rule requested for Repeat Price+Time.
-
-    SELL:
-      1) negative candle: Close < Open
-      2) positive candle, but weak close:
-         (High - Close) > candle body abs(Close - Open)
-
-    BUY:
-      - positive candle not meeting the weak-close SELL rule.
-
-    For a flat/doji candle, use wick dominance as a tie-breaker.
-    """
-    vals=[row.get('open'),row.get('high'),row.get('low'),row.get('raw_close')]
-    if any(v is None or pd.isna(v) for v in vals):
-        return 'UNKNOWN','OHLC غير متاح'
-
-    o=float(row['open']);h=float(row['high']);l=float(row['low']);c=float(row['raw_close'])
-    body=abs(c-o)
-    upper=max(0.0,h-c)
-    lower=max(0.0,c-l)
-
-    if c < o:
-        return 'SELL','شمعة سلبية'
-
-    if c > o:
-        if upper > body:
-            return 'SELL','شمعة إيجابية لكن High-Close أكبر من جسم الشمعة'
-        return 'BUY','شمعة إيجابية وإغلاق غير ضعيف'
-
-    # Doji / flat candle: use the stronger rejection side.
-    if upper > lower:
-        return 'SELL','Doji والـ upper wick أكبر'
-    if lower > upper:
-        return 'BUY','Doji والـ lower wick أكبر'
-    return 'NEUTRAL','Doji متعادل'
-
-
-def _actual_latest_repeat_gap(df, level):
-    """
-    Number of trading sessions between the LAST TWO Double-7 repeat dates
-    in the selected price/time cluster.
-    """
-    dates=[pd.Timestamp(x.strip()).normalize() for x in str(level.get('dates','')).split('|') if x.strip()]
-    if len(dates)<2:
-        return max(1,int(level.get('max_session_gap') or 1))
-
-    calendar=[pd.Timestamp(d).normalize() for d in pd.to_datetime(df['date'])]
-    pos={d:i for i,d in enumerate(calendar)}
-    d1,d2=dates[-2],dates[-1]
-    if d1 in pos and d2 in pos and pos[d2]>pos[d1]:
-        return int(pos[d2]-pos[d1])
-    return max(1,int(level.get('max_session_gap') or 1))
-
-
-def _gap_matched_return(df, signal_date, gap_sessions, direction):
-    """
-    Evaluate the Repeat signal over the SAME number of sessions as its
-    latest repeat gap.
-
-    Example:
-      latest repeat gap = 20 sessions
-      -> evaluate from Repeat date close to close 20 sessions later.
-
-    If the full horizon has not elapsed, return a pending partial result.
-    Uses adjusted close for return calculations where available.
-    """
-    if df is None or df.empty:
-        return {}
-
-    x=df.sort_values('date').reset_index(drop=True)
-    target=pd.Timestamp(signal_date).normalize()
-    normalized=pd.to_datetime(x['date']).dt.normalize()
-    matches=x.index[normalized==target].tolist()
-    if not matches:
-        return {}
-
-    i=int(matches[-1])
-    n=max(1,int(gap_sessions))
-    j=min(i+n,len(x)-1)
-    elapsed=j-i
-
-    # 'close' is the existing adjusted-close series used by the EGX Seven logic.
-    start=float(x.iloc[i]['close'])
-    finish=float(x.iloc[j]['close'])
-    raw=(finish/start-1.0)*100.0 if start else None
-
-    if raw is None:
-        aligned=None
-    elif direction=='SELL':
-        aligned=-raw
-    else:
-        aligned=raw
-
-    return {
-        'gap_target_sessions':n,
-        'gap_elapsed_sessions':elapsed,
-        'gap_complete':bool(elapsed>=n),
-        'gap_end_date':pd.Timestamp(x.iloc[j]['date']).date().isoformat(),
-        'gap_end_price':round(float(x.iloc[j]['raw_close']),4) if pd.notna(x.iloc[j].get('raw_close')) else round(finish,4),
-        'gap_raw_return_pct':round(raw,2) if raw is not None else None,
-        'gap_direction_return_pct':round(aligned,2) if aligned is not None else None,
-    }
-
-
 def repeat_price_time_screener(price_tolerance_pct=1.0, max_gap_sessions=20, recent_days=None):
     """
-    Whole-EGX screening for the latest Repeat Price+Time per stock,
-    plus candle-derived direction and gap-matched performance.
+    Screen the whole EGX universe for the LATEST repeated same-stock Double-7
+    price/time cluster.
+
+    Returns ONE latest qualifying cluster per stock, sorted by latest date DESC.
+
+    Optional recent_days:
+      if set, keep only stocks whose latest qualifying cluster ended within
+      recent_days calendar days from the latest market date in the database.
     """
     frames=_load_stocks()
     rows=[]
 
     latest_market_date=None
     for df in frames.values():
-        if df is None or df.empty:continue
+        if df is None or df.empty:
+            continue
         d=pd.to_datetime(df['date'],errors='coerce').dropna()
         if len(d):
             mx=pd.Timestamp(d.max()).normalize()
@@ -405,31 +269,26 @@ def repeat_price_time_screener(price_tolerance_pct=1.0, max_gap_sessions=20, rec
             price_tolerance_pct=price_tolerance_pct,
             max_gap_sessions=max_gap_sessions,
         )
-        if not levels:continue
-
-        latest=max(levels,key=lambda z:pd.Timestamp(z['end_date']))
-        end_date=pd.Timestamp(latest['end_date']).normalize()
-        age=(latest_market_date-end_date).days if latest_market_date is not None else None
-        if recent_days is not None and age is not None and age>int(recent_days):
+        if not levels:
             continue
 
-        rr=df[pd.to_datetime(df['date']).dt.normalize()==end_date]
-        if len(rr):
-            candle=rr.iloc[-1]
-            direction,reason=_repeat_direction_from_candle(candle)
-            candle_open=round(float(candle['open']),4) if pd.notna(candle['open']) else None
-            candle_high=round(float(candle['high']),4) if pd.notna(candle['high']) else None
-            candle_low=round(float(candle['low']),4) if pd.notna(candle['low']) else None
-            candle_close=round(float(candle['raw_close']),4) if pd.notna(candle['raw_close']) else None
+        # latest qualifying cluster for this stock
+        latest=max(levels,key=lambda z:pd.Timestamp(z['end_date']))
+
+        end_date=pd.Timestamp(latest['end_date']).normalize()
+        if recent_days is not None and latest_market_date is not None:
+            age=(latest_market_date-end_date).days
+            if age>int(recent_days):
+                continue
         else:
-            direction,reason='UNKNOWN','OHLC غير متاح'
-            candle_open=candle_high=candle_low=candle_close=None
+            age=(latest_market_date-end_date).days if latest_market_date is not None else None
 
-        actual_gap=_actual_latest_repeat_gap(df,latest)
-        perf=_gap_matched_return(df,latest['end_date'],actual_gap,direction)
-
-        current_close=round(float(df.iloc[-1]['raw_close']),4) if len(df) and pd.notna(df.iloc[-1]['raw_close']) else None
-        current_date=pd.Timestamp(df.iloc[-1]['date']).date().isoformat() if len(df) else None
+        # current/latest stock price for context
+        current_close=None
+        current_date=None
+        if len(df):
+            current_close=float(df.iloc[-1]['close'])
+            current_date=pd.Timestamp(df.iloc[-1]['date']).date().isoformat()
 
         rows.append({
             'symbol':sym,
@@ -440,26 +299,25 @@ def repeat_price_time_screener(price_tolerance_pct=1.0, max_gap_sessions=20, rec
             'max_price':latest['max_price'],
             'touches':latest['touches'],
             'max_session_gap':latest['max_session_gap'],
-            'actual_repeat_gap_sessions':actual_gap,
             'price_spread_pct':latest['price_spread_pct'],
             'dates':latest['dates'],
             'prices':latest['prices'],
             'days_ago':age,
-            'current_close':current_close,
+            'current_close':round(current_close,4) if current_close is not None else None,
             'current_date':current_date,
-
-            'repeat_direction':direction,
-            'direction_reason':reason,
-            'candle_open':candle_open,
-            'candle_high':candle_high,
-            'candle_low':candle_low,
-            'candle_close':candle_close,
-
-            **perf,
+            'current_vs_repeat_pct':(
+                round((current_close/latest['avg_price']-1.0)*100.0,2)
+                if current_close is not None and latest['avg_price'] not in (None,0)
+                else None
+            ),
         })
 
     rows.sort(
-        key=lambda r:(pd.Timestamp(r['latest_repeat_date']),int(r['touches'])),
+        key=lambda r:(
+            pd.Timestamp(r['latest_repeat_date']),
+            int(r['touches']),
+            -float(r['price_spread_pct'] or 0),
+        ),
         reverse=True
     )
 
@@ -471,7 +329,6 @@ def repeat_price_time_screener(price_tolerance_pct=1.0, max_gap_sessions=20, rec
         'max_gap_sessions':int(max_gap_sessions),
         'recent_days':recent_days,
     }
-
 
 def run(scope='market',symbol=None,metric='both',date_mode='all',day=None,month=None,start=None,end=None,signals_only=False,repeat_price_tolerance_pct=1.0,repeat_max_gap_sessions=20):
     frames=_load_stocks();source=None;stock_details={};repeat_levels=[]
