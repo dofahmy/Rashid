@@ -35,6 +35,7 @@ def ensure_tables():
         CREATE TABLE IF NOT EXISTS {DAILY_TABLE} (
             symbol TEXT NOT NULL,
             session_date DATE NOT NULL,
+            high DOUBLE PRECISION,
             close DOUBLE PRECISION NOT NULL,
             adj_close DOUBLE PRECISION,
             volume BIGINT,
@@ -56,6 +57,7 @@ def ensure_tables():
     with DB.begin() as s:
         for q in ddl:
             s.execute(text(q))
+        s.execute(text(f"ALTER TABLE {DAILY_TABLE} ADD COLUMN IF NOT EXISTS high DOUBLE PRECISION"))
 
 
 def set_status(status):
@@ -168,6 +170,7 @@ def _extract_yf(raw, feed_symbol, multi):
 
     return pd.DataFrame({
         "date": pd.to_datetime(x[dc], errors="coerce"),
+        "high": ser("high"),
         "close": ser("close"),
         "adj_close": ser("adj_close"),
         "volume": ser("volume"),
@@ -196,10 +199,11 @@ def _write_daily(symbol, df, source="YAHOO_SP500_SEVEN"):
     now = datetime.now(timezone.utc)
     q = text(f"""
         INSERT INTO {DAILY_TABLE}
-            (symbol, session_date, close, adj_close, volume, source, retrieved_at)
+            (symbol, session_date, high, close, adj_close, volume, source, retrieved_at)
         VALUES
-            (:symbol, :session_date, :close, :adj_close, :volume, :source, :retrieved_at)
+            (:symbol, :session_date, :high, :close, :adj_close, :volume, :source, :retrieved_at)
         ON CONFLICT(symbol, session_date) DO UPDATE SET
+            high=excluded.high,
             close=excluded.close,
             adj_close=excluded.adj_close,
             volume=excluded.volume,
@@ -213,10 +217,12 @@ def _write_daily(symbol, df, source="YAHOO_SP500_SEVEN"):
             if not pd.notna(close) or close <= 0:
                 continue
             adj = float(r["adj_close"]) if pd.notna(r["adj_close"]) else close
+            hi = float(r["high"]) if pd.notna(r.get("high")) else close
             vol = int(round(float(r["volume"]))) if pd.notna(r["volume"]) else None
             s.execute(q, {
                 "symbol": symbol,
                 "session_date": pd.Timestamp(r["date"]).date(),
+                "high": hi,
                 "close": close,
                 "adj_close": adj,
                 "volume": vol,
