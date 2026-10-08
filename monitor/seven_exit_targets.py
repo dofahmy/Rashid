@@ -6,7 +6,7 @@ No stop-loss, fees, liquidity or slippage is assumed. Events start NEXT session.
 import pandas as pd
 
 
-def repeat_exit_targets(df, signal_date, repeat_price, targets=(30, 50)):
+def repeat_exit_targets(df, signal_date, repeat_price, targets=(30, 50), exact_timestamp=False):
     out = {}
     for target in targets:
         out.update({f'exit_{target}_status': 'NO_DATA',
@@ -23,8 +23,9 @@ def repeat_exit_targets(df, signal_date, repeat_price, targets=(30, 50)):
     if price <= 0 or not {'date', 'high'}.issubset(df.columns):
         return out
     ordered = df.sort_values('date').reset_index(drop=True)
-    dates = pd.to_datetime(ordered['date'], errors='coerce').dt.normalize()
-    matches = ordered.index[dates == pd.Timestamp(signal_date).normalize()].tolist()
+    dates = pd.to_datetime(ordered['date'], errors='coerce')
+    target_date = pd.Timestamp(signal_date)
+    matches = ordered.index[dates == target_date if exact_timestamp else dates.dt.normalize() == target_date.normalize()].tolist()
     if not matches:
         return out
     future = ordered.iloc[matches[-1] + 1:]
@@ -46,7 +47,7 @@ def repeat_exit_targets(df, signal_date, repeat_price, targets=(30, 50)):
             if high >= threshold:
                 out[f'exit_{target}_status'] = 'EXIT'
                 out[f'exit_{target}_session'] = i
-                out[f'exit_{target}_date'] = dates.iloc[rowidx].date().isoformat()
+                out[f'exit_{target}_date'] = dates.iloc[rowidx].isoformat(sep=' ', timespec='minutes') if exact_timestamp else dates.iloc[rowidx].date().isoformat()
                 break
         else:
             out[f'exit_{target}_status'] = 'OPEN'
