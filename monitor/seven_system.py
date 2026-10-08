@@ -111,6 +111,68 @@ def _single(df,volume=True):
     }
     return x,meta
 
+
+def _repeat_double7_levels(df, price_tolerance_pct=1.0, max_gap_sessions=20):
+    """
+    Find SAME-STOCK repeated Double-7 price levels that are close in BOTH
+    price and time.
+
+    Default:
+      price within 1.0%
+      next Double-7 occurrence within 20 stock sessions
+    """
+    if df is None or df.empty:
+        return []
+
+    x=df.copy().sort_values('date').reset_index(drop=True)
+    mask=x.price_signal7.fillna(False)&x.volume_signal7.fillna(False)
+    sig=x[mask].copy()
+    if len(sig)<2:
+        return []
+
+    rows=[]
+    for i,r in sig.iterrows():
+        close=float(r.raw_close if 'raw_close' in r and pd.notna(r.raw_close) else r.close)
+        rows.append({'date':pd.Timestamp(r.date),'close':close,'session_pos':int(i)})
+
+    def near_price(a,b):
+        if a<=0 or b<=0:return False
+        mid=(a+b)/2.0
+        return abs(a-b)/mid*100.0 <= float(price_tolerance_pct)
+
+    clusters=[]
+    current=[rows[0]]
+
+    for r in rows[1:]:
+        prev=current[-1]
+        gap=r['session_pos']-prev['session_pos']
+        if gap<=int(max_gap_sessions) and near_price(r['close'],prev['close']):
+            current.append(r)
+        else:
+            if len(current)>=2:clusters.append(current)
+            current=[r]
+    if len(current)>=2:clusters.append(current)
+
+    out=[]
+    for n,c in enumerate(clusters,1):
+        prices=[z['close'] for z in c]
+        dates=[z['date'] for z in c]
+        gaps=[c[j]['session_pos']-c[j-1]['session_pos'] for j in range(1,len(c))]
+        out.append({
+            'cluster_id':n,
+            'start_date':dates[0].date().isoformat(),
+            'end_date':dates[-1].date().isoformat(),
+            'touches':len(c),
+            'avg_price':round(float(np.mean(prices)),4),
+            'min_price':round(float(np.min(prices)),4),
+            'max_price':round(float(np.max(prices)),4),
+            'price_spread_pct':round((max(prices)-min(prices))/np.mean(prices)*100.0,3) if np.mean(prices) else None,
+            'max_session_gap':max(gaps) if gaps else 0,
+            'dates':' | '.join(z['date'].date().isoformat() for z in c),
+            'prices':' | '.join(f"{z['close']:.4f}" for z in c),
+        })
+    return out
+
 def _filter(x,mode,day,month,start,end):
     if x.empty:return x
     d=pd.to_datetime(x.date)
@@ -125,22 +187,29 @@ def _index_map():
     idx,source=_load_index()
     return {pd.Timestamp(r.date).normalize():float(r.close) for _,r in idx.iterrows()},source
 
-def _stock_double_map(frames):
+def _stock_signal_map(frames):
     """
-    For market mode, count how many INDIVIDUAL stocks produced a strict
-    price+volume Double 7 on each date using each stock's own anchor logic.
+    Per market date, track INDIVIDUAL-stock 7 signals:
+      price_symbols  = stocks whose own cumulative price signal is 7
+      volume_symbols = stocks whose own cumulative volume signal is 7
+      double_symbols = intersection on the same date
     """
-    by_date=defaultdict(list)
+    by_date=defaultdict(lambda:{'price_symbols':[],'volume_symbols':[],'double_symbols':[]})
     for sym,df in frames.items():
         s,_=_single(df,True)
-        mask=s.price_signal7.fillna(False)&s.volume_signal7.fillna(False)
-        for _,r in s[mask].iterrows():
-            by_date[pd.Timestamp(r.date).normalize()].append({
+        for _,r in s.iterrows():
+            d=pd.Timestamp(r.date).normalize()
+            price7=bool(r.get('price_signal7',False))
+            volume7=bool(r.get('volume_signal7',False))
+            detail={
                 'symbol':sym,
                 'close':round(float(r.raw_close),4) if pd.notna(r.raw_close) else None,
                 'cum_price':round(float(r.price_value),2) if pd.notna(r.price_value) else None,
                 'cum_volume':int(round(float(r.volume_value))) if pd.notna(r.volume_value) else None,
-            })
+            }
+            if price7: by_date[d]['price_symbols'].append(detail)
+            if volume7: by_date[d]['volume_symbols'].append(detail)
+            if price7 and volume7: by_date[d]['double_symbols'].append(detail)
     return by_date
 
 def _chart_payload(price_df,signal_mask,value_col):
@@ -169,24 +238,31 @@ def _chart_payload(price_df,signal_mask,value_col):
         prev=v
     return {'points':points,'markers':markers,'min':mn,'max':mx}
 
-def run(scope='market',symbol=None,metric='both',date_mode='all',day=None,month=None,start=None,end=None,signals_only=False):
-    frames=_load_stocks();source=None;stock_details={}
+def run(scope='market',symbol=None,metric='both',date_mode='all',day=None,month=None,start=None,end=None,signals_only=False,repeat_price_tolerance_pct=1.0,repeat_max_gap_sessions=20):
+    frames=_load_stocks();source=None;stock_details={};repeat_levels=[]
     index_by_date,index_source=_index_map()
 
     if scope=='market':
         full,meta=_market(frames);name='السوق المصري كله';source=index_source
         # Attach synthetic index level for every market session.
         full['index_value']=full.date.map(lambda d:index_by_date.get(pd.Timestamp(d).normalize(),np.nan))
-        stock_details=_stock_double_map(frames)
-        full['stocks_double7_count']=full.date.map(lambda d:len(stock_details.get(pd.Timestamp(d).normalize(),[])))
+        stock_details=_stock_signal_map(frames)
+        full['stocks_price7_count']=full.date.map(lambda d:len(stock_details.get(pd.Timestamp(d).normalize(),{}).get('price_symbols',[])))
+        full['stocks_volume7_count']=full.date.map(lambda d:len(stock_details.get(pd.Timestamp(d).normalize(),{}).get('volume_symbols',[])))
+        full['stocks_double7_count']=full.date.map(lambda d:len(stock_details.get(pd.Timestamp(d).normalize(),{}).get('double_symbols',[])))
     elif scope=='stock':
         symbol=(symbol or '').upper()
         if symbol not in frames:raise ValueError('اختاري سهمًا صحيحًا.')
         full,meta=_single(frames[symbol],True);name=symbol
-        full['index_value']=np.nan;full['stocks_double7_count']=np.nan
+        repeat_levels=_repeat_double7_levels(
+            full,
+            price_tolerance_pct=repeat_price_tolerance_pct,
+            max_gap_sessions=repeat_max_gap_sessions
+        )
+        full['index_value']=np.nan;full['stocks_price7_count']=np.nan;full['stocks_volume7_count']=np.nan;full['stocks_double7_count']=np.nan
     elif scope=='index':
         idx,source=_load_index();full,meta=_single(idx,False);name='المؤشر / Market Proxy'
-        full['index_value']=full['raw_close'];full['stocks_double7_count']=np.nan
+        full['index_value']=full['raw_close'];full['stocks_price7_count']=np.nan;full['stocks_volume7_count']=np.nan;full['stocks_double7_count']=np.nan
     else:raise ValueError('نوع التحليل غير صحيح.')
 
     f=_filter(full,date_mode,day,month,start,end)
@@ -225,6 +301,8 @@ def run(scope='market',symbol=None,metric='both',date_mode='all',day=None,month=
                 'double_signal7':bool(r.get('price_signal7',False) and r.get('volume_signal7',False)),
                 'price_count':int(r.get('price_count')) if pd.notna(r.get('price_count',np.nan)) else None,
                 'volume_count':int(r.get('volume_count')) if pd.notna(r.get('volume_count',np.nan)) else None,
+                'stocks_price7_count':int(r.get('stocks_price7_count')) if pd.notna(r.get('stocks_price7_count',np.nan)) else None,
+                'stocks_volume7_count':int(r.get('stocks_volume7_count')) if pd.notna(r.get('stocks_volume7_count',np.nan)) else None,
                 'stocks_double7_count':int(r.get('stocks_double7_count')) if pd.notna(r.get('stocks_double7_count',np.nan)) else None,
             })
         return o
@@ -241,11 +319,16 @@ def run(scope='market',symbol=None,metric='both',date_mode='all',day=None,month=
         'price_signal_count':int(pm.sum()) if len(f) else 0,
         'volume_signal_count':int(vm.sum()) if scope!='index' and len(f) else 0,
         'chart':chart,
+        'repeat_levels':repeat_levels,
+        'repeat_price_tolerance_pct':float(repeat_price_tolerance_pct),
+        'repeat_max_gap_sessions':int(repeat_max_gap_sessions),
         'market_day_details':market_day_details,
     }
 
-def market_day_stock_details(day):
+def market_day_stock_details(day,kind='double'):
     frames=_load_stocks()
-    by_date=_stock_double_map(frames)
+    by_date=_stock_signal_map(frames)
     d=pd.Timestamp(day).normalize()
-    return by_date.get(d,[])
+    row=by_date.get(d,{'price_symbols':[],'volume_symbols':[],'double_symbols':[]})
+    key={'price':'price_symbols','volume':'volume_symbols','double':'double_symbols'}.get(kind,'double_symbols')
+    return row.get(key,[])
