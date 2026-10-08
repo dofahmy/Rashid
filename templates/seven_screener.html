@@ -1,9 +1,5 @@
 {% extends 'base.html' %}{% block content %}
-<h1>SCREEN EGYPT · Repeat Price + Time</h1>
-<div class="panel">
-<a class="button secondary" href="{{url_for('egx_seven')}}">نظام مصر</a>
-<a class="button secondary" href="{{url_for('sp500_seven_screener')}}">SCREEN SP500</a>
-</div>
+<h1>Screening السوق كله · Repeat Price + Time</h1>
 
 <div class="panel">
 <p class="muted">
@@ -57,9 +53,9 @@
 <th>Max Gap</th>
 <th>Price Spread %</th>
 <th>السعر الحالي</th>
-<th>السعر الحالي مقابل Repeat %</th>
-<th>+5%</th><th>+10%</th><th>+15%</th><th>+20%</th><th>+50%</th>
+<th>الحالي مقابل Repeat %</th>
 <th>من كام يوم</th>
+<th>Max Rise 20D</th><th>Max Drawdown 20D</th><th>+5% قبل -3%</th><th>أول حسم ±3% (جلسة)</th><th>+5% قبل -5%</th><th>أول حسم ±5% (جلسة)</th><th>متابعة 20 جلسة</th>
 <th>كل التواريخ</th>
 <th>كل الأسعار</th>
 </tr>
@@ -80,17 +76,13 @@
   {{'%+.2f'|format(r.current_vs_repeat_pct)}}%
 {% else %}—{% endif %}
 </td>
-<td>{% if r.hit_5_sessions is not none %}✔️ | {{r.hit_5_sessions}} جلسات{% else %}—{% endif %}</td>
-<td>{% if r.hit_10_sessions is not none %}✔️ | {{r.hit_10_sessions}} جلسات{% else %}—{% endif %}</td>
-<td>{% if r.hit_15_sessions is not none %}✔️ | {{r.hit_15_sessions}} جلسات{% else %}—{% endif %}</td>
-<td>{% if r.hit_20_sessions is not none %}✔️ | {{r.hit_20_sessions}} جلسات{% else %}—{% endif %}</td>
-<td>{% if r.hit_50_sessions is not none %}✔️ | {{r.hit_50_sessions}} جلسات{% else %}—{% endif %}</td>
 <td>{{r.days_ago if r.days_ago is not none else '—'}}</td>
+<td>{% if r.max_rise_20d_pct is not none %}{{'%+.2f'|format(r.max_rise_20d_pct)}}%{% else %}—{% endif %}</td><td>{% if r.max_drawdown_20d_pct is not none %}{{'%+.2f'|format(r.max_drawdown_20d_pct)}}%{% else %}—{% endif %}</td><td>{{r.plus5_before_minus3}}</td><td>{{r.first_hit_minus3 if r.first_hit_minus3 is not none else '—'}}</td><td>{{r.plus5_before_minus5}}</td><td>{{r.first_hit_minus5 if r.first_hit_minus5 is not none else '—'}}</td><td>{{r.observed_20d_sessions}}/20 {% if not r.complete_20d %}⏳{% endif %}</td>
 <td dir="ltr">{{r.dates}}</td>
 <td dir="ltr">{{r.prices}}</td>
 </tr>
 {% else %}
-<tr><td colspan="17">مفيش أسهم مطابقة للشروط المختارة.</td></tr>
+<tr><td colspan="19">مفيش أسهم مطابقة للشروط المختارة.</td></tr>
 {% endfor %}
 </tbody>
 </table>

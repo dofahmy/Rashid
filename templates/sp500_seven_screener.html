@@ -1,9 +1,5 @@
 {% extends 'base.html' %}{% block content %}
 <h1>SCREEN SP500 · Repeat Price + Time</h1>
-<div class="panel">
-<a class="button secondary" href="{{url_for('sp500_seven')}}">نظام S&P 500</a>
-<a class="button secondary" href="{{url_for('egx_seven_screener')}}">SCREEN EGYPT</a>
-</div>
 
 <div class="panel">
 <p class="muted">
@@ -46,54 +42,7 @@
 
 <div class="panel tablewrap">
 <h2>آخر الأسهم عند Repeat Price + Time</h2>
-<table class="sortable-egx">
-<thead>
-<tr>
-<th>السهم</th>
-<th>آخر Repeat Date</th>
-<th>أول تاريخ في الـCluster</th>
-<th>Repeat Price</th>
-<th>Touches</th>
-<th>Max Gap</th>
-<th>Price Spread %</th>
-<th>السعر الحالي</th>
-<th>السعر الحالي مقابل Repeat %</th>
-<th>+5%</th><th>+10%</th><th>+15%</th><th>+20%</th><th>+50%</th>
-<th>من كام يوم</th>
-<th>كل التواريخ</th>
-<th>كل الأسعار</th>
-</tr>
-</thead>
-<tbody>
-{% for r in result.rows %}
-<tr>
-<td><strong>{{r.symbol}}</strong></td>
-<td><strong>{{r.latest_repeat_date}}</strong></td>
-<td>{{r.first_repeat_date}}</td>
-<td><strong>{{r.repeat_price}}</strong></td>
-<td>{{r.touches}}</td>
-<td>{{r.max_session_gap}}</td>
-<td>{{r.price_spread_pct}}%</td>
-<td>{{r.current_close if r.current_close is not none else '—'}}</td>
-<td>
-{% if r.current_vs_repeat_pct is not none %}
-  {{'%+.2f'|format(r.current_vs_repeat_pct)}}%
-{% else %}—{% endif %}
-</td>
-<td>{% if r.hit_5_sessions is not none %}✔️ | {{r.hit_5_sessions}} جلسات{% else %}—{% endif %}</td>
-<td>{% if r.hit_10_sessions is not none %}✔️ | {{r.hit_10_sessions}} جلسات{% else %}—{% endif %}</td>
-<td>{% if r.hit_15_sessions is not none %}✔️ | {{r.hit_15_sessions}} جلسات{% else %}—{% endif %}</td>
-<td>{% if r.hit_20_sessions is not none %}✔️ | {{r.hit_20_sessions}} جلسات{% else %}—{% endif %}</td>
-<td>{% if r.hit_50_sessions is not none %}✔️ | {{r.hit_50_sessions}} جلسات{% else %}—{% endif %}</td>
-<td>{{r.days_ago if r.days_ago is not none else '—'}}</td>
-<td dir="ltr">{{r.dates}}</td>
-<td dir="ltr">{{r.prices}}</td>
-</tr>
-{% else %}
-<tr><td colspan="17">مفيش أسهم مطابقة للشروط المختارة.</td></tr>
-{% endfor %}
-</tbody>
-</table>
+<table class="sortable-egx"><thead><tr><th>السهم</th><th>آخر Repeat Date</th><th>Repeat Price</th><th>اتجاه Repeat</th><th>سبب الاتجاه</th><th>O</th><th>H</th><th>L</th><th>C</th><th>Repeat Gap</th><th>المحسوب / المطلوب</th><th>إلى تاريخ</th><th>العائد الخام %</th><th>العائد حسب الاتجاه %</th><th>Touches</th><th>Price Spread %</th><th>Max Rise 20D</th><th>Max Drawdown 20D</th><th>+5% قبل -3%</th><th>أول حسم ±3% (جلسة)</th><th>+5% قبل -5%</th><th>أول حسم ±5% (جلسة)</th><th>متابعة 20 جلسة</th><th>كل التواريخ</th><th>كل الأسعار</th></tr></thead><tbody>{% for r in result.rows %}<tr><td><strong>{{r.symbol}}</strong></td><td><strong>{{r.latest_repeat_date}}</strong></td><td><strong>{{r.repeat_price}}</strong></td><td>{% if r.repeat_direction=='SELL' %}<strong style="color:#b42318">SELL</strong>{% elif r.repeat_direction=='BUY' %}<strong style="color:#067647">BUY</strong>{% else %}<strong>{{r.repeat_direction}}</strong>{% endif %}</td><td>{{r.direction_reason}}</td><td>{{r.candle_open if r.candle_open is not none else '—'}}</td><td>{{r.candle_high if r.candle_high is not none else '—'}}</td><td>{{r.candle_low if r.candle_low is not none else '—'}}</td><td>{{r.candle_close if r.candle_close is not none else '—'}}</td><td>{{r.actual_repeat_gap_sessions}} جلسة</td><td>{{r.gap_elapsed_sessions}} / {{r.gap_target_sessions}} {% if r.gap_complete %}✅{% else %}⏳{% endif %}</td><td>{{r.gap_end_date}}</td><td>{% if r.gap_raw_return_pct is not none %}{{'%+.2f'|format(r.gap_raw_return_pct)}}%{% else %}—{% endif %}</td><td>{% if r.gap_direction_return_pct is not none %}<strong>{{'%+.2f'|format(r.gap_direction_return_pct)}}%</strong>{% else %}—{% endif %}</td><td>{{r.touches}}</td><td>{{r.price_spread_pct}}%</td><td>{% if r.max_rise_20d_pct is not none %}{{'%+.2f'|format(r.max_rise_20d_pct)}}%{% else %}—{% endif %}</td><td>{% if r.max_drawdown_20d_pct is not none %}{{'%+.2f'|format(r.max_drawdown_20d_pct)}}%{% else %}—{% endif %}</td><td>{{r.plus5_before_minus3}}</td><td>{{r.first_hit_minus3 if r.first_hit_minus3 is not none else '—'}}</td><td>{{r.plus5_before_minus5}}</td><td>{{r.first_hit_minus5 if r.first_hit_minus5 is not none else '—'}}</td><td>{{r.observed_20d_sessions}}/20 {% if not r.complete_20d %}⏳{% endif %}</td><td dir="ltr">{{r.dates}}</td><td dir="ltr">{{r.prices}}</td></tr>{% else %}<tr><td colspan="25">مفيش أسهم مطابقة للشروط.</td></tr>{% endfor %}</tbody></table>
 </div>
 {% endif %}
 {% endblock %}
