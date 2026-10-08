@@ -402,4 +402,21 @@ def create_app(db=None,test_config=None):
         flash('بدأ تحديث بيانات السوق المصري وإعادة الحساب. أعيدي فتح الصفحة بعد قليل.')
         return redirect(url_for('egx_market'))
 
+
+    @app.get('/egx-seven')
+    @auth
+    def egx_seven():
+        from monitor.seven_system import run,list_symbols
+        scope=request.args.get('scope','market');symbol=request.args.get('symbol','').strip().upper();metric=request.args.get('metric','both');date_mode=request.args.get('date_mode','all');day=request.args.get('day','').strip();month=request.args.get('month','').strip();start=request.args.get('start','').strip();end=request.args.get('end','').strip();signals_only=request.args.get('signals_only')=='1'
+        if scope not in ('market','stock','index'):scope='market'
+        if metric not in ('both','price','volume'):metric='both'
+        if date_mode not in ('all','day','month','range'):date_mode='all'
+        result=None;error=None
+        if request.args:
+            try:result=run(scope=scope,symbol=symbol or None,metric=metric,date_mode=date_mode,day=day or None,month=month or None,start=start or None,end=end or None,signals_only=signals_only)
+            except Exception as exc:error=f'{type(exc).__name__}: {exc}'
+        try:symbols=list_symbols()
+        except Exception:symbols=[]
+        return render_template('seven_system.html',result=result,error=error,symbols=symbols,scope=scope,symbol=symbol,metric=metric,date_mode=date_mode,day=day,month=month,start=start,end=end,signals_only=signals_only)
+
     return app
