@@ -27,7 +27,7 @@ def ensure_hourly_table():
 def refresh(period='60d', batch_size=20):
     import yfinance as yf
     ensure_hourly_table()
-    with database() as s:
+    with database()() as s:
         symbols=[x[0] for x in s.execute(text(f'SELECT symbol FROM {CONSTIT_TABLE} WHERE active=TRUE ORDER BY symbol')).all()]
     if not symbols:raise RuntimeError('No S&P500 constituents; refresh daily S&P500 data first.')
     successes=0; bars=0; errors=[]
@@ -65,7 +65,7 @@ def refresh(period='60d', batch_size=20):
 
 def _frames():
     ensure_hourly_table()
-    with database() as s:
+    with database()() as s:
         rows=s.execute(text(f'SELECT symbol,bar_time,open,high,low,close,volume FROM {TABLE} ORDER BY symbol,bar_time')).mappings().all()
     out={}
     for sym,group in pd.DataFrame(rows).groupby('symbol') if rows else []:
