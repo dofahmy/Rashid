@@ -8,6 +8,7 @@
 <select name="date_mode"><option value="all" {{'selected' if date_mode=='all' else ''}}>كل التاريخ</option><option value="day" {{'selected' if date_mode=='day' else ''}}>يوم</option><option value="month" {{'selected' if date_mode=='month' else ''}}>شهر</option><option value="range" {{'selected' if date_mode=='range' else ''}}>فترة</option></select>
 <input type="date" name="day" value="{{day or ''}}"><input type="month" name="month" value="{{month or ''}}"><input type="date" name="start" value="{{start or ''}}"><input type="date" name="end" value="{{end or ''}}">
 <label><input type="checkbox" name="signals_only" value="1" {{'checked' if signals_only else ''}}> إشارات 7 فقط</label><button>احسب نظام الـ 7</button></form></div>
+
 {% if error %}<div class="panel warning">{{error}}</div>{% endif %}
 {% if result %}
 <div class="cards">
@@ -16,7 +17,76 @@
 <div class="panel"><div class="muted">إشارات السعر وحدها</div><div class="metric">{{result.price_signal_count}}</div></div>
 <div class="panel"><div class="muted">إشارات الحجم وحدها</div><div class="metric">{{result.volume_signal_count}}</div></div>
 </div>
-{% if result.scope in ['stock','index'] %}<div class="panel"><h2>نقطة البداية</h2><p>Price Anchor: <strong>{{result.anchor.price_anchor_date or '—'}}</strong> {% if result.anchor.price_anchor_close is not none %}· Close {{result.anchor.price_anchor_close}}{% endif %}</p><p>Volume Anchor: <strong>{{result.anchor.volume_anchor_date or '—'}}</strong> {% if result.anchor.volume_anchor_volume is not none %}· Volume {{result.anchor.volume_anchor_volume}}{% endif %}</p><p class="muted">من الـAnchor يبدأ الجمع التراكمي يومًا بعد يوم. {% if result.scope=='index' %}الـproxy الحالي لا يوفر حجم مؤشر مستقل، لذلك المؤشر سعر فقط.{% endif %}</p></div>{% else %}<div class="panel"><p class="muted">السوق كله: كل جلسة نجمع إغلاقات كل الأسهم ونختبر المجموع ÷7، ونكرر على مجموع أحجام التداول.</p></div>{% endif %}
-<div class="panel tablewrap"><h2>النتائج</h2><table><thead><tr><th>التاريخ</th><th>{{'السعر التراكمي' if result.scope in ['stock','index'] else 'مجموع الإغلاقات'}}</th><th>باقي السعر</th><th>7 سعر</th><th>{{'الحجم التراكمي' if result.scope=='stock' else 'مجموع الحجم'}}</th><th>باقي الحجم</th><th>7 حجم</th><th>Double 7</th>{% if result.scope=='market' %}<th>عدد الأسهم سعر</th><th>عدد الأسهم حجم</th>{% endif %}</tr></thead><tbody>
-{% for r in result.rows %}<tr {% if r.double_signal7 %}style="font-weight:800;background:#eefaf5"{% endif %}><td>{{r.date}}</td><td>{{r.price_value if r.price_value is not none else '—'}}</td><td>{{r.price_remainder if r.price_remainder is not none else '—'}}</td><td>{{'✅ 7' if r.price_signal7 else '—'}}</td><td>{{r.volume_value if r.volume_value is not none else '—'}}</td><td>{{r.volume_remainder if r.volume_remainder is not none else '—'}}</td><td>{{'✅ 7' if r.volume_signal7 else '—'}}</td><td>{{'✅✅ DOUBLE 7' if r.double_signal7 else '—'}}</td>{% if result.scope=='market' %}<td>{{r.price_count}}</td><td>{{r.volume_count}}</td>{% endif %}</tr>{% else %}<tr><td colspan="10">لا توجد نتائج.</td></tr>{% endfor %}
-</tbody></table></div>{% endif %}{% endblock %}
+
+{% if result.scope in ['stock','index'] %}
+<div class="panel"><h2>نقطة البداية</h2>
+<p>Price Anchor: <strong>{{result.anchor.price_anchor_date or '—'}}</strong> {% if result.anchor.price_anchor_close is not none %}· Close {{result.anchor.price_anchor_close}}{% endif %}</p>
+<p>Volume Anchor: <strong>{{result.anchor.volume_anchor_date or '—'}}</strong> {% if result.anchor.volume_anchor_volume is not none %}· Volume {{result.anchor.volume_anchor_volume}}{% endif %}</p>
+</div>
+{% endif %}
+
+{% if result.chart.points %}
+<div class="panel">
+<h2>{% if result.scope=='stock' %}شارت سعر {{result.display_name}}{% else %}شارت المؤشر الصناعي{% endif %} + Double 7</h2>
+<p class="muted">السهم ↑ تحت السعر = مستوى Double 7 أعلى من مستوى Double 7 السابق. السهم ↓ فوق السعر = مستوى أقل من السابق. ◆ = أول إشارة أو نفس المستوى.</p>
+<svg viewBox="0 0 1200 420" width="100%" height="420" role="img">
+  <rect x="55" y="20" width="1120" height="350" fill="white" stroke="#d9e2ec"/>
+  {% set n=result.chart.points|length %}
+  {% set span=result.chart.max-result.chart.min %}
+  {% set coords=[] %}
+  {% for p in result.chart.points %}
+    {% set x=60 + (1110 * p.i / ([n-1,1]|max)) %}
+    {% set y=360 - (330 * (p.value-result.chart.min) / span) %}
+    {% if coords.append(x|string ~ ',' ~ y|string) %}{% endif %}
+  {% endfor %}
+  <polyline points="{{coords|join(' ')}}" fill="none" stroke="#1f6f8b" stroke-width="2"/>
+  {% for m in result.chart.markers %}
+    {% set x=60 + (1110 * m.i / ([n-1,1]|max)) %}
+    {% set y=360 - (330 * (m.value-result.chart.min) / span) %}
+    {% if m.direction=='up' %}
+      <text x="{{x}}" y="{{y+28}}" text-anchor="middle" font-size="28">↑</text>
+    {% elif m.direction=='down' %}
+      <text x="{{x}}" y="{{y-12}}" text-anchor="middle" font-size="28">↓</text>
+    {% else %}
+      <text x="{{x}}" y="{{y-12}}" text-anchor="middle" font-size="22">◆</text>
+    {% endif %}
+    <circle cx="{{x}}" cy="{{y}}" r="4"/>
+    <title>{{m.date}} · {{m.value}}</title>
+  {% endfor %}
+  <text x="60" y="397" font-size="12">{{result.chart.points[0].date}}</text>
+  <text x="1170" y="397" text-anchor="end" font-size="12">{{result.chart.points[-1].date}}</text>
+  <text x="62" y="36" font-size="12">{{"%.2f"|format(result.chart.max)}}</text>
+  <text x="62" y="365" font-size="12">{{"%.2f"|format(result.chart.min)}}</text>
+</svg>
+</div>
+{% endif %}
+
+<div class="panel tablewrap"><h2>النتائج</h2><table>
+<thead><tr>
+<th>التاريخ</th>
+{% if result.scope=='stock' %}<th>سعر السهم عند Double 7</th>{% elif result.scope=='market' %}<th>قيمة المؤشر الصناعي</th>{% elif result.scope=='index' %}<th>قيمة المؤشر</th>{% endif %}
+<th>{{'السعر التراكمي' if result.scope in ['stock','index'] else 'مجموع الإغلاقات'}}</th>
+<th>باقي السعر</th><th>7 سعر</th>
+<th>{{'الحجم التراكمي' if result.scope=='stock' else 'مجموع الحجم'}}</th>
+<th>باقي الحجم</th><th>7 حجم</th><th>Double 7</th>
+{% if result.scope=='market' %}<th>عدد الأسهم Double 7 نفس اليوم</th><th>عدد الأسهم سعر</th><th>عدد الأسهم حجم</th>{% endif %}
+</tr></thead><tbody>
+{% for r in result.rows %}
+<tr {% if r.double_signal7 %}style="font-weight:800;background:#eefaf5"{% endif %}>
+<td>{% if result.scope=='market' and r.stocks_double7_count %}<a href="{{url_for('egx_seven_day',day=r.date)}}">{{r.date}}</a>{% else %}{{r.date}}{% endif %}</td>
+{% if result.scope=='stock' %}<td>{{r.raw_close if r.raw_close is not none else '—'}}</td>{% elif result.scope in ['market','index'] %}<td>{{r.index_value if r.index_value is not none else '—'}}</td>{% endif %}
+<td>{{r.price_value if r.price_value is not none else '—'}}</td>
+<td>{{r.price_remainder if r.price_remainder is not none else '—'}}</td>
+<td>{{'✅ 7' if r.price_signal7 else '—'}}</td>
+<td>{{r.volume_value if r.volume_value is not none else '—'}}</td>
+<td>{{r.volume_remainder if r.volume_remainder is not none else '—'}}</td>
+<td>{{'✅ 7' if r.volume_signal7 else '—'}}</td>
+<td>{{'✅✅ DOUBLE 7' if r.double_signal7 else '—'}}</td>
+{% if result.scope=='market' %}
+<td>{% if r.stocks_double7_count %}<a href="{{url_for('egx_seven_day',day=r.date)}}">{{r.stocks_double7_count}} سهم</a>{% else %}0{% endif %}</td>
+<td>{{r.price_count}}</td><td>{{r.volume_count}}</td>
+{% endif %}
+</tr>
+{% else %}<tr><td colspan="12">لا توجد نتائج.</td></tr>{% endfor %}
+</tbody></table></div>
+{% endif %}{% endblock %}

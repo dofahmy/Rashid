@@ -1,0 +1,12 @@
+{% extends 'base.html' %}{% block content %}
+<h1>أسهم Double 7 · {{day}}</h1>
+<div class="panel"><a class="button secondary" href="{{url_for('egx_seven',scope='market',metric='both',date_mode='day',day=day)}}">العودة لليوم في نظام الـ7</a></div>
+{% if error %}<div class="panel warning">{{error}}</div>{% endif %}
+<div class="panel tablewrap">
+<h2>{{rows|length}} سهم عملوا Double 7 في نفس اليوم</h2>
+<table><thead><tr><th>السهم</th><th>سعر الإغلاق</th><th>المجموع السعري التراكمي</th><th>الحجم التراكمي</th></tr></thead><tbody>
+{% for r in rows %}
+<tr><td><strong>{{r.symbol}}</strong></td><td>{{r.close}}</td><td>{{r.cum_price}}</td><td>{{r.cum_volume}}</td></tr>
+{% else %}<tr><td colspan="4">لا توجد أسهم Double 7 في هذا اليوم.</td></tr>{% endfor %}
+</tbody></table></div>
+{% endblock %}
