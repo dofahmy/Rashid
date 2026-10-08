@@ -58,6 +58,7 @@
 <th>Price Spread %</th>
 <th>السعر الحالي</th>
 <th>السعر الحالي مقابل Repeat %</th>
+<th>+5%</th><th>+10%</th><th>+15%</th><th>+20%</th><th>+50%</th>
 <th>من كام يوم</th>
 <th>كل التواريخ</th>
 <th>كل الأسعار</th>
@@ -79,12 +80,17 @@
   {{'%+.2f'|format(r.current_vs_repeat_pct)}}%
 {% else %}—{% endif %}
 </td>
+<td>{% if r.hit_5_sessions is not none %}✔️ | {{r.hit_5_sessions}} جلسات{% else %}—{% endif %}</td>
+<td>{% if r.hit_10_sessions is not none %}✔️ | {{r.hit_10_sessions}} جلسات{% else %}—{% endif %}</td>
+<td>{% if r.hit_15_sessions is not none %}✔️ | {{r.hit_15_sessions}} جلسات{% else %}—{% endif %}</td>
+<td>{% if r.hit_20_sessions is not none %}✔️ | {{r.hit_20_sessions}} جلسات{% else %}—{% endif %}</td>
+<td>{% if r.hit_50_sessions is not none %}✔️ | {{r.hit_50_sessions}} جلسات{% else %}—{% endif %}</td>
 <td>{{r.days_ago if r.days_ago is not none else '—'}}</td>
 <td dir="ltr">{{r.dates}}</td>
 <td dir="ltr">{{r.prices}}</td>
 </tr>
 {% else %}
-<tr><td colspan="12">مفيش أسهم مطابقة للشروط المختارة.</td></tr>
+<tr><td colspan="17">مفيش أسهم مطابقة للشروط المختارة.</td></tr>
 {% endfor %}
 </tbody>
 </table>
