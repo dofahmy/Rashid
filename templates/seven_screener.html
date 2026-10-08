@@ -24,6 +24,7 @@
 <option value="all" {{'selected' if recent_days=='all' else ''}}>كل التاريخ</option>
 </select>
 
+<label style="display:inline-flex;align-items:center;gap:5px"><input type="checkbox" name="rule_only" value="1" {{'checked' if rule_only else ''}}> عرض المطابق للقاعدة فقط</label>
 <button type="submit">اعمل Screening</button>
 </form>
 </div>
@@ -33,6 +34,7 @@
 {% endif %}
 
 {% if result %}
+<div class="panel"><strong>قاعدة الطفرات المتأخرة:</strong> Gap 11–20 جلسة + Touches = 2 + قيعان صاعدة في آخر 60 جلسة قبل Repeat (أدنى Low في آخر 30 جلسة أكبر من أدنى Low في الثلاثين السابقة). <span class="muted">نتيجة استكشافية وليست ضمان صعود. NO_DATA تعني تاريخ غير كافٍ.</span> <strong>المطابق: {{rule_match_count}}</strong></div>
 <div class="cards">
 <div class="panel accent"><div class="muted">عدد الأسهم</div><div class="metric">{{result.count}}</div></div>
 <div class="panel"><div class="muted">آخر جلسة في الداتا</div><div class="metric">{{result.latest_market_date or '—'}}</div></div>
@@ -49,7 +51,7 @@
 <th>آخر Repeat Date</th>
 <th>أول تاريخ في الـCluster</th>
 <th>Repeat Price</th>
-<th>Touches</th>
+<th>قاعدة الطفرات</th><th>قيعان صاعدة 60 جلسة</th><th>Touches</th>
 <th>Max Gap</th>
 <th>Price Spread %</th>
 <th>السعر الحالي</th>
@@ -67,7 +69,7 @@
 <td><strong>{{r.latest_repeat_date}}</strong></td>
 <td>{{r.first_repeat_date}}</td>
 <td><strong>{{r.repeat_price}}</strong></td>
-<td>{{r.touches}}</td>
+<td>{% if r.breakout_rule_status=="MATCH" %}✅ MATCH{% elif r.breakout_rule_status=="NO_DATA" %}— NO_DATA{% else %}—{% endif %}</td><td>{{"✅" if r.breakout_pre60_higher_lows == true else ("—" if r.breakout_pre60_higher_lows is none else "❌")}}</td><td>{{r.touches}}</td>
 <td>{{r.max_session_gap}}</td>
 <td>{{r.price_spread_pct}}%</td>
 <td>{{r.current_close if r.current_close is not none else '—'}}</td>
