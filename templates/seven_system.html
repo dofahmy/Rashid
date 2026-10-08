@@ -7,6 +7,13 @@
 <select name="metric"><option value="both" {{'selected' if metric=='both' else ''}}>السعر + الحجم معًا (Double 7)</option><option value="price" {{'selected' if metric=='price' else ''}}>السعر فقط</option><option value="volume" {{'selected' if metric=='volume' else ''}}>الحجم فقط</option></select>
 <select name="date_mode"><option value="all" {{'selected' if date_mode=='all' else ''}}>كل التاريخ</option><option value="day" {{'selected' if date_mode=='day' else ''}}>يوم</option><option value="month" {{'selected' if date_mode=='month' else ''}}>شهر</option><option value="range" {{'selected' if date_mode=='range' else ''}}>فترة</option></select>
 <input type="date" name="day" value="{{day or ''}}"><input type="month" name="month" value="{{month or ''}}"><input type="date" name="start" value="{{start or ''}}"><input type="date" name="end" value="{{end or ''}}">
+{% if scope=='stock' %}
+<label>تقارب سعر التكرار %</label>
+<input type="number" name="repeat_price_tolerance_pct" step="0.1" min="0" max="20" value="{{repeat_price_tolerance_pct}}">
+<label>أقصى مسافة زمنية بين التكرارات (جلسات)</label>
+<input type="number" name="repeat_max_gap_sessions" min="1" max="252" value="{{repeat_max_gap_sessions}}">
+{% endif %}
+
 <label><input type="checkbox" name="signals_only" value="1" {{'checked' if signals_only else ''}}> إشارات 7 فقط</label><button>احسب نظام الـ 7</button></form></div>
 
 {% if error %}<div class="panel warning">{{error}}</div>{% endif %}
@@ -61,6 +68,36 @@
 </div>
 {% endif %}
 
+
+{% if result.scope=='stock' %}
+<div class="panel tablewrap">
+<h2>مستويات Double 7 المتكررة لنفس السهم</h2>
+<p class="muted">
+لا نعتبر السعر متكررًا إلا لو الشرطان اتحققوا معًا:
+تقارب سعري ≤ {{result.repeat_price_tolerance_pct}}%،
+والمسافة بين إشارتين Double 7 متتاليتين ≤ {{result.repeat_max_gap_sessions}} جلسة.
+</p>
+<table>
+<thead><tr><th>المستوى</th><th>عدد التكرارات</th><th>أول تاريخ</th><th>آخر تاريخ</th><th>أكبر Gap جلسات</th><th>انتشار السعر %</th><th>الأسعار</th><th>التواريخ</th></tr></thead>
+<tbody>
+{% for z in result.repeat_levels %}
+<tr>
+<td><strong>{{z.avg_price}}</strong></td>
+<td><strong>{{z.touches}}</strong></td>
+<td>{{z.start_date}}</td>
+<td>{{z.end_date}}</td>
+<td>{{z.max_session_gap}}</td>
+<td>{{z.price_spread_pct}}%</td>
+<td dir="ltr">{{z.prices}}</td>
+<td dir="ltr">{{z.dates}}</td>
+</tr>
+{% else %}
+<tr><td colspan="8">لا يوجد تكرار Double 7 يحقق تقارب السعر والزمن معًا.</td></tr>
+{% endfor %}
+</tbody></table>
+</div>
+{% endif %}
+
 <div class="panel tablewrap"><h2>النتائج</h2><table>
 <thead><tr>
 <th>التاريخ</th>
@@ -69,7 +106,7 @@
 <th>باقي السعر</th><th>7 سعر</th>
 <th>{{'الحجم التراكمي' if result.scope=='stock' else 'مجموع الحجم'}}</th>
 <th>باقي الحجم</th><th>7 حجم</th><th>Double 7</th>
-{% if result.scope=='market' %}<th>عدد الأسهم Double 7 نفس اليوم</th><th>عدد الأسهم سعر</th><th>عدد الأسهم حجم</th>{% endif %}
+{% if result.scope=='market' %}<th>عدد الأسهم Double 7</th><th>عدد الأسهم 7 سعر</th><th>عدد الأسهم 7 حجم</th><th>عدد الأسهم المشاركة في مجموع السعر</th><th>عدد الأسهم المشاركة في مجموع الحجم</th>{% endif %}
 </tr></thead><tbody>
 {% for r in result.rows %}
 <tr {% if r.double_signal7 %}style="font-weight:800;background:#eefaf5"{% endif %}>
@@ -83,10 +120,12 @@
 <td>{{'✅ 7' if r.volume_signal7 else '—'}}</td>
 <td>{{'✅✅ DOUBLE 7' if r.double_signal7 else '—'}}</td>
 {% if result.scope=='market' %}
-<td>{% if r.stocks_double7_count %}<a href="{{url_for('egx_seven_day',day=r.date)}}">{{r.stocks_double7_count}} سهم</a>{% else %}0{% endif %}</td>
+<td>{% if r.stocks_double7_count %}<a href="{{url_for('egx_seven_day',day=r.date,kind='double')}}">{{r.stocks_double7_count}} سهم</a>{% else %}0{% endif %}</td>
+<td>{% if r.stocks_price7_count %}<a href="{{url_for('egx_seven_day',day=r.date,kind='price')}}">{{r.stocks_price7_count}} سهم</a>{% else %}0{% endif %}</td>
+<td>{% if r.stocks_volume7_count %}<a href="{{url_for('egx_seven_day',day=r.date,kind='volume')}}">{{r.stocks_volume7_count}} سهم</a>{% else %}0{% endif %}</td>
 <td>{{r.price_count}}</td><td>{{r.volume_count}}</td>
 {% endif %}
 </tr>
-{% else %}<tr><td colspan="12">لا توجد نتائج.</td></tr>{% endfor %}
+{% else %}<tr><td colspan="14">لا توجد نتائج.</td></tr>{% endfor %}
 </tbody></table></div>
 {% endif %}{% endblock %}
