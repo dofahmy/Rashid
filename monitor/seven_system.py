@@ -29,12 +29,14 @@ def _load_stocks():
         cd=_pick(t,['session_date','date','d','datetime','timestamp','ts'])
         cc=_pick(t,['adj_c','adj_close','adjusted_close'],False)
         if cc is None:cc=_pick(t,['c','close'])
+        co=_pick(t,['adj_o','adjusted_open','adj_open','o','open'],False)
         cv=_pick(t,['v','volume'],False)
         ch=_pick(t,['adj_h','adjusted_high','adj_high','h','high'],False)
         cl=_pick(t,['adj_l','adjusted_low','adj_low','l','low'],False)
         syms=[r[0] for r in s.execute(select(cs).where(cs.ilike('%.CA')).distinct().order_by(cs)).all() if r and r[0]]
         for sym in syms:
             cols=[cd,cc];names=['date','close']
+            if co is not None:cols.append(co);names.append('open')
             if cv is not None:cols.append(cv);names.append('volume')
             if ch is not None:cols.append(ch);names.append('high')
             if cl is not None:cols.append(cl);names.append('low')
@@ -44,7 +46,7 @@ def _load_stocks():
             df['date']=pd.to_datetime(df['date'],errors='coerce')
             df['close']=pd.to_numeric(df['close'],errors='coerce')
             df['volume']=pd.to_numeric(df['volume'],errors='coerce') if 'volume' in df else np.nan
-            for ohlc_name in ('high','low'):
+            for ohlc_name in ('open','high','low'):
                 if ohlc_name in df:df[ohlc_name]=pd.to_numeric(df[ohlc_name],errors='coerce')
             df=df.dropna(subset=['date','close']).sort_values('date').drop_duplicates('date',keep='last').reset_index(drop=True)
             if len(df):out[str(sym).upper()]=df

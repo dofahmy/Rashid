@@ -46,6 +46,10 @@ def _load_stocks():
         df["raw_close"] = pd.to_numeric(df["close"], errors="coerce")
         df["close"] = pd.to_numeric(df["adj_close"], errors="coerce")
         df["volume"] = pd.to_numeric(df["volume"], errors="coerce")
+        # Adjust all tradeable OHLC consistently with adj_close for backtests.
+        factor = (df["close"] / df["raw_close"]).replace([np.inf, -np.inf], np.nan)
+        for col in ("open", "high", "low"):
+            df[col] = df[col] * factor
         df = df[["date","open","high","low","raw_close","close","volume"]].dropna(subset=["date","close"])
         out[sym] = df.sort_values("date").drop_duplicates("date", keep="last").reset_index(drop=True)
     return out
