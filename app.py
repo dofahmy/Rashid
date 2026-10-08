@@ -416,6 +416,12 @@ def create_app(db=None,test_config=None):
         start=request.args.get('start','').strip()
         end=request.args.get('end','').strip()
         signals_only=request.args.get('signals_only')=='1'
+        try: repeat_price_tolerance_pct=float(request.args.get('repeat_price_tolerance_pct','1.0'))
+        except Exception: repeat_price_tolerance_pct=1.0
+        try: repeat_max_gap_sessions=int(request.args.get('repeat_max_gap_sessions','20'))
+        except Exception: repeat_max_gap_sessions=20
+        repeat_price_tolerance_pct=max(0.0,min(repeat_price_tolerance_pct,20.0))
+        repeat_max_gap_sessions=max(1,min(repeat_max_gap_sessions,252))
         if metric=='both' and request.args: signals_only=True
 
         if scope not in ('market','stock','index'): scope='market'
@@ -446,6 +452,8 @@ def create_app(db=None,test_config=None):
                         start=start or None,
                         end=end or None,
                         signals_only=signals_only,
+                        repeat_price_tolerance_pct=repeat_price_tolerance_pct,
+                        repeat_max_gap_sessions=repeat_max_gap_sessions,
                     )
                 except Exception as exc:
                     app.logger.exception('EGX Seven calculation failed')
@@ -458,7 +466,9 @@ def create_app(db=None,test_config=None):
             'seven_system.html',
             result=result,error=error,symbols=symbols,
             scope=scope,symbol=symbol,metric=metric,date_mode=date_mode,
-            day=day,month=month,start=start,end=end,signals_only=signals_only
+            day=day,month=month,start=start,end=end,signals_only=signals_only,
+            repeat_price_tolerance_pct=repeat_price_tolerance_pct,
+            repeat_max_gap_sessions=repeat_max_gap_sessions
         )
 
 
@@ -471,10 +481,11 @@ def create_app(db=None,test_config=None):
         except ValueError:
             abort(400,description='تاريخ غير صحيح.')
         try:
-            rows=market_day_stock_details(dt)
+            kind=request.args.get('kind','double')
+            rows=market_day_stock_details(dt,kind=kind)
             error=None
         except Exception as exc:
             rows=[]
             error=f'{type(exc).__name__}: {exc}'
-        return render_template('seven_day_stocks.html',day=day,rows=rows,error=error)
+        return render_template('seven_day_stocks.html',day=day,rows=rows,error=error,kind=request.args.get('kind','double'))
     return app
