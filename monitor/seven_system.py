@@ -238,6 +238,98 @@ def _chart_payload(price_df,signal_mask,value_col):
         prev=v
     return {'points':points,'markers':markers,'min':mn,'max':mx}
 
+
+def repeat_price_time_screener(price_tolerance_pct=1.0, max_gap_sessions=20, recent_days=None):
+    """
+    Screen the whole EGX universe for the LATEST repeated same-stock Double-7
+    price/time cluster.
+
+    Returns ONE latest qualifying cluster per stock, sorted by latest date DESC.
+
+    Optional recent_days:
+      if set, keep only stocks whose latest qualifying cluster ended within
+      recent_days calendar days from the latest market date in the database.
+    """
+    frames=_load_stocks()
+    rows=[]
+
+    latest_market_date=None
+    for df in frames.values():
+        if df is None or df.empty:
+            continue
+        d=pd.to_datetime(df['date'],errors='coerce').dropna()
+        if len(d):
+            mx=pd.Timestamp(d.max()).normalize()
+            latest_market_date=mx if latest_market_date is None or mx>latest_market_date else latest_market_date
+
+    for sym,df in frames.items():
+        single,_=_single(df,True)
+        levels=_repeat_double7_levels(
+            single,
+            price_tolerance_pct=price_tolerance_pct,
+            max_gap_sessions=max_gap_sessions,
+        )
+        if not levels:
+            continue
+
+        # latest qualifying cluster for this stock
+        latest=max(levels,key=lambda z:pd.Timestamp(z['end_date']))
+
+        end_date=pd.Timestamp(latest['end_date']).normalize()
+        if recent_days is not None and latest_market_date is not None:
+            age=(latest_market_date-end_date).days
+            if age>int(recent_days):
+                continue
+        else:
+            age=(latest_market_date-end_date).days if latest_market_date is not None else None
+
+        # current/latest stock price for context
+        current_close=None
+        current_date=None
+        if len(df):
+            current_close=float(df.iloc[-1]['close'])
+            current_date=pd.Timestamp(df.iloc[-1]['date']).date().isoformat()
+
+        rows.append({
+            'symbol':sym,
+            'latest_repeat_date':latest['end_date'],
+            'first_repeat_date':latest['start_date'],
+            'repeat_price':latest['avg_price'],
+            'min_price':latest['min_price'],
+            'max_price':latest['max_price'],
+            'touches':latest['touches'],
+            'max_session_gap':latest['max_session_gap'],
+            'price_spread_pct':latest['price_spread_pct'],
+            'dates':latest['dates'],
+            'prices':latest['prices'],
+            'days_ago':age,
+            'current_close':round(current_close,4) if current_close is not None else None,
+            'current_date':current_date,
+            'current_vs_repeat_pct':(
+                round((current_close/latest['avg_price']-1.0)*100.0,2)
+                if current_close is not None and latest['avg_price'] not in (None,0)
+                else None
+            ),
+        })
+
+    rows.sort(
+        key=lambda r:(
+            pd.Timestamp(r['latest_repeat_date']),
+            int(r['touches']),
+            -float(r['price_spread_pct'] or 0),
+        ),
+        reverse=True
+    )
+
+    return {
+        'rows':rows,
+        'count':len(rows),
+        'latest_market_date':latest_market_date.date().isoformat() if latest_market_date is not None else None,
+        'price_tolerance_pct':float(price_tolerance_pct),
+        'max_gap_sessions':int(max_gap_sessions),
+        'recent_days':recent_days,
+    }
+
 def run(scope='market',symbol=None,metric='both',date_mode='all',day=None,month=None,start=None,end=None,signals_only=False,repeat_price_tolerance_pct=1.0,repeat_max_gap_sessions=20):
     frames=_load_stocks();source=None;stock_details={};repeat_levels=[]
     index_by_date,index_source=_index_map()
