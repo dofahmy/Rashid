@@ -103,12 +103,12 @@ def run(scope='market',symbol=None,metric='both',date_mode='all',day=None,month=
     else:raise ValueError('نوع التحليل غير صحيح.')
     f=_filter(full,date_mode,day,month,start,end)
     pm=f.price_signal7.fillna(False);vm=f.volume_signal7.fillna(False) if 'volume_signal7' in f else pd.Series(False,index=f.index)
-    mask=pm if metric=='price' else vm if metric=='volume' else (pm|vm)
+    mask=pm if metric=='price' else vm if metric=='volume' else (pm&vm)
     sig=f[mask].copy()
     shown=sig if signals_only else f
     def recs(df):
         o=[]
         for _,r in df.iterrows():
-            o.append({'date':pd.Timestamp(r.date).date().isoformat(),'price_value':None if pd.isna(r.get('price_value')) else round(float(r.get('price_value')),2),'price_remainder':None if pd.isna(r.get('price_remainder')) else int(r.get('price_remainder')),'price_signal7':bool(r.get('price_signal7',False)),'volume_value':None if pd.isna(r.get('volume_value')) else int(round(float(r.get('volume_value')))),'volume_remainder':None if pd.isna(r.get('volume_remainder')) else int(r.get('volume_remainder')),'volume_signal7':bool(r.get('volume_signal7',False)),'price_count':int(r.get('price_count')) if pd.notna(r.get('price_count',np.nan)) else None,'volume_count':int(r.get('volume_count')) if pd.notna(r.get('volume_count',np.nan)) else None})
+            o.append({'date':pd.Timestamp(r.date).date().isoformat(),'price_value':None if pd.isna(r.get('price_value')) else round(float(r.get('price_value')),2),'price_remainder':None if pd.isna(r.get('price_remainder')) else int(r.get('price_remainder')),'price_signal7':bool(r.get('price_signal7',False)),'volume_value':None if pd.isna(r.get('volume_value')) else int(round(float(r.get('volume_value')))),'volume_remainder':None if pd.isna(r.get('volume_remainder')) else int(r.get('volume_remainder')),'volume_signal7':bool(r.get('volume_signal7',False)),'double_signal7':bool(r.get('price_signal7',False) and r.get('volume_signal7',False)),'price_count':int(r.get('price_count')) if pd.notna(r.get('price_count',np.nan)) else None,'volume_count':int(r.get('volume_count')) if pd.notna(r.get('volume_count',np.nan)) else None})
         return o
-    return {'scope':scope,'symbol':symbol,'display_name':name,'source':source,'anchor':meta,'rows':recs(shown),'signal_rows':recs(sig),'total_rows':len(shown),'signal_count':len(sig),'price_signal_count':int(pm.sum()) if len(f) else 0,'volume_signal_count':int(vm.sum()) if scope!='index' and len(f) else 0}
+    return {'scope':scope,'symbol':symbol,'display_name':name,'source':source,'anchor':meta,'rows':recs(shown),'signal_rows':recs(sig),'total_rows':len(shown),'signal_count':len(sig),'double_signal_count':int((pm&vm).sum()) if scope!='index' and len(f) else 0,'price_signal_count':int(pm.sum()) if len(f) else 0,'volume_signal_count':int(vm.sum()) if scope!='index' and len(f) else 0}
