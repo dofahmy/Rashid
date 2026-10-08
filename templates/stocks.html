@@ -1,5 +1,7 @@
 {% extends 'base.html' %}{% block content %}
 <h1>متابعة الأسهم · ربع الساعة</h1>
+<div class="panel"><a class="button" href="{{url_for('egx_seven')}}">نظام الـ 7</a></div>
+
 <div class="panel"><a class="button" href="{{url_for('egx_market')}}">السوق المصري · Market Turn</a><p class="muted">LOW: Price/Breadth/Sectors · HIGH: Price/Breadth/Sectors + Planetary.</p></div>
 <div class="panel"><h2>بدء سجل تطوير جديد</h2><p>يمسح جميع الخطط القديمة والمفتوحة والنتائج وطابور تنبيهات الأسهم وروابط الجداول القديمة. يحتفظ بالعملاء وحدودهم والإعدادات وبيانات الأسعار. أوقفي البوت وMonitor مؤقتًا قبل التصفير ثم شغّليهما بعده. الرسائل التي وصلت لتليجرام سابقًا لا تُحذف.</p><form method="post" action="{{url_for('reset_stock_history')}}"><input type="hidden" name="csrf" value="{{csrf()}}"><button>تصفير سجل التطوير</button></form></div>
 <div class="panel"><h2>إعدادات إرسال توصيات الأمريكي</h2>
