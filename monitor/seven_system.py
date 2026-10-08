@@ -4,6 +4,7 @@ import numpy as np, pandas as pd
 from sqlalchemy import select
 from core import database
 from monitor.gann_analysis import _daily_table, _load_egx_panel
+from monitor.seven_forward_20d import forward_20d
 
 PRICE_SCALE=100
 
@@ -28,20 +29,23 @@ def _load_stocks():
         cd=_pick(t,['session_date','date','d','datetime','timestamp','ts'])
         cc=_pick(t,['adj_c','adj_close','adjusted_close'],False)
         if cc is None:cc=_pick(t,['c','close'])
-        ch=_pick(t,['h','high'],False)
         cv=_pick(t,['v','volume'],False)
+        ch=_pick(t,['adj_h','adjusted_high','adj_high','h','high'],False)
+        cl=_pick(t,['adj_l','adjusted_low','adj_low','l','low'],False)
         syms=[r[0] for r in s.execute(select(cs).where(cs.ilike('%.CA')).distinct().order_by(cs)).all() if r and r[0]]
         for sym in syms:
             cols=[cd,cc];names=['date','close']
-            if ch is not None:cols.append(ch);names.append('high')
             if cv is not None:cols.append(cv);names.append('volume')
+            if ch is not None:cols.append(ch);names.append('high')
+            if cl is not None:cols.append(cl);names.append('low')
             rows=s.execute(select(*cols).where(cs==sym).order_by(cd)).all()
             if not rows:continue
             df=pd.DataFrame(rows,columns=names)
             df['date']=pd.to_datetime(df['date'],errors='coerce')
             df['close']=pd.to_numeric(df['close'],errors='coerce')
-            df['high']=pd.to_numeric(df['high'],errors='coerce') if 'high' in df else df['close']
             df['volume']=pd.to_numeric(df['volume'],errors='coerce') if 'volume' in df else np.nan
+            for ohlc_name in ('high','low'):
+                if ohlc_name in df:df[ohlc_name]=pd.to_numeric(df[ohlc_name],errors='coerce')
             df=df.dropna(subset=['date','close']).sort_values('date').drop_duplicates('date',keep='last').reset_index(drop=True)
             if len(df):out[str(sym).upper()]=df
     return out
@@ -242,27 +246,6 @@ def _chart_payload(price_df,signal_mask,value_col):
     return {'points':points,'markers':markers,'min':mn,'max':mx}
 
 
-MILESTONE_PCTS=(5,10,15,20,50)
-
-def _milestone_sessions_after_repeat(df, repeat_date, repeat_price):
-    """Count sessions AFTER Repeat until High first reaches each upside target."""
-    if df is None or df.empty or repeat_price is None or repeat_price<=0:
-        return {p:None for p in MILESTONE_PCTS}
-    x=df.sort_values('date').reset_index(drop=True).copy()
-    dates=pd.to_datetime(x['date']).dt.normalize()
-    d=pd.Timestamp(repeat_date).normalize()
-    matches=x.index[dates==d].tolist()
-    if not matches:return {p:None for p in MILESTONE_PCTS}
-    future=x.iloc[int(matches[-1])+1:].reset_index(drop=True)
-    if future.empty:return {p:None for p in MILESTONE_PCTS}
-    highs=pd.to_numeric(future['high'] if 'high' in future else future['close'],errors='coerce')
-    out={}
-    for pct in MILESTONE_PCTS:
-        target=float(repeat_price)*(1.0+pct/100.0)
-        hit=future.index[highs>=target].tolist()
-        out[pct]=int(hit[0])+1 if hit else None
-    return out
-
 def repeat_price_time_screener(price_tolerance_pct=1.0, max_gap_sessions=20, recent_days=None):
     """
     Screen the whole EGX universe for the LATEST repeated same-stock Double-7
@@ -314,8 +297,6 @@ def repeat_price_time_screener(price_tolerance_pct=1.0, max_gap_sessions=20, rec
             current_close=float(df.iloc[-1]['close'])
             current_date=pd.Timestamp(df.iloc[-1]['date']).date().isoformat()
 
-        milestones=_milestone_sessions_after_repeat(df,latest['end_date'],latest['avg_price'])
-
         rows.append({
             'symbol':sym,
             'latest_repeat_date':latest['end_date'],
@@ -329,6 +310,7 @@ def repeat_price_time_screener(price_tolerance_pct=1.0, max_gap_sessions=20, rec
             'dates':latest['dates'],
             'prices':latest['prices'],
             'days_ago':age,
+            **forward_20d(df,latest['end_date'],latest['avg_price']),
             'current_close':round(current_close,4) if current_close is not None else None,
             'current_date':current_date,
             'current_vs_repeat_pct':(
@@ -336,11 +318,6 @@ def repeat_price_time_screener(price_tolerance_pct=1.0, max_gap_sessions=20, rec
                 if current_close is not None and latest['avg_price'] not in (None,0)
                 else None
             ),
-            'hit_5_sessions':milestones.get(5),
-            'hit_10_sessions':milestones.get(10),
-            'hit_15_sessions':milestones.get(15),
-            'hit_20_sessions':milestones.get(20),
-            'hit_50_sessions':milestones.get(50),
         })
 
     rows.sort(

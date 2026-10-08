@@ -8,6 +8,7 @@ from sqlalchemy import text
 
 from core import database
 from monitor.sp500_seven_data import ensure_tables, DAILY_TABLE, CONSTIT_TABLE, INDEX_TABLE
+from monitor.seven_forward_20d import forward_20d
 from monitor.seven_system import (
     _single, _repeat_double7_levels, _filter, _chart_payload
 )
@@ -21,7 +22,7 @@ def _load_stocks():
             f"SELECT symbol FROM {CONSTIT_TABLE} WHERE active=TRUE ORDER BY symbol"
         )).all()]
         rows = s.execute(text(f"""
-            SELECT d.symbol, d.session_date, d.high, d.close, d.adj_close, d.volume
+            SELECT d.symbol, d.session_date, d.open, d.high, d.low, d.close, d.adj_close, d.volume
             FROM {DAILY_TABLE} d
             JOIN {CONSTIT_TABLE} c ON c.symbol=d.symbol
             WHERE c.active=TRUE
@@ -39,11 +40,13 @@ def _load_stocks():
             continue
         df = pd.DataFrame(rr)
         df["date"] = pd.to_datetime(df["session_date"], errors="coerce")
+        df["open"] = pd.to_numeric(df["open"], errors="coerce")
         df["high"] = pd.to_numeric(df["high"], errors="coerce")
+        df["low"] = pd.to_numeric(df["low"], errors="coerce")
+        df["raw_close"] = pd.to_numeric(df["close"], errors="coerce")
         df["close"] = pd.to_numeric(df["adj_close"], errors="coerce")
-        df["high"] = df["high"].where(df["high"].notna(),df["close"])
         df["volume"] = pd.to_numeric(df["volume"], errors="coerce")
-        df = df[["date", "high", "close", "volume"]].dropna(subset=["date","close"])
+        df = df[["date","open","high","low","raw_close","close","volume"]].dropna(subset=["date","close"])
         out[sym] = df.sort_values("date").drop_duplicates("date", keep="last").reset_index(drop=True)
     return out
 
@@ -131,64 +134,70 @@ def _stock_signal_map(frames):
     return by_date
 
 
-MILESTONE_PCTS=(5,10,15,20,50)
 
-def _milestone_sessions_after_repeat(df, repeat_date, repeat_price):
-    if df is None or df.empty or repeat_price is None or repeat_price<=0:
-        return {p:None for p in MILESTONE_PCTS}
-    x=df.sort_values('date').reset_index(drop=True).copy()
-    dates=pd.to_datetime(x['date']).dt.normalize()
-    d=pd.Timestamp(repeat_date).normalize()
-    matches=x.index[dates==d].tolist()
-    if not matches:return {p:None for p in MILESTONE_PCTS}
-    future=x.iloc[int(matches[-1])+1:].reset_index(drop=True)
-    if future.empty:return {p:None for p in MILESTONE_PCTS}
-    highs=pd.to_numeric(future['high'] if 'high' in future else future['close'],errors='coerce')
-    out={}
-    for pct in MILESTONE_PCTS:
-        target=float(repeat_price)*(1.0+pct/100.0)
-        hit=future.index[highs>=target].tolist()
-        out[pct]=int(hit[0])+1 if hit else None
-    return out
+def _repeat_direction_from_candle(row):
+    vals=[row.get("open"),row.get("high"),row.get("low"),row.get("raw_close")]
+    if any(v is None or pd.isna(v) for v in vals):
+        return "UNKNOWN","OHLC unavailable"
+    o=float(row["open"]);h=float(row["high"]);l=float(row["low"]);c=float(row["raw_close"])
+    body=abs(c-o)
+    upper=max(0.0,h-max(o,c))
+    lower=max(0.0,min(o,c)-l)
+    if c<o:
+        if lower>body and lower>upper:
+            return "BUY","negative candle but lower wick > body"
+        return "SELL","negative candle"
+    if c>o:
+        if upper>body:
+            return "SELL","positive candle but upper wick > body"
+        return "BUY","positive candle"
+    if upper>lower:return "SELL","flat candle + dominant upper wick"
+    if lower>upper:return "BUY","flat candle + dominant lower wick"
+    return "NEUTRAL","flat balanced candle"
+
+def _gap_matched_return(df, signal_date, gap_sessions, direction):
+    x=df.sort_values("date").reset_index(drop=True)
+    target=pd.Timestamp(signal_date).normalize()
+    m=x.index[pd.to_datetime(x["date"]).dt.normalize()==target].tolist()
+    if not m:return {}
+    i=int(m[-1]);n=max(1,int(gap_sessions));j=min(i+n,len(x)-1)
+    elapsed=j-i
+    start=float(x.iloc[i]["raw_close"]);end=float(x.iloc[j]["raw_close"])
+    raw=(end/start-1.0)*100.0 if start else None
+    aligned=(-raw if direction=="SELL" else raw) if raw is not None else None
+    return {"gap_target_sessions":n,"gap_elapsed_sessions":elapsed,"gap_complete":elapsed>=n,"gap_end_date":pd.Timestamp(x.iloc[j]["date"]).date().isoformat(),"gap_end_price":round(end,4),"gap_raw_return_pct":round(raw,2) if raw is not None else None,"gap_direction_return_pct":round(aligned,2) if aligned is not None else None}
 
 def repeat_price_time_screener(price_tolerance_pct=1.0,max_gap_sessions=20,recent_days=90):
-    frames=_load_stocks()
-    rows=[]
-    latest=None
+    frames=_load_stocks();rows=[];latest=None
     for df in frames.values():
         if len(df):
-            d=pd.Timestamp(df.date.max()).normalize()
-            latest=d if latest is None or d>latest else latest
-
+            d=pd.Timestamp(df.date.max()).normalize();latest=d if latest is None or d>latest else latest
     for sym,df in frames.items():
         single,_=_single(df,True)
         levels=_repeat_double7_levels(single,price_tolerance_pct,max_gap_sessions)
         if not levels:continue
-        z=max(levels,key=lambda a:pd.Timestamp(a['end_date']))
-        end=pd.Timestamp(z['end_date']).normalize()
-        age=(latest-end).days if latest is not None else None
+        z=max(levels,key=lambda a:pd.Timestamp(a["end_date"]))
+        end=pd.Timestamp(z["end_date"]).normalize();age=(latest-end).days if latest is not None else None
         if recent_days is not None and age is not None and age>int(recent_days):continue
-        cur=float(df.iloc[-1].close) if len(df) else None
-        milestones=_milestone_sessions_after_repeat(df,z['end_date'],z['avg_price'])
-        rows.append({
-            'symbol':sym,'latest_repeat_date':z['end_date'],'first_repeat_date':z['start_date'],
-            'repeat_price':z['avg_price'],'touches':z['touches'],'max_session_gap':z['max_session_gap'],
-            'price_spread_pct':z['price_spread_pct'],'dates':z['dates'],'prices':z['prices'],
-            'days_ago':age,'current_close':round(cur,4) if cur is not None else None,
-            'current_vs_repeat_pct':round((cur/z['avg_price']-1)*100,2) if cur is not None and z['avg_price'] else None,
-            'hit_5_sessions':milestones.get(5),
-            'hit_10_sessions':milestones.get(10),
-            'hit_15_sessions':milestones.get(15),
-            'hit_20_sessions':milestones.get(20),
-            'hit_50_sessions':milestones.get(50),
-        })
-    rows.sort(key=lambda r:(pd.Timestamp(r['latest_repeat_date']),r['touches']),reverse=True)
-    return {
-        'rows':rows,'count':len(rows),
-        'latest_market_date':latest.date().isoformat() if latest is not None else None,
-        'price_tolerance_pct':float(price_tolerance_pct),
-        'max_gap_sessions':int(max_gap_sessions),'recent_days':recent_days,
-    }
+        rr=df[pd.to_datetime(df["date"]).dt.normalize()==end]
+        if len(rr):
+            candle=rr.iloc[-1];direction,reason=_repeat_direction_from_candle(candle)
+            o=round(float(candle["open"]),4) if pd.notna(candle["open"]) else None
+            h=round(float(candle["high"]),4) if pd.notna(candle["high"]) else None
+            l=round(float(candle["low"]),4) if pd.notna(candle["low"]) else None
+            c=round(float(candle["raw_close"]),4) if pd.notna(candle["raw_close"]) else None
+        else:
+            direction,reason="UNKNOWN","OHLC unavailable";o=h=l=c=None
+        dates=[pd.Timestamp(x.strip()).normalize() for x in str(z["dates"]).split("|") if x.strip()]
+        if len(dates)>=2:
+            pos={pd.Timestamp(d).normalize():i for i,d in enumerate(pd.to_datetime(df["date"]))}
+            actual_gap=pos.get(dates[-1],0)-pos.get(dates[-2],0)
+            if actual_gap<=0:actual_gap=int(z["max_session_gap"])
+        else:actual_gap=int(z["max_session_gap"])
+        perf=_gap_matched_return(df,z["end_date"],actual_gap,direction)
+        rows.append({"symbol":sym,"latest_repeat_date":z["end_date"],"first_repeat_date":z["start_date"],"repeat_price":z["avg_price"],"touches":z["touches"],"price_spread_pct":z["price_spread_pct"],"dates":z["dates"],"prices":z["prices"],"days_ago":age,"repeat_direction":direction,"direction_reason":reason,"candle_open":o,"candle_high":h,"candle_low":l,"candle_close":c,"actual_repeat_gap_sessions":actual_gap,**perf,**forward_20d(df,z["end_date"],z["avg_price"])})
+    rows.sort(key=lambda r:(pd.Timestamp(r["latest_repeat_date"]),r["touches"]),reverse=True)
+    return {"rows":rows,"count":len(rows),"latest_market_date":latest.date().isoformat() if latest is not None else None,"price_tolerance_pct":float(price_tolerance_pct),"max_gap_sessions":int(max_gap_sessions),"recent_days":recent_days}
 
 
 def run(scope='market',symbol=None,metric='both',date_mode='all',day=None,month=None,start=None,end=None,signals_only=False,repeat_price_tolerance_pct=1.0,repeat_max_gap_sessions=20):

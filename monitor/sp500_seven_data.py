@@ -35,7 +35,9 @@ def ensure_tables():
         CREATE TABLE IF NOT EXISTS {DAILY_TABLE} (
             symbol TEXT NOT NULL,
             session_date DATE NOT NULL,
+            open DOUBLE PRECISION,
             high DOUBLE PRECISION,
+            low DOUBLE PRECISION,
             close DOUBLE PRECISION NOT NULL,
             adj_close DOUBLE PRECISION,
             volume BIGINT,
@@ -57,7 +59,8 @@ def ensure_tables():
     with DB.begin() as s:
         for q in ddl:
             s.execute(text(q))
-        s.execute(text(f"ALTER TABLE {DAILY_TABLE} ADD COLUMN IF NOT EXISTS high DOUBLE PRECISION"))
+        for col in ('open','high','low'):
+            s.execute(text(f"ALTER TABLE {DAILY_TABLE} ADD COLUMN IF NOT EXISTS {col} DOUBLE PRECISION"))
 
 
 def set_status(status):
@@ -170,7 +173,9 @@ def _extract_yf(raw, feed_symbol, multi):
 
     return pd.DataFrame({
         "date": pd.to_datetime(x[dc], errors="coerce"),
+        "open": ser("open"),
         "high": ser("high"),
+        "low": ser("low"),
         "close": ser("close"),
         "adj_close": ser("adj_close"),
         "volume": ser("volume"),
@@ -199,11 +204,13 @@ def _write_daily(symbol, df, source="YAHOO_SP500_SEVEN"):
     now = datetime.now(timezone.utc)
     q = text(f"""
         INSERT INTO {DAILY_TABLE}
-            (symbol, session_date, high, close, adj_close, volume, source, retrieved_at)
+            (symbol, session_date, open, high, low, close, adj_close, volume, source, retrieved_at)
         VALUES
-            (:symbol, :session_date, :high, :close, :adj_close, :volume, :source, :retrieved_at)
+            (:symbol, :session_date, :open, :high, :low, :close, :adj_close, :volume, :source, :retrieved_at)
         ON CONFLICT(symbol, session_date) DO UPDATE SET
+            open=excluded.open,
             high=excluded.high,
+            low=excluded.low,
             close=excluded.close,
             adj_close=excluded.adj_close,
             volume=excluded.volume,
@@ -217,12 +224,16 @@ def _write_daily(symbol, df, source="YAHOO_SP500_SEVEN"):
             if not pd.notna(close) or close <= 0:
                 continue
             adj = float(r["adj_close"]) if pd.notna(r["adj_close"]) else close
-            hi = float(r["high"]) if pd.notna(r.get("high")) else close
+            o = float(r["open"]) if pd.notna(r.get("open")) else None
+            h = float(r["high"]) if pd.notna(r.get("high")) else None
+            l = float(r["low"]) if pd.notna(r.get("low")) else None
             vol = int(round(float(r["volume"]))) if pd.notna(r["volume"]) else None
             s.execute(q, {
                 "symbol": symbol,
                 "session_date": pd.Timestamp(r["date"]).date(),
-                "high": hi,
+                "open": o,
+                "high": h,
+                "low": l,
                 "close": close,
                 "adj_close": adj,
                 "volume": vol,
