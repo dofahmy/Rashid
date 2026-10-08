@@ -658,6 +658,30 @@ def create_app(db=None,test_config=None):
             recent_days=recent_days if recent_days is not None else 'all',
         )
 
+    @app.get('/sp500-seven/hourly')
+    @auth
+    def sp500_hourly_screener():
+        from monitor.sp500_seven_hourly import screener
+        try: tol=float(request.args.get('price_tolerance_pct','1.0'))
+        except (TypeError,ValueError):tol=1.0
+        try: gap=int(request.args.get('max_gap_bars','20'))
+        except (TypeError,ValueError):gap=20
+        try:
+            recent_raw=request.args.get('recent_bars','300')
+            recent=None if recent_raw=='all' else max(0,int(recent_raw))
+        except (TypeError,ValueError):recent=300
+        rule_only=request.args.get('rule_only','0')=='1'
+        result=None;error=None;match_count=0
+        try:
+            result=screener(max(0,min(tol,20)),max(1,min(gap,250)),recent)
+            match_count=sum(1 for r in result['rows'] if r['breakout_rule_match'])
+            if rule_only:
+                result=dict(result,rows=[r for r in result['rows'] if r['breakout_rule_match']]);result['count']=len(result['rows'])
+        except Exception as exc:
+            app.logger.exception('SP500 hourly screener failed');error=f'{type(exc).__name__}: {exc}'
+        return render_template('sp500_seven_hourly.html',result=result,error=error,
+            price_tolerance_pct=tol,max_gap_bars=gap,recent_bars=recent if recent is not None else 'all',rule_only=rule_only,rule_match_count=match_count)
+
     @app.get('/sp500-seven/day/<day>')
     @auth
     def sp500_seven_day(day):
