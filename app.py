@@ -488,4 +488,55 @@ def create_app(db=None,test_config=None):
             rows=[]
             error=f'{type(exc).__name__}: {exc}'
         return render_template('seven_day_stocks.html',day=day,rows=rows,error=error,kind=request.args.get('kind','double'))
+
+    @app.get('/egx-seven/screener')
+    @auth
+    def egx_seven_screener():
+        from monitor.seven_system import repeat_price_time_screener
+
+        try:
+            price_tolerance_pct=float(request.args.get('price_tolerance_pct','1.0'))
+        except Exception:
+            price_tolerance_pct=1.0
+
+        try:
+            max_gap_sessions=int(request.args.get('max_gap_sessions','20'))
+        except Exception:
+            max_gap_sessions=20
+
+        recent_raw=request.args.get('recent_days','90').strip()
+        if recent_raw.lower() in ('','all','none'):
+            recent_days=None
+        else:
+            try:
+                recent_days=int(recent_raw)
+            except Exception:
+                recent_days=90
+
+        price_tolerance_pct=max(0.0,min(price_tolerance_pct,20.0))
+        max_gap_sessions=max(1,min(max_gap_sessions,252))
+        if recent_days is not None:
+            recent_days=max(1,min(recent_days,3650))
+
+        error=None
+        result=None
+        try:
+            result=repeat_price_time_screener(
+                price_tolerance_pct=price_tolerance_pct,
+                max_gap_sessions=max_gap_sessions,
+                recent_days=recent_days,
+            )
+        except Exception as exc:
+            app.logger.exception('EGX Seven repeat screener failed')
+            error=f'{type(exc).__name__}: {exc}'
+
+        return render_template(
+            'seven_screener.html',
+            result=result,
+            error=error,
+            price_tolerance_pct=price_tolerance_pct,
+            max_gap_sessions=max_gap_sessions,
+            recent_days=recent_days if recent_days is not None else 'all',
+        )
+
     return app
