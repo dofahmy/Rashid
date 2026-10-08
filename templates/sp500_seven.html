@@ -1,11 +1,16 @@
 {% extends 'base.html' %}{% block content %}
-<h1>نظام الـ 7</h1>
-<div class="panel"><a class="button" href="{{url_for('sp500_seven')}}">S&P 500 · نظام الـ 7</a></div>
-
-<div class="panel"><a class="button" href="{{url_for('egx_seven_screener')}}">Screening السوق كله · Repeat Price + Time</a></div>
+<h1>نظام الـ 7 · S&P 500</h1>
+<div class="panel">
+<a class="button" href="{{url_for('sp500_seven_screener')}}">SCREEN SP500</a>
+<form method="post" action="{{url_for('sp500_seven_refresh')}}" style="display:inline-block;margin-inline-start:12px">
+<input type="hidden" name="csrf" value="{{csrf()}}">
+<button type="submit">Update S&P500 Data</button>
+</form>
+{% if refresh_status %}<p class="muted">{{refresh_status.message}}{% if refresh_status.constituents %} · constituents: {{refresh_status.constituents}}{% endif %}</p>{% endif %}
+</div>
 <div class="panel"><p class="muted">السعر يتحول إلى قروش (×100) قبل القسمة على 7. الحجم عدد أسهم صحيح.</p>
-<form method="get" action="{{url_for('egx_seven')}}" class="filters">
-<select name="scope"><option value="market" {{'selected' if scope=='market' else ''}}>السوق كله</option><option value="stock" {{'selected' if scope=='stock' else ''}}>سهم</option><option value="index" {{'selected' if scope=='index' else ''}}>المؤشر</option></select>
+<form method="get" action="{{url_for('sp500_seven')}}" class="filters">
+<select name="scope"><option value="market" {{'selected' if scope=='market' else ''}}>S&P 500 كله</option><option value="stock" {{'selected' if scope=='stock' else ''}}>سهم</option><option value="index" {{'selected' if scope=='index' else ''}}>S&P 500 Index</option></select>
 <select name="symbol"><option value="">السهم</option>{% for s in symbols %}<option value="{{s}}" {{'selected' if symbol==s else ''}}>{{s}}</option>{% endfor %}</select>
 <select name="metric"><option value="both" {{'selected' if metric=='both' else ''}}>السعر + الحجم معًا (Double 7)</option><option value="price" {{'selected' if metric=='price' else ''}}>السعر فقط</option><option value="volume" {{'selected' if metric=='volume' else ''}}>الحجم فقط</option></select>
 <select name="date_mode"><option value="all" {{'selected' if date_mode=='all' else ''}}>كل التاريخ</option><option value="day" {{'selected' if date_mode=='day' else ''}}>يوم</option><option value="month" {{'selected' if date_mode=='month' else ''}}>شهر</option><option value="range" {{'selected' if date_mode=='range' else ''}}>فترة</option></select>
@@ -17,7 +22,7 @@
 <input type="number" name="repeat_max_gap_sessions" min="1" max="252" value="{{repeat_max_gap_sessions}}">
 {% endif %}
 
-<label><input type="checkbox" name="signals_only" value="1" {{'checked' if signals_only else ''}}> إشارات 7 فقط</label><button>احسب نظام الـ 7</button></form></div>
+<label><input type="checkbox" name="signals_only" value="1" {{'checked' if signals_only else ''}}> إشارات 7 فقط</label><button>احسب نظام الـ 7 · S&P 500</button></form></div>
 
 {% if error %}<div class="panel warning">{{error}}</div>{% endif %}
 {% if result %}
@@ -37,7 +42,7 @@
 
 {% if result.chart.points %}
 <div class="panel">
-<h2>{% if result.scope=='stock' %}شارت سعر {{result.display_name}}{% else %}شارت المؤشر الصناعي{% endif %} + Double 7</h2>
+<h2>{% if result.scope=='stock' %}شارت سعر {{result.display_name}}{% else %}شارت S&P 500 Index الصناعي{% endif %} + Double 7</h2>
 <p class="muted">السهم ↑ تحت السعر = مستوى Double 7 أعلى من مستوى Double 7 السابق. السهم ↓ فوق السعر = مستوى أقل من السابق. ◆ = أول إشارة أو نفس المستوى.</p>
 <svg viewBox="0 0 1200 420" width="100%" height="420" role="img">
   <rect x="55" y="20" width="1120" height="350" fill="white" stroke="#d9e2ec"/>
@@ -104,7 +109,7 @@
 <div class="panel tablewrap"><h2>النتائج</h2><table>
 <thead><tr>
 <th>التاريخ</th>
-{% if result.scope=='stock' %}<th>سعر السهم عند Double 7</th>{% elif result.scope=='market' %}<th>قيمة المؤشر الصناعي</th>{% elif result.scope=='index' %}<th>قيمة المؤشر</th>{% endif %}
+{% if result.scope=='stock' %}<th>سعر السهم عند Double 7</th>{% elif result.scope=='market' %}<th>قيمة S&P 500 Index الصناعي</th>{% elif result.scope=='index' %}<th>قيمة S&P 500 Index</th>{% endif %}
 <th>{{'السعر التراكمي' if result.scope in ['stock','index'] else 'مجموع الإغلاقات'}}</th>
 <th>باقي السعر</th><th>7 سعر</th>
 <th>{{'الحجم التراكمي' if result.scope=='stock' else 'مجموع الحجم'}}</th>
@@ -113,7 +118,7 @@
 </tr></thead><tbody>
 {% for r in result.rows %}
 <tr {% if r.double_signal7 %}style="font-weight:800;background:#eefaf5"{% endif %}>
-<td>{% if result.scope=='market' and r.stocks_double7_count %}<a href="{{url_for('egx_seven_day',day=r.date)}}">{{r.date}}</a>{% else %}{{r.date}}{% endif %}</td>
+<td>{% if result.scope=='market' and r.stocks_double7_count %}<a href="{{url_for('sp500_seven_day',day=r.date)}}">{{r.date}}</a>{% else %}{{r.date}}{% endif %}</td>
 {% if result.scope=='stock' %}<td>{{r.raw_close if r.raw_close is not none else '—'}}</td>{% elif result.scope in ['market','index'] %}<td>{{r.index_value if r.index_value is not none else '—'}}</td>{% endif %}
 <td>{{r.price_value if r.price_value is not none else '—'}}</td>
 <td>{{r.price_remainder if r.price_remainder is not none else '—'}}</td>
@@ -123,9 +128,9 @@
 <td>{{'✅ 7' if r.volume_signal7 else '—'}}</td>
 <td>{{'✅✅ DOUBLE 7' if r.double_signal7 else '—'}}</td>
 {% if result.scope=='market' %}
-<td>{% if r.stocks_double7_count %}<a href="{{url_for('egx_seven_day',day=r.date,kind='double')}}">{{r.stocks_double7_count}} سهم</a>{% else %}0{% endif %}</td>
-<td>{% if r.stocks_price7_count %}<a href="{{url_for('egx_seven_day',day=r.date,kind='price')}}">{{r.stocks_price7_count}} سهم</a>{% else %}0{% endif %}</td>
-<td>{% if r.stocks_volume7_count %}<a href="{{url_for('egx_seven_day',day=r.date,kind='volume')}}">{{r.stocks_volume7_count}} سهم</a>{% else %}0{% endif %}</td>
+<td>{% if r.stocks_double7_count %}<a href="{{url_for('sp500_seven_day',day=r.date,kind='double')}}">{{r.stocks_double7_count}} سهم</a>{% else %}0{% endif %}</td>
+<td>{% if r.stocks_price7_count %}<a href="{{url_for('sp500_seven_day',day=r.date,kind='price')}}">{{r.stocks_price7_count}} سهم</a>{% else %}0{% endif %}</td>
+<td>{% if r.stocks_volume7_count %}<a href="{{url_for('sp500_seven_day',day=r.date,kind='volume')}}">{{r.stocks_volume7_count}} سهم</a>{% else %}0{% endif %}</td>
 <td>{{r.price_count}}</td><td>{{r.volume_count}}</td>
 {% endif %}
 </tr>

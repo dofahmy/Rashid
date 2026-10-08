@@ -1,0 +1,89 @@
+{% extends 'base.html' %}{% block content %}
+<h1>SCREEN SP500 · Repeat Price + Time</h1>
+
+<div class="panel">
+<p class="muted">
+يطلع آخر Cluster لكل سهم عمل فيه Double 7 عند نفس المستوى السعري تقريبًا وفي مسافة زمنية متقاربة.
+النتائج مرتبة من أحدث تاريخ للأقدم.
+</p>
+
+<form method="get" action="{{url_for('sp500_seven_screener')}}" class="filters">
+<label>تقارب السعر %</label>
+<input type="number" name="price_tolerance_pct" step="0.1" min="0" max="20" value="{{price_tolerance_pct}}">
+
+<label>أقصى Gap بالجلسات</label>
+<input type="number" name="max_gap_sessions" min="1" max="252" value="{{max_gap_sessions}}">
+
+<label>أحدث من</label>
+<select name="recent_days">
+<option value="30" {{'selected' if recent_days==30 else ''}}>30 يوم</option>
+<option value="60" {{'selected' if recent_days==60 else ''}}>60 يوم</option>
+<option value="90" {{'selected' if recent_days==90 else ''}}>90 يوم</option>
+<option value="180" {{'selected' if recent_days==180 else ''}}>180 يوم</option>
+<option value="365" {{'selected' if recent_days==365 else ''}}>سنة</option>
+<option value="all" {{'selected' if recent_days=='all' else ''}}>كل التاريخ</option>
+</select>
+
+<button type="submit">اعمل Screening</button>
+</form>
+</div>
+
+{% if error %}
+<div class="panel warning">{{error}}</div>
+{% endif %}
+
+{% if result %}
+<div class="cards">
+<div class="panel accent"><div class="muted">عدد أسهم S&P 500</div><div class="metric">{{result.count}}</div></div>
+<div class="panel"><div class="muted">آخر جلسة في الداتا</div><div class="metric">{{result.latest_market_date or '—'}}</div></div>
+<div class="panel"><div class="muted">تقارب السعر</div><div class="metric">{{result.price_tolerance_pct}}%</div></div>
+<div class="panel"><div class="muted">أقصى Gap</div><div class="metric">{{result.max_gap_sessions}} جلسة</div></div>
+</div>
+
+<div class="panel tablewrap">
+<h2>آخر الأسهم عند Repeat Price + Time</h2>
+<table class="sortable-egx">
+<thead>
+<tr>
+<th>السهم</th>
+<th>آخر Repeat Date</th>
+<th>أول تاريخ في الـCluster</th>
+<th>Repeat Price</th>
+<th>Touches</th>
+<th>Max Gap</th>
+<th>Price Spread %</th>
+<th>السعر الحالي</th>
+<th>الحالي مقابل Repeat %</th>
+<th>من كام يوم</th>
+<th>كل التواريخ</th>
+<th>كل الأسعار</th>
+</tr>
+</thead>
+<tbody>
+{% for r in result.rows %}
+<tr>
+<td><strong>{{r.symbol}}</strong></td>
+<td><strong>{{r.latest_repeat_date}}</strong></td>
+<td>{{r.first_repeat_date}}</td>
+<td><strong>{{r.repeat_price}}</strong></td>
+<td>{{r.touches}}</td>
+<td>{{r.max_session_gap}}</td>
+<td>{{r.price_spread_pct}}%</td>
+<td>{{r.current_close if r.current_close is not none else '—'}}</td>
+<td>
+{% if r.current_vs_repeat_pct is not none %}
+  {{'%+.2f'|format(r.current_vs_repeat_pct)}}%
+{% else %}—{% endif %}
+</td>
+<td>{{r.days_ago if r.days_ago is not none else '—'}}</td>
+<td dir="ltr">{{r.dates}}</td>
+<td dir="ltr">{{r.prices}}</td>
+</tr>
+{% else %}
+<tr><td colspan="12">مفيش أسهم مطابقة للشروط المختارة.</td></tr>
+{% endfor %}
+</tbody>
+</table>
+</div>
+{% endif %}
+{% endblock %}
