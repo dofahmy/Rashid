@@ -530,9 +530,17 @@ def create_app(db=None,test_config=None):
             app.logger.exception('EGX Seven repeat screener failed')
             error=f'{type(exc).__name__}: {exc}'
 
+        rule_only=request.args.get('rule_only','0')=='1'
+        rule_match_count=sum(1 for r in result['rows'] if r.get('breakout_rule_match')) if result else 0
+        if result and rule_only:
+            result=dict(result)
+            result['rows']=[r for r in result['rows'] if r.get('breakout_rule_match')]
+            result['count']=len(result['rows'])
+
         return render_template(
             'seven_screener.html',
             result=result,
+            rule_only=rule_only, rule_match_count=rule_match_count,
             error=error,
             price_tolerance_pct=price_tolerance_pct,
             max_gap_sessions=max_gap_sessions,
@@ -634,9 +642,17 @@ def create_app(db=None,test_config=None):
             app.logger.exception('SP500 repeat screener failed')
             error=f'{type(exc).__name__}: {exc}'
 
+        rule_only=request.args.get('rule_only','0')=='1'
+        rule_match_count=sum(1 for r in result['rows'] if r.get('breakout_rule_match')) if result else 0
+        if result and rule_only:
+            result=dict(result)
+            result['rows']=[r for r in result['rows'] if r.get('breakout_rule_match')]
+            result['count']=len(result['rows'])
+
         return render_template(
             'sp500_seven_screener.html',
             result=result,error=error,
+            rule_only=rule_only,rule_match_count=rule_match_count,
             price_tolerance_pct=price_tolerance_pct,
             max_gap_sessions=max_gap_sessions,
             recent_days=recent_days if recent_days is not None else 'all',

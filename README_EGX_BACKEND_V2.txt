@@ -39,3 +39,49 @@ V2.1 FIX
   synthetic index proxy. This fixes false "No market data exists..." errors.
 - NOW mode automatically rebuilds and saves state if the cache is missing after
   a deploy/version-key change.
+
+
+V2.2 TABLE SORTING
+------------------
+- Added Net Buy Score = Buy score - Sell score.
+- Buy score, Sell score, and Net Buy Score headers are clickable.
+- Each click toggles descending/ascending numeric sorting.
+
+
+V3.3 — DOUBLE 7 CHART + MARKET DRILLDOWN
+----------------------------------------
+- Stock table now includes the actual stock close on each Double-7 date.
+- Stock chart plots actual close with Double-7 markers.
+- Marker rule: higher than previous Double-7 level -> up arrow below price;
+  lower -> down arrow above price; first/equal -> diamond.
+- Market mode adds synthetic index value on every row and charts that index.
+- Market mode counts how many individual stocks also made strict Double 7 on
+  the same date.
+- Clicking the date/count opens /egx-seven/day/YYYY-MM-DD with the stock list.
+
+
+V3.6 — MARKET REPEAT PRICE+TIME SCREENER
+----------------------------------------
+New page:
+    /egx-seven/screener
+
+Screens ALL EGX stocks and returns the latest qualifying repeated same-stock
+Double-7 price/time cluster for each stock.
+
+Controls:
+- price tolerance %
+- maximum session gap
+- recency window (30/60/90/180/365 days or all history)
+
+Columns include:
+- symbol
+- latest repeat date
+- first date in cluster
+- repeat price
+- touches
+- max session gap
+- price spread %
+- current close
+- current vs repeat price %
+- age in days
+- all cluster dates/prices
