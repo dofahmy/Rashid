@@ -416,6 +416,7 @@ def create_app(db=None,test_config=None):
         start=request.args.get('start','').strip()
         end=request.args.get('end','').strip()
         signals_only=request.args.get('signals_only')=='1'
+        if metric=='both' and request.args: signals_only=True
 
         if scope not in ('market','stock','index'): scope='market'
         if metric not in ('both','price','volume'): metric='both'
