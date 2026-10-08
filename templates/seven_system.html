@@ -1,7 +1,5 @@
 {% extends 'base.html' %}{% block content %}
 <h1>نظام الـ 7</h1>
-<div class="panel"><a class="button" href="{{url_for('sp500_seven')}}">S&P 500 · نظام الـ 7</a></div>
-
 <div class="panel"><a class="button" href="{{url_for('egx_seven_screener')}}">Screening السوق كله · Repeat Price + Time</a></div>
 <div class="panel"><p class="muted">السعر يتحول إلى قروش (×100) قبل القسمة على 7. الحجم عدد أسهم صحيح.</p>
 <form method="get" action="{{url_for('egx_seven')}}" class="filters">
