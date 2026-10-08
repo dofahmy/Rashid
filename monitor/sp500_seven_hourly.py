@@ -11,7 +11,6 @@ from core import database
 from monitor.sp500_seven_data import ensure_tables,CONSTIT_TABLE
 from monitor.seven_system import _single
 from monitor.sp500_seven_system import _repeat_direction_from_candle
-from monitor.seven_exit_targets import repeat_exit_targets
 
 TABLE='sp500_seven_hourly'
 
@@ -98,16 +97,49 @@ def _rule(frame,cluster):
     higher=bool(lows.iloc[30:].min()>lows.iloc[:30].min())
     return gap,touches,higher,'MATCH' if (11<=gap<=20 and touches==2 and higher) else 'NO_MATCH'
 
-def _first_target_vs_stop(df, idx, price, stop_pct, lookahead=20):
-    seen=df.iloc[idx+1:idx+1+lookahead]
-    for n, (_, candle) in enumerate(seen.iterrows(), 1):
-        hi=candle.get('high');lo=candle.get('low')
-        if pd.isna(hi) or pd.isna(lo):return 'NO_DATA',None
-        target=hi>=price*1.05;stop=lo<=price*(1-stop_pct/100)
-        if target and stop:return 'AMBIGUOUS',n
-        if target:return 'TARGET_FIRST',n
-        if stop:return 'STOP_FIRST',n
-    return ('NEITHER' if len(seen)==lookahead else 'INCOMPLETE'),None
+def directional_profit_exits(df, idx, price, direction, targets=(3, 5)):
+    """First post-signal hourly High (BUY) or Low (SELL) touching profit target.
+
+    No stop-loss. OPEN means an observed, valid price history has not hit the
+    target yet; absence of complete OHLC records is NO_DATA. No entry fill implied.
+    """
+    result = {}
+    for target in targets:
+        result.update({f'exit_{target}_status': 'NO_DATA',
+                       f'exit_{target}_session': None,
+                       f'exit_{target}_date': None})
+    result['exit_observed_sessions'] = 0
+    result['exit_max_favorable_pct'] = None
+    result['directional_current_return_pct'] = None
+    result['directional_gap_return_pct'] = None
+    if direction not in ('BUY', 'SELL') or price is None or price <= 0:
+        for target in targets: result[f'exit_{target}_status'] = 'NO_SIGNAL'
+        return result
+    future = df.iloc[idx + 1:]
+    if not future.empty:
+        col = 'high' if direction == 'BUY' else 'low'
+        values = pd.to_numeric(future[col], errors='coerce')
+        result['exit_observed_sessions'] = len(future)
+        if values.notna().all() and (values > 0).all():
+            favorable = float(values.max()) if direction == 'BUY' else float(values.min())
+            result['exit_max_favorable_pct'] = round((favorable / price - 1) * 100 * (1 if direction == 'BUY' else -1), 2)
+            for target in targets:
+                threshold = price * (1 + target / 100) if direction == 'BUY' else price * (1 - target / 100)
+                hits = values >= threshold if direction == 'BUY' else values <= threshold
+                if hits.any():
+                    pos = int(np.flatnonzero(hits.to_numpy())[0])
+                    result[f'exit_{target}_status'] = 'EXIT'
+                    result[f'exit_{target}_session'] = pos + 1
+                    result[f'exit_{target}_date'] = pd.Timestamp(future.iloc[pos]['date']).strftime('%Y-%m-%d %H:%M')
+                else:
+                    result[f'exit_{target}_status'] = 'OPEN'
+        # No gaps in the hourly OHLC record are assumed when calculating first hit.
+    else:
+        for target in targets: result[f'exit_{target}_status'] = 'OPEN'
+    last_close = pd.to_numeric(df.iloc[-1]['close'], errors='coerce')
+    if pd.notna(last_close):
+        result['directional_current_return_pct'] = round((float(last_close)/price-1)*100*(1 if direction=='BUY' else -1), 2)
+    return result
 
 def screener(price_tolerance_pct=1.0,max_gap_bars=20,recent_bars=300):
     frames=_frames();out=[];latest=None
@@ -123,17 +155,16 @@ def screener(price_tolerance_pct=1.0,max_gap_bars=20,recent_bars=300):
         gap,touches,higher,status=_rule(df,c)
         price=round(float(np.mean([p for _,_,p in c])),4)
         spread=round((max(p for _,_,p in c)-min(p for _,_,p in c))/price*100,3) if price else None
-        exits=repeat_exit_targets(df,str(last[1]),price,targets=(3,5),exact_timestamp=True)
         candle=df.iloc[idx].to_dict();candle['raw_close']=candle['close']
         direction,reason=_repeat_direction_from_candle(candle)
-        decision3,first3=_first_target_vs_stop(df,idx,price,3)
-        decision5,first5=_first_target_vs_stop(df,idx,price,5)
+        exits=directional_profit_exits(df,idx,price,direction)
         future=df.iloc[idx+1:idx+21]
         maxrise=round((future.high.max()/price-1)*100,2) if len(future) and future.high.notna().any() else None
         maxdown=round((future.low.min()/price-1)*100,2) if len(future) and future.low.notna().any() else None
         anchor=float(df.iloc[idx]['close'])
         elapsed=min(gap,age)
         gapraw=round((float(df.iloc[idx+elapsed].close)/anchor-1)*100,2) if anchor>0 and elapsed>0 else None
+        exits["directional_gap_return_pct"] = round(gapraw * (1 if direction == "BUY" else -1), 2) if gapraw is not None and direction in ("BUY", "SELL") else None
         out.append(dict(symbol=sym,latest_repeat_date=last[1].strftime('%Y-%m-%d %H:%M UTC'),repeat_price=price,
             gap=gap,touches=touches,price_spread_pct=spread,breakout_pre60_higher_lows=higher,
             breakout_rule_match=status=='MATCH',breakout_rule_status=status,
@@ -144,8 +175,6 @@ def screener(price_tolerance_pct=1.0,max_gap_bars=20,recent_bars=300):
             candle_high=round(float(candle['high']),4) if pd.notna(candle['high']) else None,
             candle_low=round(float(candle['low']),4) if pd.notna(candle['low']) else None,
             candle_close=round(float(candle['close']),4),
-            plus5_before_minus3=decision3,first_hit_minus3=first3,
-            plus5_before_minus5=decision5,first_hit_minus5=first5,
             observed_20h_bars=len(future),complete_20h=len(future)==20,
             current_price=round(float(df.iloc[-1].close),4),
             dates=' | '.join(t.strftime('%Y-%m-%d %H:%M') for _,t,_ in c),
