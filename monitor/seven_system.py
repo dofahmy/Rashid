@@ -266,6 +266,7 @@ def repeat_price_time_screener(price_tolerance_pct=1.0, max_gap_sessions=20, rec
     system_number=int(system_number)
     if not 2 <= system_number <= 1000: raise ValueError("system_number must be between 2 and 1000")
     frames=_load_stocks()
+    # The entered value is an inclusive upper bound: factors 2..N.
     rows=[]
 
     latest_market_date=None
@@ -278,7 +279,8 @@ def repeat_price_time_screener(price_tolerance_pct=1.0, max_gap_sessions=20, rec
             latest_market_date=mx if latest_market_date is None or mx>latest_market_date else latest_market_date
 
     for sym,df in frames.items():
-        single,_=_single(df,True,system_number=system_number)
+      for squaring_factor in range(2, system_number + 1):
+        single,_=_single(df,True,system_number=squaring_factor)
         levels=_repeat_double7_levels(
             single,
             price_tolerance_pct=price_tolerance_pct,
@@ -305,8 +307,24 @@ def repeat_price_time_screener(price_tolerance_pct=1.0, max_gap_sessions=20, rec
             current_close=float(df.iloc[-1]['close'])
             current_date=pd.Timestamp(df.iloc[-1]['date']).date().isoformat()
 
+        # Highest traded High after Repeat (exclude the signal candle itself).
+        after=df[pd.to_datetime(df['date']) > end_date].copy()
+        if not after.empty:
+            if 'high' in after.columns and after['high'].notna().any():
+                highs=pd.to_numeric(after['high'],errors='coerce')
+            else:
+                highs=pd.to_numeric(after['close'],errors='coerce')
+            peak_pos=highs.idxmax() if highs.notna().any() else None
+            peak_high=float(highs.loc[peak_pos]) if peak_pos is not None else None
+            peak_bars=int(after.index.get_loc(peak_pos))+1 if peak_pos is not None else None
+        else:
+            peak_high=None;peak_bars=None
+
         rows.append({
             'symbol':sym,
+            'squaring_factor':squaring_factor,
+            'repeat_peak_high':peak_high,
+            'repeat_peak_bars':peak_bars,
             'latest_repeat_date':latest['end_date'],
             'first_repeat_date':latest['start_date'],
             'repeat_price':latest['avg_price'],
@@ -334,6 +352,7 @@ def repeat_price_time_screener(price_tolerance_pct=1.0, max_gap_sessions=20, rec
         key=lambda r:(
             pd.Timestamp(r['latest_repeat_date']),
             int(r['touches']),
+            -int(r['squaring_factor']),
             -float(r['price_spread_pct'] or 0),
         ),
         reverse=True
@@ -341,6 +360,8 @@ def repeat_price_time_screener(price_tolerance_pct=1.0, max_gap_sessions=20, rec
 
     return {
         'system_number':system_number,
+        'factor_min':2,
+        'factor_max':system_number,
         'rows':rows,
         'count':len(rows),
         'latest_market_date':latest_market_date.date().isoformat() if latest_market_date is not None else None,
