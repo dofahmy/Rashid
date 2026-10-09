@@ -37,21 +37,25 @@ def publish_trades(csv_path):
         for i in range(0,len(rows),500): s.execute(q,rows[i:i+500])
     return len(rows)
 
-def dashboard(days=60,status='ALL',query='',page=1,page_size=50):
+def dashboard(days=60,status='ALL',query='',page=1,page_size=50,gap_min=None,gap_max=None):
     ensure_dashboard_table()
     status=status if status in ('ALL','EXIT','OPEN') else 'ALL'
     page=max(1,int(page));page_size=max(1,min(100,int(page_size)))
+    if gap_min is not None: gap_min=max(0,min(10000,int(gap_min)))
+    if gap_max is not None: gap_max=max(0,min(10000,int(gap_max)))
+    if gap_min is not None and gap_max is not None and gap_min>gap_max:
+        raise ValueError('الحد الأدنى للـ Gap أكبر من الحد الأقصى')
     with database()() as s:
         latest=s.execute(text(f'SELECT MAX(data_end_utc) FROM {TABLE}')).scalar()
         earliest=s.execute(text(f'SELECT MIN(signal_utc) FROM {TABLE}')).scalar()
         if latest is None:
             return {'rows':[],'total':0,'closed':0,'opened':0,'win_rate':None,'mean_return':None,
                     'realized':0,'floating':0,'avg_bars':None,'median_bars':None,
-                    'latest':None,'earliest':None,'days':days,'page':page,'pages':0,'status':status,'query':query}
+                    'latest':None,'earliest':None,'days':days,'page':page,'pages':0,'status':status,'query':query,'gap_min':gap_min,'gap_max':gap_max}
         params={'cutoff':latest-timedelta(days=days) if days else datetime(1970,1,1),
                 'status':status,'pattern':'%'+query.strip().upper()[:20]+'%',
-                'limit':page_size,'offset':(page-1)*page_size}
-        wh="signal_utc >= :cutoff AND (:status = 'ALL' OR status = :status) AND UPPER(symbol) LIKE :pattern"
+                'limit':page_size,'offset':(page-1)*page_size, 'gap_min':gap_min,'gap_max':gap_max}
+        wh="signal_utc >= :cutoff AND (:status = 'ALL' OR status = :status) AND UPPER(symbol) LIKE :pattern AND (:gap_min IS NULL OR gap_1h >= :gap_min) AND (:gap_max IS NULL OR gap_1h <= :gap_max)"
         stats=s.execute(text(f'''SELECT COUNT(*) total,
             COUNT(*) FILTER (WHERE status='EXIT') closed,
             COUNT(*) FILTER (WHERE status='OPEN') opened,
@@ -70,4 +74,4 @@ def dashboard(days=60,status='ALL',query='',page=1,page_size=50):
                 win_rate=(100*closed/total if total else None),mean_return=stats['mean_return'],
                 realized=stats['realized'],floating=stats['floating'],avg_bars=stats['avg_bars'],
                 median_bars=stats['median_bars'],latest=latest,earliest=earliest,
-                days=days,page=page,pages=(total+page_size-1)//page_size,status=status,query=query)
+                days=days,page=page,pages=(total+page_size-1)//page_size,status=status,query=query,gap_min=gap_min,gap_max=gap_max)
