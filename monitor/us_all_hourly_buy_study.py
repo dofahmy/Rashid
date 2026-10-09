@@ -108,47 +108,51 @@ def refresh(symbols, period='60d', batch_size=15, pause=0.2):
         if pause:time.sleep(pause)
     return {'requested_symbols':len(symbols),'symbols_with_data':done,'bars_saved':total_bars,'errors':errors[:100]}
 
-def evaluate_symbol(sym,df,tolerance=1.0,max_gap=20):
+def evaluate_symbol(sym,df,tolerance=1.0,max_gap=20,max_factor=7):
     df=df.sort_values('date').reset_index(drop=True)
     if len(df)<61:return []
-    scored,_=_single(df,True)
-    clusters=_hourly_clusters(scored,tolerance,max_gap)
-    events=[];blocked_until=-1
-    # One open position per symbol: do not stack new entries while position is open.
-    for cluster in clusters:
-        lastidx=cluster[-1][0]
-        gap,touches,higher,status=_rule(df,cluster)
-        if status!='MATCH' or lastidx<=blocked_until:continue
-        candle=df.iloc[lastidx].to_dict();candle['raw_close']=candle['close']
-        direction,_=_repeat_direction_from_candle(candle)
-        if direction!='BUY':continue
-        entry=float(np.mean([x[2] for x in cluster]))
-        if not np.isfinite(entry) or entry<=0:continue
-        post=df.iloc[lastidx+1:]
-        highs=pd.to_numeric(post.high,errors='coerce');valid=highs.notna() & (highs>0)
-        if not valid.all():continue
-        hits=np.flatnonzero((highs>=entry*1.03).to_numpy())
-        exitidx=lastidx+1+int(hits[0]) if len(hits) else None
-        last=float(df.iloc[-1].close)
-        if exitidx is not None:blocked_until=exitidx
-        else:blocked_until=len(df) # keep it open, ignore later repeats for this stock
-        until=df.iloc[lastidx+1:exitidx+1] if exitidx is not None else post
-        minlow=pd.to_numeric(until.low,errors='coerce').min() if len(until) else np.nan
-        events.append({
-            'symbol':sym,'signal_utc':pd.Timestamp(df.iloc[lastidx].date).strftime('%Y-%m-%d %H:%M'),
-            'entry_price':round(entry,5),'signal_direction':'BUY','gap_1h':gap,'touches':touches,
-            'higher_lows_60h':higher,'status':'EXIT' if exitidx is not None else 'OPEN',
-            'exit_utc':pd.Timestamp(df.iloc[exitidx].date).strftime('%Y-%m-%d %H:%M') if exitidx is not None else '',
-            'bars_to_exit':exitidx-lastidx if exitidx is not None else '',
-            'bars_observed':len(df)-lastidx-1,'last_price':round(last,5),
-            'realized_return_pct':3.0 if exitidx is not None else 0.0,
-            'floating_return_pct':round((last/entry-1)*100,4) if exitidx is None else 0.0,
-            'combined_return_pct':3.0 if exitidx is not None else round((last/entry-1)*100,4),
-            'max_adverse_pct':round((float(minlow)/entry-1)*100,4) if np.isfinite(minlow) else None,
-            'data_end_utc':pd.Timestamp(df.iloc[-1].date).strftime('%Y-%m-%d %H:%M')})
+    events=[]
+    for factor in range(2, max_factor + 1):
+        scored,_=_single(df,True,system_number=factor)
+        clusters=_hourly_clusters(scored,tolerance,max_gap)
+        blocked_until=-1
+        # One open position per symbol: do not stack new entries while position is open.
+        for cluster in clusters:
+            lastidx=cluster[-1][0]
+            gap,touches,higher,status=_rule(df,cluster)
+            if status!='MATCH' or lastidx<=blocked_until:continue
+            candle=df.iloc[lastidx].to_dict();candle['raw_close']=candle['close']
+            direction,_=_repeat_direction_from_candle(candle)
+            if direction!='BUY':continue
+            entry=float(np.mean([x[2] for x in cluster]))
+            if not np.isfinite(entry) or entry<=0:continue
+            post=df.iloc[lastidx+1:]
+            highs=pd.to_numeric(post.high,errors='coerce');valid=highs.notna() & (highs>0)
+            if not valid.all():continue
+            hits=np.flatnonzero((highs>=entry*1.03).to_numpy())
+            exitidx=lastidx+1+int(hits[0]) if len(hits) else None
+            last=float(df.iloc[-1].close)
+            if exitidx is not None:blocked_until=exitidx
+            else:blocked_until=len(df) # keep it open, ignore later repeats for this stock
+            until=df.iloc[lastidx+1:exitidx+1] if exitidx is not None else post
+            minlow=pd.to_numeric(until.low,errors='coerce').min() if len(until) else np.nan
+            events.append({
+                'symbol':sym,'squaring_factor':factor,'signal_utc':pd.Timestamp(df.iloc[lastidx].date).strftime('%Y-%m-%d %H:%M'),
+                'entry_price':round(entry,5),'signal_direction':'BUY','gap_1h':gap,'touches':touches,
+                'higher_lows_60h':higher,'status':'EXIT' if exitidx is not None else 'OPEN',
+                'exit_utc':pd.Timestamp(df.iloc[exitidx].date).strftime('%Y-%m-%d %H:%M') if exitidx is not None else '',
+                'bars_to_exit':exitidx-lastidx if exitidx is not None else '',
+                'bars_observed':len(df)-lastidx-1,'last_price':round(last,5),
+                'realized_return_pct':3.0 if exitidx is not None else 0.0,
+                'floating_return_pct':round((last/entry-1)*100,4) if exitidx is None else 0.0,
+                'combined_return_pct':3.0 if exitidx is not None else round((last/entry-1)*100,4),
+                'max_adverse_pct':round((float(minlow)/entry-1)*100,4) if np.isfinite(minlow) else None,
+                'data_end_utc':pd.Timestamp(df.iloc[-1].date).strftime('%Y-%m-%d %H:%M'),
+                'repeat_peak_high':float(pd.to_numeric(post.high,errors='coerce').max()) if not post.empty else None,
+                'repeat_peak_bars':int(np.nanargmax(pd.to_numeric(post.high,errors='coerce').to_numpy()))+1 if len(post) and pd.to_numeric(post.high,errors='coerce').notna().any() else None})
     return events
 
-def analyze(output_dir,tolerance=1.0,max_gap=20):
+def analyze(output_dir,tolerance=1.0,max_gap=20,max_factor=7):
     ensure_tables();out=Path(output_dir);out.mkdir(parents=True,exist_ok=True)
     records=[];symbols_scanned=0;last_sym=None;bars=[]
     def drain(sym,rows):
@@ -157,7 +161,7 @@ def analyze(output_dir,tolerance=1.0,max_gap=20):
         frame=pd.DataFrame(rows,columns=['date','open','high','low','close','volume'])
         for c in ('open','high','low','close','volume'):frame[c]=pd.to_numeric(frame[c],errors='coerce')
         frame['date']=pd.to_datetime(frame['date'],utc=True).dt.tz_localize(None)
-        try:records.extend(evaluate_symbol(sym,frame,tolerance,max_gap))
+        try:records.extend(evaluate_symbol(sym,frame,tolerance,max_gap,max_factor))
         except Exception as e:print(f'analysis error {sym}: {e}',flush=True)
         symbols_scanned+=1
         if symbols_scanned%250==0:print(f'Analyzed {symbols_scanned} symbols; trades={len(records)}',flush=True)
@@ -167,7 +171,7 @@ def analyze(output_dir,tolerance=1.0,max_gap=20):
             if last_sym is not None and sym!=last_sym:drain(last_sym,bars);bars=[]
             last_sym=sym;bars.append(r[1:])
         if last_sym is not None:drain(last_sym,bars)
-    cols=['symbol','signal_utc','entry_price','signal_direction','gap_1h','touches','higher_lows_60h','status',
+    cols=['symbol','squaring_factor','repeat_peak_high','repeat_peak_bars','signal_utc','entry_price','signal_direction','gap_1h','touches','higher_lows_60h','status',
           'exit_utc','bars_to_exit','bars_observed','last_price','realized_return_pct','floating_return_pct',
           'combined_return_pct','max_adverse_pct','data_end_utc']
     df=pd.DataFrame(records,columns=cols)
@@ -178,7 +182,8 @@ def analyze(output_dir,tolerance=1.0,max_gap=20):
     closed.to_csv(out/'us_buy_only_closed.csv',index=False,encoding='utf-8-sig')
     summary={
       'universe':'US-listed Nasdaq/NYSE/NYSE American equities excluding ETFs and tests; or user symbols file',
-      'strategy':'Double-7 hourly MATCH and BUY only, entry at Repeat Price, exit at first later High >= 1.03*entry; no stops; one position per stock at a time',
+      'factor_range':f'2..{max_factor}',
+      'strategy':'Squaring factors 2..N hourly MATCH and BUY only, entry at Repeat Price, exit at first later High >= 1.03*entry; no stops; one position per stock at a time',
       'symbols_analyzed_with_bars':symbols_scanned,'total_signals':len(df),'closed_count':len(closed),
       'open_count':len(opened),'closed_rate_pct':round(100*len(closed)/len(df),2) if len(df) else None,
       'closed_total_realized_pct_sum':round(float(closed.realized_return_pct.sum()),3) if len(df) else 0,
@@ -198,15 +203,17 @@ def main():
     p.add_argument('--limit',type=int,default=0,help='Optional small smoke-test limit; 0 means all')
     p.add_argument('--output-dir',default='/tmp/us-buy-study')
     p.add_argument('--skip-refresh',action='store_true')
+    p.add_argument('--max-factor',type=int,default=7,help='Inclusive maximum squaring factor, 2..N')
     p.add_argument('--publish-db',action='store_true',help='Save report to database for web dashboard')
     p.add_argument('--tolerance',type=float,default=1.0);p.add_argument('--max-gap',type=int,default=20)
     args=p.parse_args()
+    if not 2 <= args.max_factor <= 50: p.error('--max-factor must be 2..50 (higher factors are computationally expensive)')
     if not args.skip_refresh:
         syms=universe(args.symbols_file)
         if args.limit>0:syms=syms[:args.limit]
         print(f'Universe total={len(syms)}',flush=True)
         print('Download:',refresh(syms,args.period,args.batch_size),flush=True)
-    print('Study:',json.dumps(analyze(args.output_dir,args.tolerance,args.max_gap),ensure_ascii=False,indent=2),flush=True)
+    print('Study:',json.dumps(analyze(args.output_dir,args.tolerance,args.max_gap,args.max_factor),ensure_ascii=False,indent=2),flush=True)
     print('CSV/JSON files saved under',args.output_dir,flush=True)
     if args.publish_db:
         from monitor.us_all_hourly_dashboard import publish_trades
