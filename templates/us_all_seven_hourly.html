@@ -1,0 +1,30 @@
+{% extends 'base.html' %}{% block content %}
+<h1>السوق الأمريكي كله — Repeat Hourly BUY +3%</h1>
+<p><a href="{{url_for('sp500_hourly_screener')}}">↗ S&P 500 ساعة</a> · <a href="{{url_for('sp500_seven_screener')}}">↗ S&P 500 يومي</a></p>
+<div class="panel"><strong>القواعد:</strong> إشارات MATCH وBUY فقط · الدخول Repeat Price · أول High لاحق يصل +3% = EXIT · لا يوجد وقف خسارة · ما لم يصل للهدف يبقى OPEN · لا تكرار مراكز مفتوحة على نفس السهم.</div>
+<form method="get" class="panel filters">
+<label>فترة الإشارات: <select name="days">{% for d in [7,14,30,45,60,'all'] %}<option value="{{d}}" {% if (result.days|string if result and result.days is not none else 'all')==d|string %}selected{% endif %}>{{'كل المتاح' if d=='all' else (d|string ~ ' يوم')}}</option>{% endfor %}</select></label>
+<label>الحالة: <select name="status">{% for v,label in [('ALL','الكل'),('EXIT','مغلقة'),('OPEN','مفتوحة')] %}<option value="{{v}}" {% if result and result.status==v %}selected{% endif %}>{{label}}</option>{% endfor %}</select></label>
+<label>رمز السهم: <input name="q" value="{{result.query if result else ''}}" placeholder="AAPL"></label>
+<button type="submit">عرض النتائج</button></form>
+{% if error %}<div class="panel warning">{{error}}</div>{% elif result %}
+<p class="muted">آخر بيانات محفوظة: {{result.latest or '—'}} UTC · أقدم إشارة: {{result.earliest or '—'}} UTC. تغيير الفترة يفلتر إشارات نفس قاعدة البيانات ولا يعيد تنزيل الأسعار؛ مدة كل إشارة تُحسب حتى آخر بيانات محفوظة.</p>
+<div class="cards">
+<div class="panel"><div class="muted">إشارات BUY</div><div class="metric">{{result.total}}</div></div>
+<div class="panel"><div class="muted">EXIT +3%</div><div class="metric">{{result.closed}}</div></div>
+<div class="panel"><div class="muted">OPEN</div><div class="metric">{{result.opened}}</div></div>
+<div class="panel"><div class="muted">نسبة تحقيق الهدف</div><div class="metric">{{'%.1f%%'|format(result.win_rate) if result.win_rate is not none else '—'}}</div></div>
+<div class="panel"><div class="muted">متوسط عائد الإشارة (المغلق والمفتوح)</div><div class="metric">{{'%+.2f%%'|format(result.mean_return) if result.mean_return is not none else '—'}}</div></div>
+<div class="panel"><div class="muted">متوسط الشموع للوصول</div><div class="metric">{{'%.1f'|format(result.avg_bars) if result.avg_bars is not none else '—'}}</div></div>
+</div>
+<div class="panel"><strong>مجموع الأرباح المقفولة:</strong> {{'%+.2f'|format(result.realized)}} نقطة مئوية · <strong>مجموع العوائد العائمة:</strong> {{'%+.2f'|format(result.floating)}} نقطة مئوية · <strong>وسيط شموع الإغلاق:</strong> {{'%.1f'|format(result.median_bars) if result.median_bars is not none else '—'}}. المجاميع ليست نسبة عائد محفظة ممولة فعلية.</div>
+<div class="panel tablewrap"><h2>الصفقات ({{result.total}}) — صفحة {{result.page}} / {{result.pages or 1}}</h2>
+<table class="sortable-egx"><thead><tr><th>السهم</th><th>Repeat UTC</th><th>الدخول</th><th>Gap 1H</th><th>Touches</th><th>الحالة</th><th>الخروج UTC</th><th>شموع حتى الخروج</th><th>شموع مرصودة</th><th>السعر الأخير</th><th>الربح المقفول</th><th>العائد العائم</th><th>العائد المحسوب</th><th>أقصى هبوط خلال الصفقة</th></tr></thead><tbody>
+{% for r in result.rows %}<tr>
+<td><strong>{{r.symbol}}</strong></td><td>{{r.signal_utc}}</td><td>{{'%.4f'|format(r.entry_price) if r.entry_price is not none else '—'}}</td><td>{{r.gap_1h}}</td><td>{{r.touches}}</td><td style="color:{{'#12814d' if r.status=='EXIT' else '#be7c13'}}"><strong>{{'✅ EXIT' if r.status=='EXIT' else '⏳ OPEN'}}</strong></td><td>{{r.exit_utc or '—'}}</td><td>{{r.bars_to_exit if r.bars_to_exit is not none else '—'}}</td><td>{{r.bars_observed}}</td><td>{{r.last_price}}</td><td>{{'%+.2f%%'|format(r.realized_return_pct or 0)}}</td><td>{{'%+.2f%%'|format(r.floating_return_pct or 0)}}</td><td style="color:{{'#12814d' if (r.combined_return_pct or 0)>=0 else '#c0392b'}}"><strong>{{'%+.2f%%'|format(r.combined_return_pct or 0)}}</strong></td><td>{{'%+.2f%%'|format(r.max_adverse_pct) if r.max_adverse_pct is not none else '—'}}</td>
+</tr>{% else %}<tr><td colspan="14">لا توجد نتائج للفلاتر المختارة. شغّلي أمر نشر نتائج الاختبار أولًا.</td></tr>{% endfor %}
+</tbody></table></div>
+{% if result.pages>1 %}<div class="panel">{% if result.page>1 %}<a href="{{url_for('us_all_seven_hourly',days=result.days or 'all',status=result.status,q=result.query,page=result.page-1)}}">← السابق</a>{% endif %} &nbsp; صفحة {{result.page}} من {{result.pages}} &nbsp; {% if result.page<result.pages %}<a href="{{url_for('us_all_seven_hourly',days=result.days or 'all',status=result.status,q=result.query,page=result.page+1)}}">التالي →</a>{% endif %}</div>{% endif %}
+{% endif %}
+<div class="panel muted">فترة 7–60 يوم تخص تاريخ ظهور الإشارة، وليست إطار شموع مختلفًا. جميع الشموع المستخدمة 1H. بيانات Yahoo الساعة ذات تاريخ محدود، ومعدلات OPEN غير نهائية. الأداء افتراضي ولا يشمل عمولات أو انزلاق أسعار.</div>
+{% endblock %}

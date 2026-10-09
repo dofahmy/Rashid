@@ -1,5 +1,6 @@
 {% extends 'base.html' %}{% block content %}
 <h1>S&P 500 · Repeat Price + Time — Hourly (1H)</h1>
+<p><a href="{{url_for('us_all_seven_hourly')}}">↗ السوق الأمريكي كله — BUY +3% (بدون وقف خسارة)</a></p>
 <div class="panel"><a href="{{url_for('sp500_seven_screener')}}">↗ Daily S&P 500</a> &nbsp; | &nbsp; <strong>Hourly S&P 500</strong>
 <p class="muted">كل الشروط بشموع الساعة. الـGap وعدد الجلسات هنا = عدد الشموع (الساعات السوقية)، وليست أيامًا. الأسعار والتوقيت UTC. BUY: أول High يصعد +3% أو +5%. SELL: أول Low ينخفض -3% أو -5%. بدون وقف خسارة؛ الإشارة تظل OPEN حتى يتحقق الهدف. يبدأ الفحص من الشمعة التالية.</p>
 <form method="get" class="filters">
