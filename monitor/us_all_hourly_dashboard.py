@@ -72,12 +72,64 @@ def dashboard(days=60,status='ALL',query='',page=1,page_size=50,gap_min=None,gap
             AVG(bars_to_exit) FILTER (WHERE status='EXIT') avg_bars,
             PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY bars_to_exit) FILTER (WHERE status='EXIT') median_bars
             FROM {TABLE} WHERE {wh}'''),params).mappings().one()
-        result=s.execute(text(f'''SELECT symbol,squaring_factor,repeat_peak_high,repeat_peak_bars,signal_utc,entry_price,gap_1h,touches,status,exit_utc,
-                    bars_to_exit,bars_observed,last_price,realized_return_pct,floating_return_pct,
-                    combined_return_pct,max_adverse_pct,data_end_utc
-                    FROM {TABLE} WHERE {wh} ORDER BY signal_utc DESC,symbol LIMIT :limit OFFSET :offset'''),params).mappings().all()
+        # Apply pagination first, then fetch only the relevant hourly closes for each displayed signal.
+        # A confirmed end-of-day close is the final 1H candle of that US regular trading session.
+        # Session times are in New York, which handles daylight saving time automatically.
+        result=s.execute(text(f'''WITH visible AS (
+                    SELECT symbol,squaring_factor,repeat_peak_high,repeat_peak_bars,signal_utc,entry_price,gap_1h,touches,status,exit_utc,
+                           bars_to_exit,bars_observed,last_price,realized_return_pct,floating_return_pct,
+                           combined_return_pct,max_adverse_pct,data_end_utc
+                    FROM {TABLE} WHERE {wh}
+                    ORDER BY signal_utc DESC,symbol LIMIT :limit OFFSET :offset
+                )
+                SELECT v.*,
+                       current_bar.close AS latest_market_close,
+                       current_bar.bar_time AS latest_market_time,
+                       CASE WHEN session_close.bar_time IS NOT NULL AND
+                                (EXTRACT(HOUR FROM (session_close.bar_time AT TIME ZONE 'UTC' AT TIME ZONE 'America/New_York')) > 15
+                                 OR (EXTRACT(HOUR FROM (session_close.bar_time AT TIME ZONE 'UTC' AT TIME ZONE 'America/New_York')) = 15
+                                     AND EXTRACT(MINUTE FROM (session_close.bar_time AT TIME ZONE 'UTC' AT TIME ZONE 'America/New_York')) >= 30)
+                                 OR EXISTS (
+                                     SELECT 1 FROM us_all_seven_hourly_bars newer
+                                     WHERE newer.symbol = v.symbol
+                                       AND newer.bar_time >= date_trunc('day',v.signal_utc) + INTERVAL '1 day'
+                                     LIMIT 1
+                                 ))
+                            THEN session_close.close ELSE NULL END AS end_of_day_close,
+                       CASE WHEN session_close.bar_time IS NOT NULL AND
+                                (EXTRACT(HOUR FROM (session_close.bar_time AT TIME ZONE 'UTC' AT TIME ZONE 'America/New_York')) > 15
+                                 OR (EXTRACT(HOUR FROM (session_close.bar_time AT TIME ZONE 'UTC' AT TIME ZONE 'America/New_York')) = 15
+                                     AND EXTRACT(MINUTE FROM (session_close.bar_time AT TIME ZONE 'UTC' AT TIME ZONE 'America/New_York')) >= 30)
+                                 OR EXISTS (
+                                     SELECT 1 FROM us_all_seven_hourly_bars newer
+                                     WHERE newer.symbol = v.symbol
+                                       AND newer.bar_time >= date_trunc('day',v.signal_utc) + INTERVAL '1 day'
+                                     LIMIT 1
+                                 ))
+                            THEN session_close.bar_time ELSE NULL END AS end_of_day_bar_utc
+                FROM visible v
+                LEFT JOIN LATERAL (
+                    SELECT b.close,b.bar_time FROM us_all_seven_hourly_bars b
+                    WHERE b.symbol=v.symbol ORDER BY b.bar_time DESC LIMIT 1
+                ) current_bar ON TRUE
+                LEFT JOIN LATERAL (
+                    SELECT b.close,b.bar_time FROM us_all_seven_hourly_bars b
+                    WHERE b.symbol=v.symbol
+                      AND b.bar_time>=date_trunc('day',v.signal_utc)
+                      AND b.bar_time<date_trunc('day',v.signal_utc)+INTERVAL '1 day'
+                      AND b.bar_time>=v.signal_utc
+                    ORDER BY b.bar_time DESC LIMIT 1
+                ) session_close ON TRUE
+                ORDER BY v.signal_utc DESC,v.symbol'''),params).mappings().all()
+    rows=[dict(x) for x in result]
+    for row in rows:
+        entry=row.get('entry_price')
+        last=row.get('latest_market_close')
+        eod=row.get('end_of_day_close')
+        row['current_hypothetical_pct']=(100*(float(last)/float(entry)-1)) if entry and last is not None and entry>0 else None
+        row['same_day_exit_pct']=(100*(float(eod)/float(entry)-1)) if entry and eod is not None and entry>0 else None
     total=int(stats['total']);closed=int(stats['closed'])
-    return dict(rows=[dict(x) for x in result],total=total,closed=closed,opened=int(stats['opened']),
+    return dict(rows=rows,total=total,closed=closed,opened=int(stats['opened']),
                 win_rate=(100*closed/total if total else None),mean_return=stats['mean_return'],
                 realized=stats['realized'],floating=stats['floating'],avg_bars=stats['avg_bars'],
                 median_bars=stats['median_bars'],latest=latest,earliest=earliest,
