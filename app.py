@@ -737,10 +737,11 @@ def create_app(db=None,test_config=None):
             raw_max=request.args.get('gap_max','').strip()
             gap_min=int(raw_min) if raw_min else None
             gap_max=int(raw_max) if raw_max else None
-            factor_cap=int(request.args.get('max_factor','7'))
+            factor_cap=int(request.args.get('max_factor',request.args.get('factor_to','7')))
+            factor_from=int(request.args.get('factor_from','2'))
             signal_time=request.args.get('signal_time','').strip()
             hold_days=int(request.args.get('hold_days','0'))
-            result=dashboard(max_factor=factor_cap,days=days,status=request.args.get('status','ALL'),
+            result=dashboard(max_factor=factor_cap,min_factor=factor_from,days=days,status=request.args.get('status','ALL'),
                 query=request.args.get('q',''),page=page,gap_min=gap_min,gap_max=gap_max,signal_time=signal_time,hold_days=hold_days)
             error=None
         except Exception as exc:
