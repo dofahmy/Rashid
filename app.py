@@ -1,4 +1,4 @@
-import os, secrets, csv, io, math, time
+import os, secrets, csv, io, math, time, re
 from functools import wraps
 from datetime import timedelta, datetime, timezone
 from urllib.parse import quote
@@ -27,6 +27,48 @@ def create_app(db=None,test_config=None):
         r.headers['X-Content-Type-Options']='nosniff'; r.headers['X-Frame-Options']='DENY'; r.headers['Referrer-Policy']='no-referrer'
         r.headers['Content-Security-Policy']="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; form-action 'self'; frame-ancestors 'none'; base-uri 'self'"
         if request.path!='/health': r.headers['Cache-Control']='no-store'
+        # Attach a consistent right sidebar to existing HTML pages without replacing base.html.
+        # Only known registered GET routes become links; no broken Saudi URLs are invented.
+        if r.status_code==200 and r.mimetype=='text/html' and session.get('admin'):
+            try:
+                from markupsafe import escape
+                from flask import current_app
+                route_labels={
+                    'dashboard':('الإدارة','الرئيسية والعملاء'),
+                    'egx_seven':('مصر','نظام 7 — مصر'),
+                    'egx_seven_screener':('مصر','Repeat — مصر'),
+                    'sp500_seven':('أمريكا','نظام 7 — S&P 500'),
+                    'sp500_seven_screener':('أمريكا','Repeat — S&P 500'),
+                    'sp500_hourly_screener':('أمريكا','S&P 500 — ساعة'),
+                    'us_all_seven_hourly':('أمريكا','كل السوق — ساعة BUY 3%'),
+                }
+                groups={}
+                for rule in current_app.url_map.iter_rules():
+                    if 'GET' not in rule.methods or rule.arguments or rule.rule.startswith('/static'):
+                        continue
+                    endpoint=rule.endpoint
+                    if endpoint in route_labels:
+                        group,label=route_labels[endpoint]
+                    elif any(t in (endpoint+' '+rule.rule).lower() for t in ('saudi','tadawul','ksa','السعود')):
+                        group,label='السعودية',endpoint.replace('_',' ').title()
+                    else:
+                        continue
+                    groups.setdefault(group,[]).append((url_for(endpoint),label,rule.rule==request.path))
+                parts=['<nav id="market-right-nav" aria-label="التنقل بين صفحات الأسواق"><div class="market-nav-head">صفحات الأسواق</div>']
+                for group,links in groups.items():
+                    parts.append('<div class="market-nav-section">'+str(escape(group))+'</div>')
+                    for href,label,active in links:
+                        parts.append('<a class="'+('active' if active else '')+'" href="'+str(escape(href))+'">'+str(escape(label))+'</a>')
+                parts.append('</nav>')
+                parts.append('''<style id="market-right-nav-style">#market-right-nav{position:fixed;right:0;top:0;bottom:0;width:215px;box-sizing:border-box;overflow-y:auto;z-index:10000;background:#10283d;color:#fff;direction:rtl;box-shadow:-3px 0 12px #0002;font-family:inherit;padding:18px 10px}#market-right-nav a{display:block;color:#e8f4f9;text-decoration:none;padding:10px 9px;border-radius:7px;margin:2px 0;font-size:13px}#market-right-nav a:hover,#market-right-nav a.active{background:#16838c;color:#fff}#market-right-nav .market-nav-head{font-weight:800;font-size:18px;margin:7px 8px 22px}#market-right-nav .market-nav-section{font-size:12px;font-weight:bold;color:#82dce0;margin:16px 8px 4px;border-bottom:1px solid #365066;padding-bottom:7px}body{padding-right:225px!important;box-sizing:border-box} @media(max-width:700px){#market-right-nav{width:145px;padding:12px 5px}#market-right-nav a{font-size:11px;padding:8px 4px}body{padding-right:151px!important}}</style>''')
+                output=r.get_data(as_text=True)
+                if '</body>' in output.lower():
+                    output=re.sub(r'</body\s*>',''.join(parts)+'</body>',output,count=1,flags=re.I)
+                else:
+                    output+=''.join(parts)
+                r.set_data(output)
+            except Exception:
+                app.logger.exception('Market navigation inject failed')
         return r
     def auth(fn):
         @wraps(fn)
@@ -691,8 +733,12 @@ def create_app(db=None,test_config=None):
             days=None if raw=='all' else int(raw)
             if days is not None and days not in (7,14,30,45,60):days=60
             page=max(1,int(request.args.get('page','1')))
+            raw_min=request.args.get('gap_min','').strip()
+            raw_max=request.args.get('gap_max','').strip()
+            gap_min=int(raw_min) if raw_min else None
+            gap_max=int(raw_max) if raw_max else None
             result=dashboard(days=days,status=request.args.get('status','ALL'),
-                query=request.args.get('q',''),page=page)
+                query=request.args.get('q',''),page=page,gap_min=gap_min,gap_max=gap_max)
             error=None
         except Exception as exc:
             app.logger.exception('US all hourly dashboard failed')
