@@ -45,9 +45,9 @@
 
 <div class="panel tablewrap">
 <h2>آخر الأسهم عند Repeat Price + Time</h2>
-<table class="sortable-egx"><thead><tr><th>السهم</th><th>Repeat Price</th><th>MATCH</th><th>أعلى سعر بعد Repeat</th><th>المدة حتى أعلى سعر</th><th>Gap</th><th>Touches</th></tr></thead><tbody>
-{% for r in result.rows %}<tr><td><strong>{{r.symbol}}</strong></td><td>{{r.repeat_price}}</td><td>{{'✅ MATCH' if r.breakout_rule_status=='MATCH' else ('— NO_DATA' if r.breakout_rule_status=='NO_DATA' else '❌')}}</td><td>{{'%.4f'|format(r.repeat_peak_high) if r.repeat_peak_high is not none else '—'}}</td><td>{{r.repeat_peak_bars if r.repeat_peak_bars is not none else '—'}} جلسة</td><td>{{r.actual_repeat_gap_sessions}}</td><td>{{r.touches}}</td></tr>
-{% else %}<tr><td colspan="7">لا توجد نتائج للفلاتر المختارة.</td></tr>{% endfor %}
+<table class="sortable-egx"><thead><tr><th>السهم</th><th>تاريخ الإشارة</th><th>Repeat Price</th><th>MATCH</th><th>أعلى سعر بعد Repeat</th><th>الصعود من Repeat لأعلى سعر %</th><th>المدة حتى أعلى سعر</th><th>Gap</th><th>Touches</th></tr></thead><tbody>
+{% for r in result.rows %}<tr><td><strong>{{r.symbol}}</strong></td><td>{{r.latest_repeat_date if r.latest_repeat_date is not none else '—'}}</td><td>{{r.repeat_price}}</td><td>{{'✅ MATCH' if r.breakout_rule_status=='MATCH' else ('— NO_DATA' if r.breakout_rule_status=='NO_DATA' else '❌')}}</td><td>{{'%.4f'|format(r.repeat_peak_high) if r.repeat_peak_high is not none else '—'}}</td><td>{{'%+.2f%%'|format((r.repeat_peak_high / r.repeat_price - 1) * 100) if r.repeat_peak_high is not none and r.repeat_price is not none and r.repeat_price|float > 0 else '—'}}</td><td>{{r.repeat_peak_bars if r.repeat_peak_bars is not none else '—'}} جلسة</td><td>{{r.actual_repeat_gap_sessions}}</td><td>{{r.touches}}</td></tr>
+{% else %}<tr><td colspan="9">لا توجد نتائج للفلاتر المختارة.</td></tr>{% endfor %}
 </tbody></table>
 </div>
 {% endif %}
