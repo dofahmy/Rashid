@@ -546,12 +546,6 @@ def create_app(db=None,test_config=None):
         except Exception:
             max_gap_sessions=20
 
-        try:
-            system_number=int(request.args.get('system_number','7'))
-        except (ValueError,TypeError):
-            system_number=7
-        system_number=max(2,min(system_number,1000))
-
         recent_raw=request.args.get('recent_days','90').strip()
         if recent_raw.lower() in ('','all','none'):
             recent_days=None
@@ -573,7 +567,6 @@ def create_app(db=None,test_config=None):
                 price_tolerance_pct=price_tolerance_pct,
                 max_gap_sessions=max_gap_sessions,
                 recent_days=recent_days,
-                system_number=system_number,
             )
         except Exception as exc:
             app.logger.exception('EGX Seven repeat screener failed')
@@ -589,7 +582,6 @@ def create_app(db=None,test_config=None):
         return render_template(
             'seven_screener.html',
             result=result,
-            system_number=system_number,
             rule_only=rule_only, rule_match_count=rule_match_count,
             error=error,
             price_tolerance_pct=price_tolerance_pct,
@@ -745,7 +737,8 @@ def create_app(db=None,test_config=None):
             raw_max=request.args.get('gap_max','').strip()
             gap_min=int(raw_min) if raw_min else None
             gap_max=int(raw_max) if raw_max else None
-            result=dashboard(days=days,status=request.args.get('status','ALL'),
+            factor_cap=int(request.args.get('max_factor','7'))
+            result=dashboard(max_factor=factor_cap,days=days,status=request.args.get('status','ALL'),
                 query=request.args.get('q',''),page=page,gap_min=gap_min,gap_max=gap_max)
             error=None
         except Exception as exc:
