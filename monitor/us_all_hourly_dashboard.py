@@ -38,12 +38,13 @@ def publish_trades(csv_path):
         for i in range(0,len(rows),500): s.execute(q,rows[i:i+500])
     return len(rows)
 
-def dashboard(days=60,status='ALL',query='',page=1,page_size=50,gap_min=None,gap_max=None,max_factor=7,signal_time='',hold_days=0):
+def dashboard(days=60,status='ALL',query='',page=1,page_size=50,gap_min=None,gap_max=None,max_factor=7,min_factor=2,signal_time='',hold_days=0):
     ensure_dashboard_table()
     max_factor=int(max_factor)
+    min_factor=int(min_factor)
     hold_days=int(hold_days)
     if not 0 <= hold_days <= 60: raise ValueError('عدد جلسات الإغلاق لازم يكون من 0 إلى 60')
-    if not 2<=max_factor<=50: raise ValueError('Squaring factor must be between 2 and 50')
+    if not 2<=min_factor<=max_factor<=50: raise ValueError('رقم النظام من وإلى لازم يكون بين 2 و50، ومن لا يزيد عن إلى')
     signal_time=(signal_time or '').strip()
     if signal_time and not __import__('re').fullmatch(r'(?:[01]\d|2[0-3]):[0-5]\d',signal_time):
         raise ValueError('وقت الإشارة يجب أن يكون HH:MM بصيغة UTC')
@@ -60,11 +61,11 @@ def dashboard(days=60,status='ALL',query='',page=1,page_size=50,gap_min=None,gap
         if latest is None:
             return {'rows':[],'total':0,'closed':0,'opened':0,'win_rate':None,'mean_return':None,
                     'realized':0,'floating':0,'avg_bars':None,'median_bars':None,
-                    'latest':None,'earliest':None,'days':days,'page':page,'pages':0,'status':status,'query':query,'gap_min':gap_min,'gap_max':gap_max,'max_factor':max_factor,'stored_max':stored_max,'signal_time':signal_time,'hold_days':hold_days,'hold_avg_pct':None,'hold_count':0}
+                    'latest':None,'earliest':None,'days':days,'page':page,'pages':0,'status':status,'query':query,'gap_min':gap_min,'gap_max':gap_max,'max_factor':max_factor,'min_factor':min_factor,'stored_max':stored_max,'signal_time':signal_time,'hold_days':hold_days,'hold_avg_pct':None,'hold_count':0}
         params={'cutoff':latest-timedelta(days=days) if days else datetime(1970,1,1),
                 'status':status,'pattern':'%'+query.strip().upper()[:20]+'%',
-                'limit':page_size,'offset':(page-1)*page_size, 'gap_min':gap_min,'gap_max':gap_max,'max_factor':max_factor,'stored_max':stored_max,'signal_time':signal_time,'hold_days':hold_days,'hold_avg_pct':None,'hold_count':0}
-        wh="squaring_factor BETWEEN 2 AND :max_factor AND signal_utc >= :cutoff AND (:status = 'ALL' OR status = :status) AND UPPER(symbol) LIKE :pattern AND (CAST(:gap_min AS INTEGER) IS NULL OR gap_1h >= CAST(:gap_min AS INTEGER)) AND (CAST(:gap_max AS INTEGER) IS NULL OR gap_1h <= CAST(:gap_max AS INTEGER)) AND (CAST(:signal_time AS TEXT) = '' OR TO_CHAR(signal_utc, 'HH24:MI') = CAST(:signal_time AS TEXT))"
+                'limit':page_size,'offset':(page-1)*page_size, 'gap_min':gap_min,'gap_max':gap_max,'max_factor':max_factor,'min_factor':min_factor,'stored_max':stored_max,'signal_time':signal_time,'hold_days':hold_days,'hold_avg_pct':None,'hold_count':0}
+        wh="squaring_factor BETWEEN :min_factor AND :max_factor AND signal_utc >= :cutoff AND (:status = 'ALL' OR status = :status) AND UPPER(symbol) LIKE :pattern AND (CAST(:gap_min AS INTEGER) IS NULL OR gap_1h >= CAST(:gap_min AS INTEGER)) AND (CAST(:gap_max AS INTEGER) IS NULL OR gap_1h <= CAST(:gap_max AS INTEGER)) AND (CAST(:signal_time AS TEXT) = '' OR TO_CHAR(signal_utc, 'HH24:MI') = CAST(:signal_time AS TEXT))"
         stats=s.execute(text(f'''SELECT COUNT(*) total,
             COUNT(*) FILTER (WHERE status='EXIT') closed,
             COUNT(*) FILTER (WHERE status='OPEN') opened,
@@ -155,4 +156,4 @@ def dashboard(days=60,status='ALL',query='',page=1,page_size=50,gap_min=None,gap
                 win_rate=(100*closed/total if total else None),mean_return=stats['mean_return'],
                 realized=stats['realized'],floating=stats['floating'],avg_bars=stats['avg_bars'],
                 median_bars=stats['median_bars'],latest=latest,earliest=earliest,
-                days=days,page=page,pages=(total+page_size-1)//page_size,status=status,query=query,gap_min=gap_min,gap_max=gap_max,max_factor=max_factor,stored_max=stored_max,signal_time=signal_time,hold_days=hold_days,hold_count=int(hold_stats['n'] or 0),hold_avg_pct=hold_stats['average'])
+                days=days,page=page,pages=(total+page_size-1)//page_size,status=status,query=query,gap_min=gap_min,gap_max=gap_max,max_factor=max_factor,min_factor=min_factor,stored_max=stored_max,signal_time=signal_time,hold_days=hold_days,hold_count=int(hold_stats['n'] or 0),hold_avg_pct=hold_stats['average'])
