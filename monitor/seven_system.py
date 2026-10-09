@@ -89,15 +89,17 @@ def _market(frames):
         ))
     return pd.DataFrame(rows),{}
 
-def _single(df,volume=True):
+def _single(df,volume=True,system_number=7):
+    system_number=int(system_number)
+    if not 2 <= system_number <= 1000: raise ValueError("system_number must be between 2 and 1000")
     x=df.copy().sort_values('date').reset_index(drop=True)
     x['raw_close']=x['close'].astype(float)
     x['price_units']=x.close.map(_units)
 
-    pa=next((i for i,v in enumerate(x.price_units) if v is not None and v%7==0),None)
+    pa=next((i for i,v in enumerate(x.price_units) if v is not None and v%system_number==0),None)
     va=None
     if volume:
-        va=next((i for i,v in enumerate(x.volume) if pd.notna(v) and int(round(float(v)))%7==0),None)
+        va=next((i for i,v in enumerate(x.volume) if pd.notna(v) and int(round(float(v)))%system_number==0),None)
 
     x['price_value']=np.nan;x['price_remainder']=np.nan;x['price_signal7']=False
     x['volume_value']=np.nan;x['volume_remainder']=np.nan;x['volume_signal7']=False
@@ -105,14 +107,14 @@ def _single(df,volume=True):
     if pa is not None:
         c=x.loc[pa:,'price_units'].fillna(0).astype('int64').cumsum()
         x.loc[pa:,'price_value']=c.to_numpy()/100
-        x.loc[pa:,'price_remainder']=(c%7).to_numpy()
-        x.loc[pa:,'price_signal7']=(c%7==0).to_numpy()
+        x.loc[pa:,'price_remainder']=(c%system_number).to_numpy()
+        x.loc[pa:,'price_signal7']=(c%system_number==0).to_numpy()
 
     if volume and va is not None:
         c=x.loc[va:,'volume'].fillna(0).round().astype('int64').cumsum()
         x.loc[va:,'volume_value']=c.to_numpy()
-        x.loc[va:,'volume_remainder']=(c%7).to_numpy()
-        x.loc[va:,'volume_signal7']=(c%7==0).to_numpy()
+        x.loc[va:,'volume_remainder']=(c%system_number).to_numpy()
+        x.loc[va:,'volume_signal7']=(c%system_number==0).to_numpy()
 
     meta={
         'price_anchor_date':pd.Timestamp(x.iloc[pa].date).date().isoformat() if pa is not None else None,
@@ -250,7 +252,7 @@ def _chart_payload(price_df,signal_mask,value_col):
     return {'points':points,'markers':markers,'min':mn,'max':mx}
 
 
-def repeat_price_time_screener(price_tolerance_pct=1.0, max_gap_sessions=20, recent_days=None):
+def repeat_price_time_screener(price_tolerance_pct=1.0, max_gap_sessions=20, recent_days=None, system_number=7):
     """
     Screen the whole EGX universe for the LATEST repeated same-stock Double-7
     price/time cluster.
@@ -261,6 +263,8 @@ def repeat_price_time_screener(price_tolerance_pct=1.0, max_gap_sessions=20, rec
       if set, keep only stocks whose latest qualifying cluster ended within
       recent_days calendar days from the latest market date in the database.
     """
+    system_number=int(system_number)
+    if not 2 <= system_number <= 1000: raise ValueError("system_number must be between 2 and 1000")
     frames=_load_stocks()
     rows=[]
 
@@ -274,7 +278,7 @@ def repeat_price_time_screener(price_tolerance_pct=1.0, max_gap_sessions=20, rec
             latest_market_date=mx if latest_market_date is None or mx>latest_market_date else latest_market_date
 
     for sym,df in frames.items():
-        single,_=_single(df,True)
+        single,_=_single(df,True,system_number=system_number)
         levels=_repeat_double7_levels(
             single,
             price_tolerance_pct=price_tolerance_pct,
@@ -336,6 +340,7 @@ def repeat_price_time_screener(price_tolerance_pct=1.0, max_gap_sessions=20, rec
     )
 
     return {
+        'system_number':system_number,
         'rows':rows,
         'count':len(rows),
         'latest_market_date':latest_market_date.date().isoformat() if latest_market_date is not None else None,
