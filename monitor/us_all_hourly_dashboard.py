@@ -38,9 +38,11 @@ def publish_trades(csv_path):
         for i in range(0,len(rows),500): s.execute(q,rows[i:i+500])
     return len(rows)
 
-def dashboard(days=60,status='ALL',query='',page=1,page_size=50,gap_min=None,gap_max=None,max_factor=7,signal_time=''):
+def dashboard(days=60,status='ALL',query='',page=1,page_size=50,gap_min=None,gap_max=None,max_factor=7,signal_time='',hold_days=0):
     ensure_dashboard_table()
     max_factor=int(max_factor)
+    hold_days=int(hold_days)
+    if not 0 <= hold_days <= 60: raise ValueError('عدد جلسات الإغلاق لازم يكون من 0 إلى 60')
     if not 2<=max_factor<=50: raise ValueError('Squaring factor must be between 2 and 50')
     signal_time=(signal_time or '').strip()
     if signal_time and not __import__('re').fullmatch(r'(?:[01]\d|2[0-3]):[0-5]\d',signal_time):
@@ -58,10 +60,10 @@ def dashboard(days=60,status='ALL',query='',page=1,page_size=50,gap_min=None,gap
         if latest is None:
             return {'rows':[],'total':0,'closed':0,'opened':0,'win_rate':None,'mean_return':None,
                     'realized':0,'floating':0,'avg_bars':None,'median_bars':None,
-                    'latest':None,'earliest':None,'days':days,'page':page,'pages':0,'status':status,'query':query,'gap_min':gap_min,'gap_max':gap_max,'max_factor':max_factor,'stored_max':stored_max,'signal_time':signal_time}
+                    'latest':None,'earliest':None,'days':days,'page':page,'pages':0,'status':status,'query':query,'gap_min':gap_min,'gap_max':gap_max,'max_factor':max_factor,'stored_max':stored_max,'signal_time':signal_time,'hold_days':hold_days,'hold_avg_pct':None,'hold_count':0}
         params={'cutoff':latest-timedelta(days=days) if days else datetime(1970,1,1),
                 'status':status,'pattern':'%'+query.strip().upper()[:20]+'%',
-                'limit':page_size,'offset':(page-1)*page_size, 'gap_min':gap_min,'gap_max':gap_max,'max_factor':max_factor,'stored_max':stored_max,'signal_time':signal_time}
+                'limit':page_size,'offset':(page-1)*page_size, 'gap_min':gap_min,'gap_max':gap_max,'max_factor':max_factor,'stored_max':stored_max,'signal_time':signal_time,'hold_days':hold_days,'hold_avg_pct':None,'hold_count':0}
         wh="squaring_factor BETWEEN 2 AND :max_factor AND signal_utc >= :cutoff AND (:status = 'ALL' OR status = :status) AND UPPER(symbol) LIKE :pattern AND (CAST(:gap_min AS INTEGER) IS NULL OR gap_1h >= CAST(:gap_min AS INTEGER)) AND (CAST(:gap_max AS INTEGER) IS NULL OR gap_1h <= CAST(:gap_max AS INTEGER)) AND (CAST(:signal_time AS TEXT) = '' OR TO_CHAR(signal_utc, 'HH24:MI') = CAST(:signal_time AS TEXT))"
         stats=s.execute(text(f'''SELECT COUNT(*) total,
             COUNT(*) FILTER (WHERE status='EXIT') closed,
@@ -72,6 +74,7 @@ def dashboard(days=60,status='ALL',query='',page=1,page_size=50,gap_min=None,gap
             AVG(bars_to_exit) FILTER (WHERE status='EXIT') avg_bars,
             PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY bars_to_exit) FILTER (WHERE status='EXIT') median_bars
             FROM {TABLE} WHERE {wh}'''),params).mappings().one()
+        params['hold_days']=hold_days
         # Apply pagination first, then fetch only the relevant hourly closes for each displayed signal.
         # A confirmed end-of-day close is the final 1H candle of that US regular trading session.
         # Session times are in New York, which handles daylight saving time automatically.
@@ -86,51 +89,70 @@ def dashboard(days=60,status='ALL',query='',page=1,page_size=50,gap_min=None,gap
                        current_bar.close AS latest_market_close,
                        current_bar.bar_time AS latest_market_time,
                        CASE WHEN session_close.bar_time IS NOT NULL AND
-                                (EXTRACT(HOUR FROM (session_close.bar_time AT TIME ZONE 'UTC' AT TIME ZONE 'America/New_York')) > 15
-                                 OR (EXTRACT(HOUR FROM (session_close.bar_time AT TIME ZONE 'UTC' AT TIME ZONE 'America/New_York')) = 15
-                                     AND EXTRACT(MINUTE FROM (session_close.bar_time AT TIME ZONE 'UTC' AT TIME ZONE 'America/New_York')) >= 30)
-                                 OR EXISTS (
-                                     SELECT 1 FROM us_all_seven_hourly_bars newer
-                                     WHERE newer.symbol = v.symbol
-                                       AND newer.bar_time >= date_trunc('day',v.signal_utc) + INTERVAL '1 day'
-                                     LIMIT 1
-                                 ))
-                            THEN session_close.close ELSE NULL END AS end_of_day_close,
-                       CASE WHEN session_close.bar_time IS NOT NULL AND
-                                (EXTRACT(HOUR FROM (session_close.bar_time AT TIME ZONE 'UTC' AT TIME ZONE 'America/New_York')) > 15
-                                 OR (EXTRACT(HOUR FROM (session_close.bar_time AT TIME ZONE 'UTC' AT TIME ZONE 'America/New_York')) = 15
-                                     AND EXTRACT(MINUTE FROM (session_close.bar_time AT TIME ZONE 'UTC' AT TIME ZONE 'America/New_York')) >= 30)
-                                 OR EXISTS (
-                                     SELECT 1 FROM us_all_seven_hourly_bars newer
-                                     WHERE newer.symbol = v.symbol
-                                       AND newer.bar_time >= date_trunc('day',v.signal_utc) + INTERVAL '1 day'
-                                     LIMIT 1
-                                 ))
-                            THEN session_close.bar_time ELSE NULL END AS end_of_day_bar_utc
+                                 ( (EXTRACT(HOUR FROM session_close.bar_time AT TIME ZONE 'UTC' AT TIME ZONE 'America/New_York') > 15)
+                                   OR (EXTRACT(HOUR FROM session_close.bar_time AT TIME ZONE 'UTC' AT TIME ZONE 'America/New_York') = 15
+                                       AND EXTRACT(MINUTE FROM session_close.bar_time AT TIME ZONE 'UTC' AT TIME ZONE 'America/New_York') >= 30)
+                                   OR EXISTS (SELECT 1 FROM us_all_seven_hourly_bars newer
+                                              WHERE newer.symbol=v.symbol AND newer.bar_time>session_close.bar_time
+                                                AND (newer.bar_time AT TIME ZONE 'UTC' AT TIME ZONE 'America/New_York')::date > session_day.market_day))
+                            THEN session_close.close END AS end_of_day_close,
+                       CASE WHEN session_close.bar_time IS NOT NULL THEN session_close.bar_time END AS end_of_day_bar_utc
                 FROM visible v
                 LEFT JOIN LATERAL (
                     SELECT b.close,b.bar_time FROM us_all_seven_hourly_bars b
                     WHERE b.symbol=v.symbol ORDER BY b.bar_time DESC LIMIT 1
                 ) current_bar ON TRUE
                 LEFT JOIN LATERAL (
+                    SELECT DISTINCT (b.bar_time AT TIME ZONE 'UTC' AT TIME ZONE 'America/New_York')::date AS market_day
+                    FROM us_all_seven_hourly_bars b
+                    WHERE b.symbol=v.symbol AND b.bar_time>=v.signal_utc
+                    ORDER BY market_day ASC LIMIT 1 OFFSET :hold_days
+                ) session_day ON TRUE
+                LEFT JOIN LATERAL (
                     SELECT b.close,b.bar_time FROM us_all_seven_hourly_bars b
                     WHERE b.symbol=v.symbol
-                      AND b.bar_time>=date_trunc('day',v.signal_utc)
-                      AND b.bar_time<date_trunc('day',v.signal_utc)+INTERVAL '1 day'
+                      AND (b.bar_time AT TIME ZONE 'UTC' AT TIME ZONE 'America/New_York')::date=session_day.market_day
                       AND b.bar_time>=v.signal_utc
                     ORDER BY b.bar_time DESC LIMIT 1
                 ) session_close ON TRUE
                 ORDER BY v.signal_utc DESC,v.symbol'''),params).mappings().all()
+        hold_stats=s.execute(text(f"""WITH selected AS (
+            SELECT symbol,signal_utc,entry_price FROM {TABLE} WHERE {wh}
+        ), chosen AS (
+            SELECT x.entry_price, e.close AS end_close,
+                   CASE WHEN e.bar_time IS NOT NULL AND
+                         ((EXTRACT(HOUR FROM e.bar_time AT TIME ZONE 'UTC' AT TIME ZONE 'America/New_York') > 15)
+                          OR (EXTRACT(HOUR FROM e.bar_time AT TIME ZONE 'UTC' AT TIME ZONE 'America/New_York') = 15
+                              AND EXTRACT(MINUTE FROM e.bar_time AT TIME ZONE 'UTC' AT TIME ZONE 'America/New_York') >= 30)
+                          OR EXISTS (SELECT 1 FROM us_all_seven_hourly_bars nx WHERE nx.symbol=x.symbol
+                             AND nx.bar_time>e.bar_time AND
+                             (nx.bar_time AT TIME ZONE 'UTC' AT TIME ZONE 'America/New_York')::date>session_day.market_day))
+                   THEN 1 ELSE 0 END AS valid
+            FROM selected x
+            LEFT JOIN LATERAL (
+                SELECT DISTINCT (b.bar_time AT TIME ZONE 'UTC' AT TIME ZONE 'America/New_York')::date market_day
+                FROM us_all_seven_hourly_bars b WHERE b.symbol=x.symbol AND b.bar_time>=x.signal_utc
+                ORDER BY market_day LIMIT 1 OFFSET :hold_days
+            ) session_day ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT b.close,b.bar_time FROM us_all_seven_hourly_bars b
+                WHERE b.symbol=x.symbol AND b.bar_time>=x.signal_utc
+                  AND (b.bar_time AT TIME ZONE 'UTC' AT TIME ZONE 'America/New_York')::date=session_day.market_day
+                ORDER BY b.bar_time DESC LIMIT 1
+            ) e ON TRUE
+        ) SELECT COUNT(*) FILTER(WHERE valid=1 AND entry_price>0) AS n,
+                 AVG((end_close/NULLIF(entry_price,0)-1)*100) FILTER(WHERE valid=1 AND entry_price>0) AS average
+        FROM chosen"""),params).mappings().one()
     rows=[dict(x) for x in result]
     for row in rows:
         entry=row.get('entry_price')
         last=row.get('latest_market_close')
         eod=row.get('end_of_day_close')
         row['current_hypothetical_pct']=(100*(float(last)/float(entry)-1)) if entry and last is not None and entry>0 else None
-        row['same_day_exit_pct']=(100*(float(eod)/float(entry)-1)) if entry and eod is not None and entry>0 else None
+        row['selected_day_exit_pct']=(100*(float(eod)/float(entry)-1)) if entry and eod is not None and entry>0 else None
     total=int(stats['total']);closed=int(stats['closed'])
     return dict(rows=rows,total=total,closed=closed,opened=int(stats['opened']),
                 win_rate=(100*closed/total if total else None),mean_return=stats['mean_return'],
                 realized=stats['realized'],floating=stats['floating'],avg_bars=stats['avg_bars'],
                 median_bars=stats['median_bars'],latest=latest,earliest=earliest,
-                days=days,page=page,pages=(total+page_size-1)//page_size,status=status,query=query,gap_min=gap_min,gap_max=gap_max,max_factor=max_factor,stored_max=stored_max,signal_time=signal_time)
+                days=days,page=page,pages=(total+page_size-1)//page_size,status=status,query=query,gap_min=gap_min,gap_max=gap_max,max_factor=max_factor,stored_max=stored_max,signal_time=signal_time,hold_days=hold_days,hold_count=int(hold_stats['n'] or 0),hold_avg_pct=hold_stats['average'])
