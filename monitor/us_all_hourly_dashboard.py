@@ -55,7 +55,7 @@ def dashboard(days=60,status='ALL',query='',page=1,page_size=50,gap_min=None,gap
         params={'cutoff':latest-timedelta(days=days) if days else datetime(1970,1,1),
                 'status':status,'pattern':'%'+query.strip().upper()[:20]+'%',
                 'limit':page_size,'offset':(page-1)*page_size, 'gap_min':gap_min,'gap_max':gap_max}
-        wh="signal_utc >= :cutoff AND (:status = 'ALL' OR status = :status) AND UPPER(symbol) LIKE :pattern AND (:gap_min IS NULL OR gap_1h >= :gap_min) AND (:gap_max IS NULL OR gap_1h <= :gap_max)"
+        wh="signal_utc >= :cutoff AND (:status = 'ALL' OR status = :status) AND UPPER(symbol) LIKE :pattern AND (CAST(:gap_min AS INTEGER) IS NULL OR gap_1h >= CAST(:gap_min AS INTEGER)) AND (CAST(:gap_max AS INTEGER) IS NULL OR gap_1h <= CAST(:gap_max AS INTEGER))"
         stats=s.execute(text(f'''SELECT COUNT(*) total,
             COUNT(*) FILTER (WHERE status='EXIT') closed,
             COUNT(*) FILTER (WHERE status='OPEN') opened,
