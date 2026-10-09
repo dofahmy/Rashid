@@ -739,8 +739,9 @@ def create_app(db=None,test_config=None):
             gap_max=int(raw_max) if raw_max else None
             factor_cap=int(request.args.get('max_factor','7'))
             signal_time=request.args.get('signal_time','').strip()
+            hold_days=int(request.args.get('hold_days','0'))
             result=dashboard(max_factor=factor_cap,days=days,status=request.args.get('status','ALL'),
-                query=request.args.get('q',''),page=page,gap_min=gap_min,gap_max=gap_max,signal_time=signal_time)
+                query=request.args.get('q',''),page=page,gap_min=gap_min,gap_max=gap_max,signal_time=signal_time,hold_days=hold_days)
             error=None
         except Exception as exc:
             app.logger.exception('US all hourly dashboard failed')
