@@ -44,50 +44,10 @@
 
 <div class="panel tablewrap">
 <h2>آخر الأسهم عند Repeat Price + Time</h2>
-<table class="sortable-egx">
-<thead>
-<tr>
-<th>السهم</th>
-<th>آخر Repeat Date</th>
-<th>أول تاريخ في الـCluster</th>
-<th>Repeat Price</th>
-<th>قاعدة الطفرات</th><th>قيعان صاعدة 60 جلسة</th><th>Touches</th>
-<th>Max Gap</th>
-<th>Price Spread %</th>
-<th>السعر الحالي</th>
-<th>الحالي مقابل Repeat %</th>
-<th>من كام يوم</th>
-<th>خروج +30%</th><th>جلسة +30%</th><th>تاريخ +30%</th><th>خروج +50%</th><th>جلسة +50%</th><th>تاريخ +50%</th><th>أقصى صعود منذ Repeat</th><th>Max Rise 20D</th><th>Max Drawdown 20D</th><th>+5% قبل -3%</th><th>أول حسم ±3% (جلسة)</th><th>+5% قبل -5%</th><th>أول حسم ±5% (جلسة)</th><th>متابعة 20 جلسة</th>
-<th>كل التواريخ</th>
-<th>كل الأسعار</th>
-</tr>
-</thead>
-<tbody>
-{% for r in result.rows %}
-<tr>
-<td><strong>{{r.symbol}}</strong></td>
-<td><strong>{{r.latest_repeat_date}}</strong></td>
-<td>{{r.first_repeat_date}}</td>
-<td><strong>{{r.repeat_price}}</strong></td>
-<td>{% if r.breakout_rule_status=="MATCH" %}✅ MATCH{% elif r.breakout_rule_status=="NO_DATA" %}— NO_DATA{% else %}—{% endif %}</td><td>{{"✅" if r.breakout_pre60_higher_lows == true else ("—" if r.breakout_pre60_higher_lows is none else "❌")}}</td><td>{{r.touches}}</td>
-<td>{{r.max_session_gap}}</td>
-<td>{{r.price_spread_pct}}%</td>
-<td>{{r.current_close if r.current_close is not none else '—'}}</td>
-<td>
-{% if r.current_vs_repeat_pct is not none %}
-  {{'%+.2f'|format(r.current_vs_repeat_pct)}}%
-{% else %}—{% endif %}
-</td>
-<td>{{r.days_ago if r.days_ago is not none else '—'}}</td>
-<td>{{ '✅ EXIT' if r.exit_30_status == 'EXIT' else ('⏳ OPEN' if r.exit_30_status == 'OPEN' else 'NO_DATA') }}</td><td>{{r.exit_30_session or '—'}}</td><td>{{r.exit_30_date or '—'}}</td><td>{{ '✅ EXIT' if r.exit_50_status == 'EXIT' else ('⏳ OPEN' if r.exit_50_status == 'OPEN' else 'NO_DATA') }}</td><td>{{r.exit_50_session or '—'}}</td><td>{{r.exit_50_date or '—'}}</td><td>{{ ('%+.2f'|format(r.exit_max_rise_pct)) ~ '%' if r.exit_max_rise_pct is not none else '—' }}</td><td>{% if r.max_rise_20d_pct is not none %}{{'%+.2f'|format(r.max_rise_20d_pct)}}%{% else %}—{% endif %}</td><td>{% if r.max_drawdown_20d_pct is not none %}{{'%+.2f'|format(r.max_drawdown_20d_pct)}}%{% else %}—{% endif %}</td><td>{{r.plus5_before_minus3}}</td><td>{{r.first_hit_minus3 if r.first_hit_minus3 is not none else '—'}}</td><td>{{r.plus5_before_minus5}}</td><td>{{r.first_hit_minus5 if r.first_hit_minus5 is not none else '—'}}</td><td>{{r.observed_20d_sessions}}/20 {% if not r.complete_20d %}⏳{% endif %}</td>
-<td dir="ltr">{{r.dates}}</td>
-<td dir="ltr">{{r.prices}}</td>
-</tr>
-{% else %}
-<tr><td colspan="30">مفيش أسهم مطابقة للشروط المختارة.</td></tr>
-{% endfor %}
-</tbody>
-</table>
+<table class="sortable-egx"><thead><tr><th>السهم</th><th>Repeat Price</th><th>MATCH</th><th>أعلى سعر بعد Repeat</th><th>المدة حتى أعلى سعر</th><th>Gap</th><th>Touches</th></tr></thead><tbody>
+{% for r in result.rows %}<tr><td><strong>{{r.symbol}}</strong></td><td>{{r.repeat_price}}</td><td>{{'✅ MATCH' if r.breakout_rule_status=='MATCH' else ('— NO_DATA' if r.breakout_rule_status=='NO_DATA' else '❌')}}</td><td>{{'%.4f'|format(r.repeat_peak_high) if r.repeat_peak_high is not none else '—'}}</td><td>{{r.repeat_peak_bars if r.repeat_peak_bars is not none else '—'}} جلسة</td><td>{{r.max_session_gap}}</td><td>{{r.touches}}</td></tr>
+{% else %}<tr><td colspan="7">لا توجد نتائج للفلاتر المختارة.</td></tr>{% endfor %}
+</tbody></table>
 </div>
 {% endif %}
 {% endblock %}
