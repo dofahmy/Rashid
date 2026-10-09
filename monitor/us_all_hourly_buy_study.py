@@ -198,6 +198,7 @@ def main():
     p.add_argument('--limit',type=int,default=0,help='Optional small smoke-test limit; 0 means all')
     p.add_argument('--output-dir',default='/tmp/us-buy-study')
     p.add_argument('--skip-refresh',action='store_true')
+    p.add_argument('--publish-db',action='store_true',help='Save report to database for web dashboard')
     p.add_argument('--tolerance',type=float,default=1.0);p.add_argument('--max-gap',type=int,default=20)
     args=p.parse_args()
     if not args.skip_refresh:
@@ -207,4 +208,7 @@ def main():
         print('Download:',refresh(syms,args.period,args.batch_size),flush=True)
     print('Study:',json.dumps(analyze(args.output_dir,args.tolerance,args.max_gap),ensure_ascii=False,indent=2),flush=True)
     print('CSV/JSON files saved under',args.output_dir,flush=True)
+    if args.publish_db:
+        from monitor.us_all_hourly_dashboard import publish_trades
+        print('Published trades:',publish_trades(Path(args.output_dir)/'us_buy_only_all_trades.csv'),flush=True)
 if __name__=='__main__':main()
