@@ -158,6 +158,14 @@ def screener(price_tolerance_pct=1.0,max_gap_bars=20,recent_bars=300):
         candle=df.iloc[idx].to_dict();candle['raw_close']=candle['close']
         direction,reason=_repeat_direction_from_candle(candle)
         exits=directional_profit_exits(df,idx,price,direction)
+        all_future=df.iloc[idx+1:]
+        peak_high=None; peak_bars=None
+        if len(all_future):
+            hvals=pd.to_numeric(all_future.high,errors='coerce')
+            if hvals.notna().any():
+                peak_pos=int(np.argmax(hvals.fillna(float('-inf')).to_numpy()))
+                peak_high=round(float(hvals.iloc[peak_pos]),4)
+                peak_bars=peak_pos+1
         future=df.iloc[idx+1:idx+21]
         maxrise=round((future.high.max()/price-1)*100,2) if len(future) and future.high.notna().any() else None
         maxdown=round((future.low.min()/price-1)*100,2) if len(future) and future.low.notna().any() else None
@@ -166,7 +174,7 @@ def screener(price_tolerance_pct=1.0,max_gap_bars=20,recent_bars=300):
         gapraw=round((float(df.iloc[idx+elapsed].close)/anchor-1)*100,2) if anchor>0 and elapsed>0 else None
         exits["directional_gap_return_pct"] = round(gapraw * (1 if direction == "BUY" else -1), 2) if gapraw is not None and direction in ("BUY", "SELL") else None
         out.append(dict(symbol=sym,latest_repeat_date=last[1].strftime('%Y-%m-%d %H:%M UTC'),repeat_price=price,
-            gap=gap,touches=touches,price_spread_pct=spread,breakout_pre60_higher_lows=higher,
+            gap=gap,touches=touches,repeat_peak_high=peak_high,repeat_peak_bars=peak_bars,price_spread_pct=spread,breakout_pre60_higher_lows=higher,
             breakout_rule_match=status=='MATCH',breakout_rule_status=status,
             gap_elapsed_bars=elapsed,gap_complete=elapsed>=gap,gap_target_bars=gap,gap_raw_return_pct=gapraw,
             max_rise_20h_pct=maxrise,max_drawdown_20h_pct=maxdown,

@@ -14,6 +14,8 @@ def repeat_exit_targets(df, signal_date, repeat_price, targets=(30, 50), exact_t
                     f'exit_{target}_date': None})
     out['exit_observed_sessions'] = 0
     out['exit_max_rise_pct'] = None
+    out['repeat_peak_high'] = None
+    out['repeat_peak_bars'] = None
     if df is None or df.empty or repeat_price is None:
         return out
     try:
@@ -38,6 +40,9 @@ def repeat_exit_targets(df, signal_date, repeat_price, targets=(30, 50), exact_t
     valid = highs.notna() & (highs > 0)
     if valid.any():
         out['exit_max_rise_pct'] = round((float(highs[valid].max()) / price - 1) * 100, 2)
+        peak_idx = highs[valid].idxmax()
+        out['repeat_peak_high'] = round(float(highs.loc[peak_idx]), 4)
+        out['repeat_peak_bars'] = int(future.index.get_loc(peak_idx)) + 1
     for target in targets:
         threshold = price * (1 + target / 100)
         for i, (rowidx, high) in enumerate(highs.items(), 1):

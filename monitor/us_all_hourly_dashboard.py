@@ -55,7 +55,7 @@ def dashboard(days=60,status='ALL',query='',page=1,page_size=50,gap_min=None,gap
         params={'cutoff':latest-timedelta(days=days) if days else datetime(1970,1,1),
                 'status':status,'pattern':'%'+query.strip().upper()[:20]+'%',
                 'limit':page_size,'offset':(page-1)*page_size, 'gap_min':gap_min,'gap_max':gap_max}
-        wh="signal_utc >= :cutoff AND (:status = 'ALL' OR status = :status) AND UPPER(symbol) LIKE :pattern AND (CAST(:gap_min AS INTEGER) IS NULL OR gap_1h >= CAST(:gap_min AS INTEGER)) AND (CAST(:gap_max AS INTEGER) IS NULL OR gap_1h <= CAST(:gap_max AS INTEGER))"
+        wh="signal_utc >= :cutoff AND (:status = 'ALL' OR status = :status) AND UPPER(symbol) LIKE :pattern AND (:gap_min IS NULL OR gap_1h >= :gap_min) AND (:gap_max IS NULL OR gap_1h <= :gap_max)"
         stats=s.execute(text(f'''SELECT COUNT(*) total,
             COUNT(*) FILTER (WHERE status='EXIT') closed,
             COUNT(*) FILTER (WHERE status='OPEN') opened,
@@ -69,8 +69,22 @@ def dashboard(days=60,status='ALL',query='',page=1,page_size=50,gap_min=None,gap
                     bars_to_exit,bars_observed,last_price,realized_return_pct,floating_return_pct,
                     combined_return_pct,max_adverse_pct,data_end_utc
                     FROM {TABLE} WHERE {wh} ORDER BY signal_utc DESC,symbol LIMIT :limit OFFSET :offset'''),params).mappings().all()
+        enriched=[]
+        peak_sql_open=text('''SELECT high,bar_time FROM us_all_seven_hourly_bars
+            WHERE symbol=:symbol AND bar_time > :signal_time AND high IS NOT NULL
+            ORDER BY high DESC,bar_time ASC LIMIT 1''')
+        count_sql=text('''SELECT COUNT(*) FROM us_all_seven_hourly_bars
+            WHERE symbol=:symbol AND bar_time > :signal_time AND bar_time <= :peak_time''')
+        for raw in result:
+            row=dict(raw)
+            qparams={'symbol':row['symbol'],'signal_time':row['signal_utc'],
+                     'exit_time':row['exit_utc'] if row['status']=='EXIT' else None}
+            peak=s.execute(peak_sql_open,qparams).first()
+            row['repeat_peak_high']=round(float(peak[0]),4) if peak else None
+            row['repeat_peak_bars']=int(s.execute(count_sql,{'symbol':row['symbol'],'signal_time':row['signal_utc'],'peak_time':peak[1]}).scalar()) if peak else None
+            enriched.append(row)
     total=int(stats['total']);closed=int(stats['closed'])
-    return dict(rows=[dict(x) for x in result],total=total,closed=closed,opened=int(stats['opened']),
+    return dict(rows=enriched,total=total,closed=closed,opened=int(stats['opened']),
                 win_rate=(100*closed/total if total else None),mean_return=stats['mean_return'],
                 realized=stats['realized'],floating=stats['floating'],avg_bars=stats['avg_bars'],
                 median_bars=stats['median_bars'],latest=latest,earliest=earliest,
