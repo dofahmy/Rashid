@@ -682,6 +682,23 @@ def create_app(db=None,test_config=None):
         return render_template('sp500_seven_hourly.html',result=result,error=error,
             price_tolerance_pct=tol,max_gap_bars=gap,recent_bars=recent if recent is not None else 'all',rule_only=rule_only,rule_match_count=match_count)
 
+    @app.get('/us-all-seven/hourly')
+    @auth
+    def us_all_seven_hourly():
+        from monitor.us_all_hourly_dashboard import dashboard
+        try:
+            raw=request.args.get('days','all')
+            days=None if raw=='all' else int(raw)
+            if days is not None and days not in (7,14,30,45,60):days=60
+            page=max(1,int(request.args.get('page','1')))
+            result=dashboard(days=days,status=request.args.get('status','ALL'),
+                query=request.args.get('q',''),page=page)
+            error=None
+        except Exception as exc:
+            app.logger.exception('US all hourly dashboard failed')
+            result=None;error=f'{type(exc).__name__}: {exc}'
+        return render_template('us_all_seven_hourly.html',result=result,error=error)
+
     @app.get('/sp500-seven/day/<day>')
     @auth
     def sp500_seven_day(day):
