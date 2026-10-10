@@ -1,0 +1,26 @@
+{% extends 'base.html' %}{% block content %}
+<h1>دودز | DODZ — السوق الأمريكي — شموع الساعة</h1>
+<div class="panel"><strong>القواعد الثابتة:</strong> BUY فقط وMATCH · 19:30 UTC · Gap من 1 إلى 12 · Squaring factor من 2 إلى 19 · الخروج بأول +3% أو إغلاق الشمعة رقم (3 × Squaring factor)، أيهما أولًا · لا وقف خسارة · صفقة واحدة مفتوحة لكل سهم.</div>
+<form class="panel filters" method="get">
+<label>رقم النظام من <input type="number" name="factor_from" min="2" max="19" value="{{result.factor_from if result else request.args.get('factor_from',2)}}" style="width:75px"></label>
+<label>رقم النظام إلى <input type="number" name="factor_to" min="2" max="19" value="{{result.factor_to if result else request.args.get('factor_to',19)}}" style="width:75px"></label>
+<label>الفترة <select name="days">{% for n in [7,14,30,45,60,'all'] %}<option value="{{n}}" {% if (result.days if result and result.days is not none else 'all')|string==n|string %}selected{% endif %}>{{'كل البيانات' if n=='all' else (n|string ~ ' يوم')}}</option>{% endfor %}</select></label>
+<label>الحالة <select name="status">{% for v,name in [('ALL','الكل'),('OPEN','مفتوحة'),('TARGET_3','هدف +3%'),('TIME','خروج زمني'),('EXIT','مقفولة')] %}<option value="{{v}}" {% if (result.status if result else 'ALL')==v %}selected{% endif %}>{{name}}</option>{% endfor %}</select></label>
+<label>السهم <input name="q" value="{{result.symbol if result else ''}}" placeholder="AAPL"></label>
+<button type="submit">عرض النتائج</button></form>
+{% if error %}<div class="panel warning">{{error}}</div>{% elif result %}
+{% set s=result.stats %}
+<div class="cards">
+<div class="panel"><div class="muted">الإشارات</div><div class="metric">{{s.total}}</div></div>
+<div class="panel"><div class="muted">هدف +3%</div><div class="metric">{{s.target}}</div></div>
+<div class="panel"><div class="muted">خروج زمني</div><div class="metric">{{s.timed}}</div></div>
+<div class="panel"><div class="muted">مفتوحة</div><div class="metric">{{s.opened}}</div></div>
+<div class="panel"><div class="muted">متوسط العائد مع المفتوحة</div><div class="metric">{{'%+.2f%%'|format(s.avg_return) if s.avg_return is not none else '—'}}</div></div>
+</div>
+<div class="panel tablewrap"><h2>إشارات دودز — صفحة {{result.page}} / {{result.pages}}</h2><table class="sortable-egx"><thead><tr><th>السهم</th><th>تاريخ الإشارة UTC</th><th>Squaring factor</th><th>العوامل المتزامنة</th><th>Repeat Price</th><th>Gap</th><th>Touches</th><th>الحد الزمني (شمعة)</th><th>الحالة</th><th>وقت الخروج UTC</th><th>شموع الخروج</th><th>سعر الخروج</th><th>العائد المحقق/العائم %</th><th>أقصى هبوط %</th></tr></thead><tbody>
+{% for r in result.rows %}<tr><td><strong>{{r.symbol}}</strong></td><td>{{r.signal_utc.strftime('%Y-%m-%d %H:%M') if r.signal_utc else '—'}}</td><td>{{r.squaring_factor}}</td><td>{{r.factors}}</td><td>{{'%.4f'|format(r.entry_price)}}</td><td>{{r.gap_1h}}</td><td>{{r.touches}}</td><td>{{r.deadline_bars}}</td><td>{% if r.exit_reason=='TARGET_3' %}✅ +3%{% elif r.exit_reason=='TIME' %}⏱️ خروج زمني{% else %}⏳ OPEN{% endif %}</td><td>{{r.exit_utc.strftime('%Y-%m-%d %H:%M') if r.exit_utc else '—'}}</td><td>{{r.bars_to_exit if r.bars_to_exit is not none else '—'}}</td><td>{{'%.4f'|format(r.exit_price) if r.exit_price is not none else '—'}}</td><td class="{{'positive' if r.combined_return_pct>=0 else 'negative'}}">{{'%+.2f%%'|format(r.combined_return_pct)}}</td><td>{{'%+.2f%%'|format(r.max_adverse_pct) if r.max_adverse_pct is not none else '—'}}</td></tr>
+{% else %}<tr><td colspan="14">لا توجد نتائج محفوظة. شغلي: python -m monitor.dodz_system --publish-db</td></tr>{% endfor %}</tbody></table></div>
+{% if result.pages>1 %}<div class="panel">{% if result.page>1 %}<a href="{{url_for('dodz_dashboard',factor_from=result.factor_from,factor_to=result.factor_to,days=result.days or 'all',status=result.status,q=result.symbol,page=result.page-1)}}">السابق</a>{% endif %} &nbsp; صفحة {{result.page}} من {{result.pages}} &nbsp; {% if result.page<result.pages %}<a href="{{url_for('dodz_dashboard',factor_from=result.factor_from,factor_to=result.factor_to,days=result.days or 'all',status=result.status,q=result.symbol,page=result.page+1)}}">التالي</a>{% endif %}</div>{% endif %}
+{% endif %}
+<div class="panel muted">النتائج افتراضية وتستخدم بيانات شموع الساعة المحفوظة، وليست أسعارًا لحظية. سعر الدخول مفترض أنه Repeat Price وقد لا يكون قابلًا للتنفيذ فعليًا. شمعة الإشارة لا تُستخدم في تحقيق الهدف؛ يبدأ تقييم الخروج من الشمعة التالية. عند بلوغ الهدف في شمعة المهلة، يُعطى هدف +3% الأولوية. إذا لم تكتمل الشموع المطلوبة تظل الصفقة OPEN. تكرار نفس السهم في نفس الوقت تحت عدة عوامل يُحسب صفقة واحدة بأصغر عامل.</div>
+{% endblock %}
