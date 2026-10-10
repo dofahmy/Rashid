@@ -34,7 +34,7 @@ def ensure_table():
            last_price DOUBLE PRECISION, realized_return_pct DOUBLE PRECISION,
            floating_return_pct DOUBLE PRECISION, combined_return_pct DOUBLE PRECISION,
            max_adverse_pct DOUBLE PRECISION, data_end_utc TIMESTAMP,
-           PRIMARY KEY(symbol, signal_utc)))'''))
+           PRIMARY KEY(symbol, signal_utc))'''))
 
 def signals_for_symbol(sym,df):
     if len(df)<61:return []
@@ -96,6 +96,38 @@ def signals_for_symbol(sym,df):
            data_end_utc=pd.Timestamp(df.iloc[-1].date).to_pydatetime()))
     return events
 
+def publish_existing(csv_path):
+    """Publish completed CSV from a prior scan, skipping the heavy market rescan."""
+    path=Path(csv_path)
+    if not path.is_file():
+        raise FileNotFoundError(f'نتائج دودز غير موجودة: {path}. شغّلي الفحص الكامل أولًا.')
+    df=pd.read_csv(path, keep_default_na=True)
+    fields=('symbol','signal_utc','squaring_factor','factors','entry_price','gap_1h','touches','deadline_bars','status','exit_reason','exit_utc','exit_price','bars_to_exit','observed_bars','last_price','realized_return_pct','floating_return_pct','combined_return_pct','max_adverse_pct','data_end_utc')
+    if len(df) and (missing:=set(fields)-set(df.columns)):
+        raise ValueError(f'CSV missing columns: {sorted(missing)}')
+    date_fields={'signal_utc','exit_utc','data_end_utc'}
+    integer_fields={'squaring_factor','gap_1h','touches','deadline_bars','bars_to_exit','observed_bars'}
+    rows=[]
+    for raw in df.to_dict('records'):
+        item={}
+        for key in fields:
+            value=raw.get(key)
+            if pd.isna(value): value=None
+            elif key in date_fields: value=pd.Timestamp(value).to_pydatetime()
+            elif key in integer_fields: value=int(value)
+            elif key in {'symbol','factors','status','exit_reason'}: value=str(value)
+            else: value=float(value)
+            item[key]=value
+        rows.append(item)
+    ensure_table()
+    with database().begin() as s:
+        # Atomic replacement: either the full CSV is published or the old data remains.
+        s.execute(text(f'DELETE FROM {TRADES}'))
+        stmt=text(f'INSERT INTO {TRADES} ({",".join(fields)}) VALUES ({",".join(":"+f for f in fields)})')
+        for i in range(0,len(rows),500):
+            s.execute(stmt,rows[i:i+500])
+    return {'published_trades':len(rows),'source':str(path)}
+
 def run(output_dir, publish=False):
     ensure_tables(); out=Path(output_dir);out.mkdir(parents=True,exist_ok=True)
     trades=[];last_sym=None;bars=[];count=0
@@ -156,5 +188,9 @@ def dashboard(status='ALL',factor_from=2,factor_to=19,days=None,page=1,symbol=''
 
 def main():
     p=argparse.ArgumentParser();p.add_argument('--output-dir',default='/tmp/dodz-study');p.add_argument('--publish-db',action='store_true')
-    args=p.parse_args();print(json.dumps(run(args.output_dir,args.publish_db),ensure_ascii=False,indent=2),flush=True)
+    p.add_argument('--publish-existing',action='store_true',help='Publish saved dodz_all_trades.csv without rescanning')
+    args=p.parse_args()
+    result=(publish_existing(Path(args.output_dir)/'dodz_all_trades.csv') if args.publish_existing
+            else run(args.output_dir,args.publish_db))
+    print(json.dumps(result,ensure_ascii=False,indent=2),flush=True)
 if __name__=='__main__':main()
