@@ -11,6 +11,7 @@ from sqlalchemy import text
 from core import database
 
 TABLE='us_preburst_setup_snapshot_v2'
+HISTORY_BARS=8  # As-of indicators at last eight closes, including latest
 FEATURES={
  'rsi14':('RSI 14',27,43),
  'momentum5_pct':('Momentum 5 %',-9,0),
@@ -87,59 +88,79 @@ def _features_row(sym, data, mode, offset=0):
         item[key]=v*100 if key=='position_20_pct' and v is not None else v
     return item
 
-def current():
-    # Two snapshots allow identifying newly-matching setups at the most recent bar.
-    rows=[];previous=[];prev=None;buf=[];count=0
+def _build_market(mode, table_query, timeframe):
+    """Persist latest eight indicator snapshots to support true transition detection.
+
+    Each observation is computed using only bars available up through its timestamp.
+    No assumption is made that any symbol has consecutive UTC hours: consecutive
+    observations refer to consecutive *stored market bars*.
+    """
+    buckets={f'{mode}_hist_{n}':[] for n in range(HISTORY_BARS)}
+    count=0; prev=None;buf=[]
     def process(sym,data):
         nonlocal count
         count+=1
-        row=_features_row(sym,data,'current')
-        old=_features_row(sym,data,'current_prev',offset=1)
-        if row:rows.append(row)
-        if old:previous.append(old)
-        if count%500==0:print(f'Current preburst: {count} stocks',flush=True)
+        for n in range(HISTORY_BARS):
+            row=_features_row(sym,data,f'{mode}_hist_{n}',offset=n)
+            if row:buckets[f'{mode}_hist_{n}'].append(row)
+        if count%500==0:print(f'{mode} preburst history: {count} symbols',flush=True)
     with database()() as con:
-        for r in con.execute(text('SELECT symbol,bar_time,open,high,low,close,volume FROM us_all_seven_hourly_bars ORDER BY symbol,bar_time')):
+        for r in con.execute(text(table_query)):
             sym=str(r[0])
             if prev is not None and prev!=sym:process(prev,buf);buf=[]
             prev=sym;buf.append(tuple(r[1:]))
         if prev is not None:process(prev,buf)
-    upsert(rows,'current');upsert(previous,'current_prev')
-    return {'market':'us','rows':len(rows),'previous_rows':len(previous)}
+    # Keep V3 mode names for backwards compatibility with historical data/UI.
+    # Replace all snapshots transactionally within the upsert function.
+    for n in range(HISTORY_BARS):
+        key=f'{mode}_hist_{n}'
+        compat_mode=mode if n==0 else (f'{mode}_prev' if n==1 else key)
+        for row in buckets[key]:row['mode']=compat_mode
+        upsert(buckets[key],compat_mode)
+    return {'market':mode,'rows':len(buckets[f'{mode}_hist_0']),
+            'previous_rows':len(buckets[f'{mode}_hist_1']),
+            'history_depth':HISTORY_BARS,'timeframe':timeframe}
+
+def current():
+    return _build_market('current','SELECT symbol,bar_time,open,high,low,close,volume FROM us_all_seven_hourly_bars ORDER BY symbol,bar_time','hourly')
 
 def egypt_current():
     from monitor.gann_analysis import _daily_table
     from sqlalchemy import select
-    rows=[];previous=[];count=0
+    buckets={f'egypt_hist_{n}':[] for n in range(HISTORY_BARS)}
     with database()() as con:
-        tbl=_daily_table(con)
-        names={c.name.lower():c for c in tbl.c}
+        tbl=_daily_table(con);names={c.name.lower():c for c in tbl.c}
         def pick(*opts):
             for opt in opts:
                 if opt in names:return names[opt]
             return None
         cs=pick('symbol','ticker','sym'); cd=pick('session_date','date','d')
-        cc=pick('c','close'); ch=pick('h','high'); cl=pick('l','low')
+        cc=pick('c','close');ch=pick('h','high');cl=pick('l','low')
         co=pick('o','open');cv=pick('v','volume')
         if not all(x is not None for x in [cs,cd,cc,ch,cl]):
             raise RuntimeError('EGX daily table is missing required symbol/date/OHLC columns')
         fields=[cs,cd,co if co is not None else cc,ch,cl,cc,cv if cv is not None else cc]
         result=con.execute(select(*fields).where(cs.ilike('%.CA')).order_by(cs,cd))
-        prev=None;buf=[]
+        count=0;prev=None;buf=[]
         def process(sym,data):
             nonlocal count
             count+=1
-            row=_features_row(sym,data,'egypt')
-            old=_features_row(sym,data,'egypt_prev',offset=1)
-            if row:rows.append(row)
-            if old:previous.append(old)
+            for n in range(HISTORY_BARS):
+                row=_features_row(sym,data,f'egypt_hist_{n}',offset=n)
+                if row:buckets[f'egypt_hist_{n}'].append(row)
+            if count%500==0:print(f'egypt preburst history: {count} symbols',flush=True)
         for r in result:
             sym=str(r[0])
             if prev is not None and prev!=sym:process(prev,buf);buf=[]
             prev=sym;buf.append(tuple(r[1:]))
         if prev is not None:process(prev,buf)
-    upsert(rows,'egypt');upsert(previous,'egypt_prev')
-    return {'market':'egypt','rows':len(rows),'previous_rows':len(previous),'timeframe':'daily'}
+    for n in range(HISTORY_BARS):
+        key=f'egypt_hist_{n}';compat_mode='egypt' if n==0 else ('egypt_prev' if n==1 else key)
+        for row in buckets[key]:row['mode']=compat_mode
+        upsert(buckets[key],compat_mode)
+    return {'market':'egypt','rows':len(buckets['egypt_hist_0']),
+            'previous_rows':len(buckets['egypt_hist_1']),
+            'history_depth':HISTORY_BARS,'timeframe':'daily'}
 
 def parse_filters(args):
     selected=[];settings={}
@@ -189,29 +210,61 @@ def dashboard(args):
         stat=con.execute(query(f'SELECT COUNT(*) rows,COUNT(DISTINCT symbol) stocks FROM {TABLE} WHERE {filtered}'),params).mappings().one()
         all_rows=con.execute(query(f"""SELECT symbol,reference_utc,start_utc,rise_pct,bars_to_peak,{','.join('"'+x+'"' for x in COLS)}
           FROM {TABLE} WHERE {filtered} ORDER BY reference_utc DESC,symbol ASC LIMIT 10000"""),params).mappings().all()
-        old_map={}
+        history={}
         if prev_storage and all_rows:
-            syms=[r['symbol'] for r in all_rows]
-            old_rows=con.execute(text(f"""SELECT symbol,{','.join('"'+x+'"' for x in COLS)} FROM {TABLE}
-                WHERE mode=:previous AND symbol IN :symbols""").bindparams(bindparam('symbols',expanding=True)),
-                {'previous':prev_storage,'symbols':syms}).mappings().all()
-            old_map={r['symbol']:r for r in old_rows}
+            syms=list({r['symbol'] for r in all_rows})
+            for n in range(1,HISTORY_BARS):
+                hist_mode=f'{storage}_prev' if n==1 else f'{storage}_hist_{n}'
+                older=con.execute(text(f"""SELECT symbol,reference_utc,{','.join('"'+x+'"' for x in COLS)} FROM {TABLE}
+                  WHERE mode=:snapshot AND symbol IN :symbols""").bindparams(bindparam('symbols',expanding=True)),
+                  {'snapshot':hist_mode,'symbols':syms}).mappings().all()
+                history[n]={r['symbol']:r for r in older}
+    def matches(r):
+        return r is not None and all(r[k] is not None and settings[k]['min']<=r[k]<=settings[k]['max'] for k in selected)
     rows=[]
     for item in all_rows:
         r=dict(item)
+        r['signal_started_utc']=None
+        r['matching_bars']=None
         if prev_storage:
-            old=old_map.get(r['symbol'])
-            was_matching=bool(old) and all(old[k] is not None and settings[k]['min']<=old[k]<=settings[k]['max'] for k in selected)
-            r['signal_status']=('غير محدد' if old is None else ('مستمر' if was_matching else 'جديد'))
-            r['is_new']=old is not None and not was_matching
+            old=history.get(1,{}).get(r['symbol'])
+            if old is None:
+                r['signal_status']='غير مؤكد — لا توجد شمعة سابقة'
+                r['is_new']=False
+            elif not matches(old):
+                r['signal_status']='جديد مؤكد'
+                r['is_new']=True
+                r['signal_started_utc']=r['reference_utc']
+                r['matching_bars']=1
+            else:
+                # Trace back contiguous matches through available snapshots.
+                n_matches=1;earliest=r['reference_utc'];enough_history=True
+                for n in range(1,HISTORY_BARS):
+                    snapshot=history.get(n,{}).get(r['symbol'])
+                    if snapshot is None:
+                        enough_history=False;break
+                    if not matches(snapshot):break
+                    n_matches+=1;earliest=snapshot['reference_utc']
+                r['is_new']=False
+                r['signal_started_utc']=earliest
+                r['matching_bars']=n_matches
+                r['signal_status']=('مستمر (بدأ قبل نافذة التتبع)' if n_matches==HISTORY_BARS else
+                                    'مستمر (بداية ضمن النافذة)' if enough_history else 'مستمر (تاريخ ناقص)')
         else:
             r['signal_status']='تاريخي';r['is_new']=False
         rows.append(r)
-    if prev_storage:rows.sort(key=lambda r:(not r['is_new'],-pd.Timestamp(r['reference_utc']).timestamp(),r['symbol']))
+    if prev_storage:
+        rows.sort(key=lambda r:(0 if r['is_new'] else (1 if r['signal_status'].startswith('مستمر') else 2),
+                                -pd.Timestamp(r['signal_started_utc'] or r['reference_utc']).timestamp(),r['symbol']))
+    diagnostics={'new_confirmed':sum(r['is_new'] for r in rows),
+                 'ongoing':sum(r['signal_status'].startswith('مستمر') for r in rows),
+                 'unknown':sum(r['signal_status'].startswith('غير مؤكد') for r in rows),
+                 'old_snapshot_rows':len(history.get(1,{})) if prev_storage else 0,
+                 'history_bars':HISTORY_BARS}
     return {'mode':mode,'market':market,'timeframe':'يومي' if market=='egypt' else 'ساعة',
       'settings':settings,'selected':selected,'baseline':dict(baseline),'stats':dict(stat),
       'rows':rows[:200],'limited':int(stat['rows'])>200,
-      'new_count':sum(r['is_new'] for r in rows),
+      'new_count':sum(r['is_new'] for r in rows),'diagnostics':diagnostics,
       'note':'الوضع التاريخي مبني على الأسهم الأمريكية فقط' if mode=='historical' and market=='egypt' else ''}
 
 def main():
