@@ -179,6 +179,20 @@ def dashboard(args):
     if mode not in ('historical','current'):mode='historical'
     if market not in ('us','sp500','egypt'):market='us'
     selected,settings=parse_filters(args)
+    if mode=='current':
+        from monitor.us_preburst_v5_history import current_dashboard
+        engine_mode='egypt' if market=='egypt' else 'us'
+        result=current_dashboard(engine_mode,selected,settings,market)
+        # Keep the same return structure used by the existing Flask view/template.
+        return {'mode':mode,'market':market,'timeframe':'يومي' if market=='egypt' else 'ساعة',
+          'settings':settings,'selected':selected,
+          'baseline':{'rows':result['baseline'],'stocks':result['baseline']},
+          'stats':{'rows':result['total'],'stocks':result['total']},
+          'rows':result['rows'],'limited':result['total']>200,
+          'new_count':result['new_confirmed'],
+          'diagnostics':{'new_confirmed':result['new_confirmed'],'ongoing':result['ongoing'],
+             'unknown':result['unknown'],'history_bars':'كل الشموع المتاحة','old_snapshot_rows':result['history_loaded']},
+          'by_date':result['by_date'],'note':''}
     storage='historical' if mode=='historical' else ('egypt' if market=='egypt' else 'current')
     prev_storage=storage+'_prev' if mode=='current' else None
     params={'mode':storage};where=['mode=:mode']
