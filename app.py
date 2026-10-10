@@ -43,6 +43,7 @@ def create_app(db=None,test_config=None):
                     'sp500_hourly_screener':('أمريكا','S&P 500 — ساعة'),
                     'us_all_seven_hourly':('أمريكا','كل السوق — ساعة BUY 3%'),
                     'dodz_dashboard':('أمريكا','دودز — DODZ'),
+                    'us_preburst_setup':('أمريكا','Pre-Burst — Screening'),
                 }
                 groups={}
                 for rule in current_app.url_map.iter_rules():
@@ -727,6 +728,23 @@ def create_app(db=None,test_config=None):
             app.logger.exception('SP500 hourly screener failed');error=f'{type(exc).__name__}: {exc}'
         return render_template('sp500_seven_hourly.html',result=result,error=error,
             price_tolerance_pct=tol,max_gap_bars=gap,recent_bars=recent if recent is not None else 'all',rule_only=rule_only,rule_match_count=match_count)
+
+    @app.get('/us-preburst/setup')
+    @auth
+    def us_preburst_setup():
+        from monitor.us_preburst_setup import dashboard, FEATURES, DEFAULT_ACTIVE
+        params=request.args.to_dict()
+        # When a form has been submitted, missing checkboxes mean disabled.
+        if params.get('configured')=='1':
+            for k in FEATURES:
+                if 'use_'+k not in params:params['use_'+k]='0'
+        try:
+            result=dashboard(params);error=None
+        except Exception as exc:
+            app.logger.exception('Preburst setup screener error')
+            error=f'{type(exc).__name__}: {exc}'
+            result={'mode':'historical','settings':{k:{'label':v[0],'min':v[1],'max':v[2],'active':k in DEFAULT_ACTIVE} for k,v in FEATURES.items()},'baseline':{'stocks':0,'rows':0},'stats':{'stocks':0,'rows':0},'rows':[],'limited':False}
+        return render_template('us_preburst_setup.html',result=result,error=error)
 
     @app.get('/dodz')
     @auth
