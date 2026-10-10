@@ -41,6 +41,7 @@ def create_app(db=None,test_config=None):
                     'sp500_seven_screener':('أمريكا','Repeat — S&P 500'),
                     'sp500_hourly_screener':('أمريكا','S&P 500 — ساعة'),
                     'us_all_seven_hourly':('أمريكا','كل السوق — ساعة BUY 3%'),
+                    'dodz_dashboard':('أمريكا','دودز — DODZ'),
                 }
                 groups={}
                 for rule in current_app.url_map.iter_rules():
@@ -723,6 +724,23 @@ def create_app(db=None,test_config=None):
             app.logger.exception('SP500 hourly screener failed');error=f'{type(exc).__name__}: {exc}'
         return render_template('sp500_seven_hourly.html',result=result,error=error,
             price_tolerance_pct=tol,max_gap_bars=gap,recent_bars=recent if recent is not None else 'all',rule_only=rule_only,rule_match_count=match_count)
+
+    @app.get('/dodz')
+    @auth
+    def dodz_dashboard():
+        from monitor.dodz_system import dashboard as dodz_view
+        try:
+            raw_days=request.args.get('days','all')
+            days=None if raw_days=='all' else int(raw_days)
+            if days is not None and days not in (7,14,30,45,60):days=None
+            result=dodz_view(status=request.args.get('status','ALL'),
+                factor_from=int(request.args.get('factor_from',2)),
+                factor_to=int(request.args.get('factor_to',19)),days=days,
+                page=int(request.args.get('page',1)),symbol=request.args.get('q',''))
+            error=None
+        except Exception as exc:
+            app.logger.exception('DODZ dashboard failed');result=None;error=f'{type(exc).__name__}: {exc}'
+        return render_template('dodz_dashboard.html',result=result,error=error)
 
     @app.get('/us-all-seven/hourly')
     @auth
