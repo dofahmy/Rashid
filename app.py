@@ -1,4 +1,4 @@
-import os, secrets, csv, io, math, time, re
+import os, secrets, csv, io, math, time
 from functools import wraps
 from datetime import timedelta, datetime, timezone
 from urllib.parse import quote
@@ -27,49 +27,6 @@ def create_app(db=None,test_config=None):
         r.headers['X-Content-Type-Options']='nosniff'; r.headers['X-Frame-Options']='DENY'; r.headers['Referrer-Policy']='no-referrer'
         r.headers['Content-Security-Policy']="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; form-action 'self'; frame-ancestors 'none'; base-uri 'self'"
         if request.path!='/health': r.headers['Cache-Control']='no-store'
-        # Attach a consistent right sidebar to existing HTML pages without replacing base.html.
-        # Only known registered GET routes become links; no broken Saudi URLs are invented.
-        if r.status_code==200 and r.mimetype=='text/html' and session.get('admin'):
-            try:
-                from markupsafe import escape
-                from flask import current_app
-                route_labels={
-                    'dashboard':('الإدارة','الرئيسية والعملاء'),
-                    'egx_seven':('مصر','نظام 7 — مصر'),
-                    'egx_seven_screener':('مصر','Repeat — مصر'),
-                    'sp500_seven':('أمريكا','نظام 7 — S&P 500'),
-                    'sp500_seven_screener':('أمريكا','Repeat — S&P 500'),
-                    'sp500_hourly_screener':('أمريكا','S&P 500 — ساعة'),
-                    'us_all_seven_hourly':('أمريكا','كل السوق — ساعة BUY 3%'),
-                    'dodz_dashboard':('أمريكا','دودز — DODZ'),
-                }
-                groups={}
-                for rule in current_app.url_map.iter_rules():
-                    if 'GET' not in rule.methods or rule.arguments or rule.rule.startswith('/static'):
-                        continue
-                    endpoint=rule.endpoint
-                    if endpoint in route_labels:
-                        group,label=route_labels[endpoint]
-                    elif any(t in (endpoint+' '+rule.rule).lower() for t in ('saudi','tadawul','ksa','السعود')):
-                        group,label='السعودية',endpoint.replace('_',' ').title()
-                    else:
-                        continue
-                    groups.setdefault(group,[]).append((url_for(endpoint),label,rule.rule==request.path))
-                parts=['<nav id="market-right-nav" aria-label="التنقل بين صفحات الأسواق"><div class="market-nav-head">صفحات الأسواق</div>']
-                for group,links in groups.items():
-                    parts.append('<div class="market-nav-section">'+str(escape(group))+'</div>')
-                    for href,label,active in links:
-                        parts.append('<a class="'+('active' if active else '')+'" href="'+str(escape(href))+'">'+str(escape(label))+'</a>')
-                parts.append('</nav>')
-                parts.append('''<style id="market-right-nav-style">#market-right-nav{position:fixed;right:0;top:0;bottom:0;width:215px;box-sizing:border-box;overflow-y:auto;z-index:10000;background:#10283d;color:#fff;direction:rtl;box-shadow:-3px 0 12px #0002;font-family:inherit;padding:18px 10px}#market-right-nav a{display:block;color:#e8f4f9;text-decoration:none;padding:10px 9px;border-radius:7px;margin:2px 0;font-size:13px}#market-right-nav a:hover,#market-right-nav a.active{background:#16838c;color:#fff}#market-right-nav .market-nav-head{font-weight:800;font-size:18px;margin:7px 8px 22px}#market-right-nav .market-nav-section{font-size:12px;font-weight:bold;color:#82dce0;margin:16px 8px 4px;border-bottom:1px solid #365066;padding-bottom:7px}body{padding-right:225px!important;box-sizing:border-box} @media(max-width:700px){#market-right-nav{width:145px;padding:12px 5px}#market-right-nav a{font-size:11px;padding:8px 4px}body{padding-right:151px!important}}</style>''')
-                output=r.get_data(as_text=True)
-                if '</body>' in output.lower():
-                    output=re.sub(r'</body\s*>',''.join(parts)+'</body>',output,count=1,flags=re.I)
-                else:
-                    output+=''.join(parts)
-                r.set_data(output)
-            except Exception:
-                app.logger.exception('Market navigation inject failed')
         return r
     def auth(fn):
         @wraps(fn)
@@ -310,7 +267,7 @@ def create_app(db=None,test_config=None):
     @app.get('/stocks')
     @auth
     def stocks():
-        from monitor.models import Stock, Plan, Scan, LABELS
+        from monitor.models import Stock, Plan, Scan, EgxSignal, EgxOpenSignal, LABELS
         from monitor.strategy import local
         from monitor.customer import minimum_score
         conditions=[]
@@ -322,6 +279,8 @@ def create_app(db=None,test_config=None):
         if symbol: conditions.append(Plan.symbol==symbol)
         try: page=max(1,int(request.args.get('page','1')))
         except ValueError: page=1
+        EgxSignal.__table__.create(bind=DB.kw['bind'],checkfirst=True)
+        EgxOpenSignal.__table__.create(bind=DB.kw['bind'],checkfirst=True)
         with DB() as s:
             from monitor.limits import holding_settings
             hold_days,hold_min_profit=holding_settings(s)
@@ -362,6 +321,14 @@ def create_app(db=None,test_config=None):
                 scan.no_complete_bars=int(_errs.get('no_complete_bars',0) or 0)
                 scan.provider_errors=max(0,int(scan.errors or 0)-scan.waiting_errors-scan.no_complete_bars)
             stocks_by_symbol={r.symbol:r for r in s.scalars(select(Stock).where(Stock.symbol.in_([p.symbol for p in rows])))}
+            egx_signals=s.scalars(
+                select(EgxOpenSignal).order_by(EgxOpenSignal.signal_date.desc(),EgxOpenSignal.id.desc()).limit(250)
+            ).all()
+            egx_total=s.scalar(select(func.count()).select_from(EgxOpenSignal)) or 0
+            egx_positive=s.scalar(select(func.count()).select_from(EgxOpenSignal).where(EgxOpenSignal.current_return_pct>=0)) or 0
+            egx_avg_return=s.scalar(select(func.avg(EgxOpenSignal.current_return_pct)))
+            egx_scan=s.scalar(select(Scan).where(Scan.market=='EG').order_by(Scan.id.desc()).limit(1))
+
             import json as _order_json
             order_map={}
             for _p in rows:
@@ -377,7 +344,8 @@ def create_app(db=None,test_config=None):
         def link(**kw): return url_for('stocks',**{**request.args.to_dict(),**kw})
         return render_template('stocks.html',rows=rows,counts=counts,universe=universe,errors=errors,
             waiting_errors=waiting_errors,no_complete_bars=no_complete_bars,provider_errors=provider_errors,scans=scans,
-            hold_days=hold_days,hold_min_profit=hold_min_profit,send_minimum_score=send_minimum_score,labels=LABELS,stock_map=stocks_by_symbol,order_map=order_map,total=total,page=page,pages=pages,link=link,local=local)
+            hold_days=hold_days,hold_min_profit=hold_min_profit,send_minimum_score=send_minimum_score,labels=LABELS,stock_map=stocks_by_symbol,order_map=order_map,
+            egx_signals=egx_signals,egx_total=egx_total,egx_positive=egx_positive,egx_avg_return=egx_avg_return,egx_scan=egx_scan,total=total,page=page,pages=pages,link=link,local=local)
 
     @app.get('/stocks/<int:plan_id>')
     @auth
@@ -402,384 +370,4 @@ def create_app(db=None,test_config=None):
         with DB() as s:
             rows=s.scalars(select(Stock).where(*conditions).order_by(Stock.market,Stock.symbol).limit(250)).all()
         return render_template('stock_feed.html',rows=rows)
-
-
-
-    @app.get('/egx-market')
-    @auth
-    def egx_market():
-        from monitor.egx_live import load_state,get_refresh_status,compute_state
-        mode=request.args.get('mode','now')
-        selected_date=request.args.get('date','').strip()
-        with DB() as s:refresh_status=get_refresh_status(s)
-        if mode!='date':
-            from monitor.egx_live import save_state
-            with DB() as s:
-                state=load_state(s)
-            # Safety fallback: after a deploy/key change there may be a completed
-            # refresh status but no cached state under the new key.
-            if state is None:
-                try:
-                    state=compute_state(None)
-                    save_state(DB,state)
-                except Exception as exc:
-                    flash(f'فشل حساب Now: {type(exc).__name__}: {exc}')
-                    state=None
-            return render_template('egx_market.html',state=state,refresh_status=refresh_status,selected_mode='now',selected_date='')
-        if not selected_date:
-            flash('اختاري التاريخ أولًا.');return redirect(url_for('egx_market'))
-        try:dt=datetime.strptime(selected_date,'%Y-%m-%d').date()
-        except ValueError:abort(400,description='تاريخ غير صحيح.')
-        try:state=compute_state(dt)
-        except Exception as exc:
-            flash(f'فشل حساب التاريخ المحدد: {type(exc).__name__}: {exc}');state=None
-        return render_template('egx_market.html',state=state,refresh_status=refresh_status,selected_mode='date',selected_date=selected_date)
-
-    @app.post('/egx-market/refresh')
-    @auth
-    def egx_refresh_market():
-        import subprocess,sys
-        from monitor.egx_live import set_refresh_status
-        set_refresh_status(DB,{'status':'queued','started_at_utc':datetime.now(timezone.utc).isoformat(),'message':'تم طلب التحديث. سيبدأ تحديث الأسعار وإعادة الحساب الآن.'})
-        subprocess.Popen([sys.executable,'-m','monitor.egx_refresh_once'],cwd='/app',stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True)
-        flash('بدأ تحديث بيانات السوق المصري وإعادة الحساب. أعيدي فتح الصفحة بعد قليل.')
-        return redirect(url_for('egx_market'))
-
-
-    @app.get('/egx-seven')
-    @auth
-    def egx_seven():
-        import traceback
-        scope=request.args.get('scope','market')
-        symbol=request.args.get('symbol','').strip().upper()
-        metric=request.args.get('metric','both')
-        date_mode=request.args.get('date_mode','all')
-        day=request.args.get('day','').strip()
-        month=request.args.get('month','').strip()
-        start=request.args.get('start','').strip()
-        end=request.args.get('end','').strip()
-        signals_only=request.args.get('signals_only')=='1'
-        try: repeat_price_tolerance_pct=float(request.args.get('repeat_price_tolerance_pct','1.0'))
-        except Exception: repeat_price_tolerance_pct=1.0
-        try: repeat_max_gap_sessions=int(request.args.get('repeat_max_gap_sessions','20'))
-        except Exception: repeat_max_gap_sessions=20
-        repeat_price_tolerance_pct=max(0.0,min(repeat_price_tolerance_pct,20.0))
-        repeat_max_gap_sessions=max(1,min(repeat_max_gap_sessions,252))
-        if metric=='both' and request.args: signals_only=True
-
-        if scope not in ('market','stock','index'): scope='market'
-        if metric not in ('both','price','volume'): metric='both'
-        if date_mode not in ('all','day','month','range'): date_mode='all'
-
-        result=None
-        error=None
-        symbols=[]
-
-        try:
-            from monitor.seven_system import run,list_symbols
-            try:
-                symbols=list_symbols()
-            except Exception as exc:
-                app.logger.exception('EGX Seven symbol list failed')
-                error=f'تعذر تحميل قائمة الأسهم: {type(exc).__name__}: {exc}'
-
-            if request.args:
-                try:
-                    result=run(
-                        scope=scope,
-                        symbol=symbol or None,
-                        metric=metric,
-                        date_mode=date_mode,
-                        day=day or None,
-                        month=month or None,
-                        start=start or None,
-                        end=end or None,
-                        signals_only=signals_only,
-                        repeat_price_tolerance_pct=repeat_price_tolerance_pct,
-                        repeat_max_gap_sessions=repeat_max_gap_sessions,
-                    )
-                except Exception as exc:
-                    app.logger.exception('EGX Seven calculation failed')
-                    error=f'{type(exc).__name__}: {exc}'
-        except Exception as exc:
-            app.logger.exception('EGX Seven import failed')
-            error=f'فشل تحميل نظام الـ7: {type(exc).__name__}: {exc}'
-
-        return render_template(
-            'seven_system.html',
-            result=result,error=error,symbols=symbols,
-            scope=scope,symbol=symbol,metric=metric,date_mode=date_mode,
-            day=day,month=month,start=start,end=end,signals_only=signals_only,
-            repeat_price_tolerance_pct=repeat_price_tolerance_pct,
-            repeat_max_gap_sessions=repeat_max_gap_sessions
-        )
-
-
-    @app.get('/egx-seven/day/<day>')
-    @auth
-    def egx_seven_day(day):
-        from monitor.seven_system import market_day_stock_details
-        try:
-            dt=datetime.strptime(day,'%Y-%m-%d').date()
-        except ValueError:
-            abort(400,description='تاريخ غير صحيح.')
-        try:
-            kind=request.args.get('kind','double')
-            rows=market_day_stock_details(dt,kind=kind)
-            error=None
-        except Exception as exc:
-            rows=[]
-            error=f'{type(exc).__name__}: {exc}'
-        return render_template('seven_day_stocks.html',day=day,rows=rows,error=error,kind=request.args.get('kind','double'))
-
-    @app.get('/egx-seven/screener')
-    @auth
-    def egx_seven_screener():
-        from monitor.seven_system import repeat_price_time_screener
-
-        try:
-            price_tolerance_pct=float(request.args.get('price_tolerance_pct','1.0'))
-        except Exception:
-            price_tolerance_pct=1.0
-
-        try:
-            max_gap_sessions=int(request.args.get('max_gap_sessions','20'))
-        except Exception:
-            max_gap_sessions=20
-
-        recent_raw=request.args.get('recent_days','90').strip()
-        if recent_raw.lower() in ('','all','none'):
-            recent_days=None
-        else:
-            try:
-                recent_days=int(recent_raw)
-            except Exception:
-                recent_days=90
-
-        price_tolerance_pct=max(0.0,min(price_tolerance_pct,20.0))
-        max_gap_sessions=max(1,min(max_gap_sessions,252))
-        if recent_days is not None:
-            recent_days=max(1,min(recent_days,3650))
-
-        error=None
-        result=None
-        try:
-            result=repeat_price_time_screener(
-                price_tolerance_pct=price_tolerance_pct,
-                max_gap_sessions=max_gap_sessions,
-                recent_days=recent_days,
-            )
-        except Exception as exc:
-            app.logger.exception('EGX Seven repeat screener failed')
-            error=f'{type(exc).__name__}: {exc}'
-
-        rule_only=request.args.get('rule_only','0')=='1'
-        rule_match_count=sum(1 for r in result['rows'] if r.get('breakout_rule_match')) if result else 0
-        if result and rule_only:
-            result=dict(result)
-            result['rows']=[r for r in result['rows'] if r.get('breakout_rule_match')]
-            result['count']=len(result['rows'])
-
-        return render_template(
-            'seven_screener.html',
-            result=result,
-            rule_only=rule_only, rule_match_count=rule_match_count,
-            error=error,
-            price_tolerance_pct=price_tolerance_pct,
-            max_gap_sessions=max_gap_sessions,
-            recent_days=recent_days if recent_days is not None else 'all',
-        )
-
-
-    @app.get('/sp500-seven')
-    @auth
-    def sp500_seven():
-        from monitor.sp500_seven_system import run,list_symbols
-        from monitor.sp500_seven_data import get_status
-
-        scope=request.args.get('scope','market')
-        symbol=request.args.get('symbol','').strip().upper()
-        metric=request.args.get('metric','both')
-        date_mode=request.args.get('date_mode','all')
-        day=request.args.get('day','').strip()
-        month=request.args.get('month','').strip()
-        start=request.args.get('start','').strip()
-        end=request.args.get('end','').strip()
-        signals_only=request.args.get('signals_only')=='1'
-        try: repeat_price_tolerance_pct=float(request.args.get('repeat_price_tolerance_pct','1.0'))
-        except Exception: repeat_price_tolerance_pct=1.0
-        try: repeat_max_gap_sessions=int(request.args.get('repeat_max_gap_sessions','20'))
-        except Exception: repeat_max_gap_sessions=20
-
-        repeat_price_tolerance_pct=max(0.0,min(repeat_price_tolerance_pct,20.0))
-        repeat_max_gap_sessions=max(1,min(repeat_max_gap_sessions,252))
-
-        result=None;error=None
-        try:
-            symbols=list_symbols()
-        except Exception:
-            symbols=[]
-
-        with DB() as s:
-            refresh_status=get_status(s)
-
-        if request.args:
-            try:
-                result=run(
-                    scope=scope,symbol=symbol or None,metric=metric,
-                    date_mode=date_mode,day=day or None,month=month or None,
-                    start=start or None,end=end or None,signals_only=signals_only,
-                    repeat_price_tolerance_pct=repeat_price_tolerance_pct,
-                    repeat_max_gap_sessions=repeat_max_gap_sessions,
-                )
-            except Exception as exc:
-                app.logger.exception('SP500 Seven calculation failed')
-                error=f'{type(exc).__name__}: {exc}'
-
-        return render_template(
-            'sp500_seven.html',
-            result=result,error=error,symbols=symbols,
-            scope=scope,symbol=symbol,metric=metric,date_mode=date_mode,
-            day=day,month=month,start=start,end=end,signals_only=signals_only,
-            repeat_price_tolerance_pct=repeat_price_tolerance_pct,
-            repeat_max_gap_sessions=repeat_max_gap_sessions,
-            refresh_status=refresh_status,
-        )
-
-    @app.post('/sp500-seven/refresh')
-    @auth
-    def sp500_seven_refresh():
-        import subprocess,sys
-        subprocess.Popen(
-            [sys.executable,'-m','monitor.sp500_seven_refresh_once'],
-            cwd='/app',
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-        flash('بدأ تحديث قائمة وأسعار S&P 500. أول تحميل قد يأخذ وقتًا لأنه يبني التاريخ.')
-        return redirect(url_for('sp500_seven'))
-
-    @app.get('/sp500-seven/screener')
-    @auth
-    def sp500_seven_screener():
-        from monitor.sp500_seven_system import repeat_price_time_screener
-        try: price_tolerance_pct=float(request.args.get('price_tolerance_pct','1.0'))
-        except Exception: price_tolerance_pct=1.0
-        try: max_gap_sessions=int(request.args.get('max_gap_sessions','20'))
-        except Exception: max_gap_sessions=20
-        recent_raw=request.args.get('recent_days','90').strip()
-        if recent_raw.lower() in ('','all','none'): recent_days=None
-        else:
-            try: recent_days=int(recent_raw)
-            except Exception: recent_days=90
-
-        error=None;result=None
-        try:
-            result=repeat_price_time_screener(
-                price_tolerance_pct=price_tolerance_pct,
-                max_gap_sessions=max_gap_sessions,
-                recent_days=recent_days,
-            )
-        except Exception as exc:
-            app.logger.exception('SP500 repeat screener failed')
-            error=f'{type(exc).__name__}: {exc}'
-
-        rule_only=request.args.get('rule_only','0')=='1'
-        rule_match_count=sum(1 for r in result['rows'] if r.get('breakout_rule_match')) if result else 0
-        if result and rule_only:
-            result=dict(result)
-            result['rows']=[r for r in result['rows'] if r.get('breakout_rule_match')]
-            result['count']=len(result['rows'])
-
-        return render_template(
-            'sp500_seven_screener.html',
-            result=result,error=error,
-            rule_only=rule_only,rule_match_count=rule_match_count,
-            price_tolerance_pct=price_tolerance_pct,
-            max_gap_sessions=max_gap_sessions,
-            recent_days=recent_days if recent_days is not None else 'all',
-        )
-
-    @app.get('/sp500-seven/hourly')
-    @auth
-    def sp500_hourly_screener():
-        from monitor.sp500_seven_hourly import screener
-        try: tol=float(request.args.get('price_tolerance_pct','1.0'))
-        except (TypeError,ValueError):tol=1.0
-        try: gap=int(request.args.get('max_gap_bars','20'))
-        except (TypeError,ValueError):gap=20
-        try:
-            recent_raw=request.args.get('recent_bars','300')
-            recent=None if recent_raw=='all' else max(0,int(recent_raw))
-        except (TypeError,ValueError):recent=300
-        rule_only=request.args.get('rule_only','0')=='1'
-        result=None;error=None;match_count=0
-        try:
-            result=screener(max(0,min(tol,20)),max(1,min(gap,250)),recent)
-            match_count=sum(1 for r in result['rows'] if r['breakout_rule_match'])
-            if rule_only:
-                result=dict(result,rows=[r for r in result['rows'] if r['breakout_rule_match']]);result['count']=len(result['rows'])
-        except Exception as exc:
-            app.logger.exception('SP500 hourly screener failed');error=f'{type(exc).__name__}: {exc}'
-        return render_template('sp500_seven_hourly.html',result=result,error=error,
-            price_tolerance_pct=tol,max_gap_bars=gap,recent_bars=recent if recent is not None else 'all',rule_only=rule_only,rule_match_count=match_count)
-
-    @app.get('/dodz')
-    @auth
-    def dodz_dashboard():
-        from monitor.dodz_system import dashboard as dodz_view
-        try:
-            raw_days=request.args.get('days','all')
-            days=None if raw_days=='all' else int(raw_days)
-            if days is not None and days not in (7,14,30,45,60):days=None
-            result=dodz_view(status=request.args.get('status','ALL'),
-                factor_from=int(request.args.get('factor_from',2)),
-                factor_to=int(request.args.get('factor_to',19)),days=days,
-                page=int(request.args.get('page',1)),symbol=request.args.get('q',''))
-            error=None
-        except Exception as exc:
-            app.logger.exception('DODZ dashboard failed');result=None;error=f'{type(exc).__name__}: {exc}'
-        return render_template('dodz_dashboard.html',result=result,error=error)
-
-    @app.get('/us-all-seven/hourly')
-    @auth
-    def us_all_seven_hourly():
-        from monitor.us_all_hourly_dashboard import dashboard
-        try:
-            raw=request.args.get('days','all')
-            days=None if raw=='all' else int(raw)
-            if days is not None and days not in (7,14,30,45,60):days=60
-            page=max(1,int(request.args.get('page','1')))
-            raw_min=request.args.get('gap_min','').strip()
-            raw_max=request.args.get('gap_max','').strip()
-            gap_min=int(raw_min) if raw_min else None
-            gap_max=int(raw_max) if raw_max else None
-            factor_cap=int(request.args.get('max_factor',request.args.get('factor_to','7')))
-            factor_from=int(request.args.get('factor_from','2'))
-            signal_time=request.args.get('signal_time','').strip()
-            hold_bars=int(request.args.get('hold_bars',request.args.get('hold_days','0')))
-            result=dashboard(max_factor=factor_cap,min_factor=factor_from,days=days,status=request.args.get('status','ALL'),
-                query=request.args.get('q',''),page=page,gap_min=gap_min,gap_max=gap_max,signal_time=signal_time,hold_bars=hold_bars)
-            error=None
-        except Exception as exc:
-            app.logger.exception('US all hourly dashboard failed')
-            result=None;error=f'{type(exc).__name__}: {exc}'
-        return render_template('us_all_seven_hourly.html',result=result,error=error)
-
-    @app.get('/sp500-seven/day/<day>')
-    @auth
-    def sp500_seven_day(day):
-        from monitor.sp500_seven_system import market_day_stock_details
-        try:
-            dt=datetime.strptime(day,'%Y-%m-%d').date()
-        except ValueError:
-            abort(400,description='Invalid date.')
-        kind=request.args.get('kind','double')
-        try:
-            rows=market_day_stock_details(dt,kind=kind);error=None
-        except Exception as exc:
-            rows=[];error=f'{type(exc).__name__}: {exc}'
-        return render_template('sp500_seven_day_stocks.html',day=day,rows=rows,error=error,kind=kind)
-
     return app
