@@ -740,9 +740,9 @@ def create_app(db=None,test_config=None):
             factor_cap=int(request.args.get('max_factor',request.args.get('factor_to','7')))
             factor_from=int(request.args.get('factor_from','2'))
             signal_time=request.args.get('signal_time','').strip()
-            hold_days=int(request.args.get('hold_days','0'))
+            hold_bars=int(request.args.get('hold_bars',request.args.get('hold_days','0')))
             result=dashboard(max_factor=factor_cap,min_factor=factor_from,days=days,status=request.args.get('status','ALL'),
-                query=request.args.get('q',''),page=page,gap_min=gap_min,gap_max=gap_max,signal_time=signal_time,hold_days=hold_days)
+                query=request.args.get('q',''),page=page,gap_min=gap_min,gap_max=gap_max,signal_time=signal_time,hold_bars=hold_bars)
             error=None
         except Exception as exc:
             app.logger.exception('US all hourly dashboard failed')
