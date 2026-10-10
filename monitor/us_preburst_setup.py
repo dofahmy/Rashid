@@ -72,33 +72,74 @@ def historical(filepath):
     upsert(rows,'historical')
     return {'mode':'historical','rows':len(rows),'unique_symbols':len(set(x['symbol'] for x in rows))}
 
-def current():
-    # Use the same technical-indicator formulas as the historical preburst study.
+def _features_row(sym, data, mode, offset=0):
     from monitor.us_preburst_research import features
-    rows=[];prev=None;buf=[];count=0
+    if len(data) < 22 + offset: return None
+    selected=data[:len(data)-offset] if offset else data
+    df=pd.DataFrame(selected, columns=['date','open','high','low','close','volume'])
+    for col in ('open','high','low','close','volume'):
+        df[col]=pd.to_numeric(df[col],errors='coerce')
+    vals=features(df,len(df))
+    item={'mode':mode,'symbol':sym,'reference_utc':str(selected[-1][0]),
+          'start_utc':None,'peak_utc':None,'rise_pct':None,'bars_to_peak':None}
+    for key in COLS:
+        v=finite(vals.get('position_20' if key=='position_20_pct' else key))
+        item[key]=v*100 if key=='position_20_pct' and v is not None else v
+    return item
+
+def current():
+    # Two snapshots allow identifying newly-matching setups at the most recent bar.
+    rows=[];previous=[];prev=None;buf=[];count=0
     def process(sym,data):
         nonlocal count
         count+=1
-        if len(data)<21:return
-        df=pd.DataFrame(data,columns=['date','open','high','low','close','volume'])
-        for col in ('open','high','low','close','volume'):df[col]=pd.to_numeric(df[col],errors='coerce')
-        feats=features(df,len(df))
-        item={'mode':'current','symbol':sym,'reference_utc':str(data[-1][0]),'start_utc':None,'peak_utc':None,'rise_pct':None,'bars_to_peak':None}
-        for key in COLS:
-            if key=='position_20_pct':
-                v=finite(feats.get('position_20'))
-                item[key]=v*100 if v is not None else None
-            else:item[key]=finite(feats.get(key))
-        rows.append(item)
-        if count%500==0:print(f'Current preburst features: {count} stocks',flush=True)
+        row=_features_row(sym,data,'current')
+        old=_features_row(sym,data,'current_prev',offset=1)
+        if row:rows.append(row)
+        if old:previous.append(old)
+        if count%500==0:print(f'Current preburst: {count} stocks',flush=True)
     with database()() as con:
         for r in con.execute(text('SELECT symbol,bar_time,open,high,low,close,volume FROM us_all_seven_hourly_bars ORDER BY symbol,bar_time')):
-            sym=str(r[0]);
+            sym=str(r[0])
             if prev is not None and prev!=sym:process(prev,buf);buf=[]
             prev=sym;buf.append(tuple(r[1:]))
         if prev is not None:process(prev,buf)
-    upsert(rows,'current')
-    return {'mode':'current','rows':len(rows),'unique_symbols':len(rows)}
+    upsert(rows,'current');upsert(previous,'current_prev')
+    return {'market':'us','rows':len(rows),'previous_rows':len(previous)}
+
+def egypt_current():
+    from monitor.gann_analysis import _daily_table
+    from sqlalchemy import select
+    rows=[];previous=[];count=0
+    with database()() as con:
+        tbl=_daily_table(con)
+        names={c.name.lower():c for c in tbl.c}
+        def pick(*opts):
+            for opt in opts:
+                if opt in names:return names[opt]
+            return None
+        cs=pick('symbol','ticker','sym'); cd=pick('session_date','date','d')
+        cc=pick('c','close'); ch=pick('h','high'); cl=pick('l','low')
+        co=pick('o','open');cv=pick('v','volume')
+        if not all(x is not None for x in [cs,cd,cc,ch,cl]):
+            raise RuntimeError('EGX daily table is missing required symbol/date/OHLC columns')
+        fields=[cs,cd,co if co is not None else cc,ch,cl,cc,cv if cv is not None else cc]
+        result=con.execute(select(*fields).where(cs.ilike('%.CA')).order_by(cs,cd))
+        prev=None;buf=[]
+        def process(sym,data):
+            nonlocal count
+            count+=1
+            row=_features_row(sym,data,'egypt')
+            old=_features_row(sym,data,'egypt_prev',offset=1)
+            if row:rows.append(row)
+            if old:previous.append(old)
+        for r in result:
+            sym=str(r[0])
+            if prev is not None and prev!=sym:process(prev,buf);buf=[]
+            prev=sym;buf.append(tuple(r[1:]))
+        if prev is not None:process(prev,buf)
+    upsert(rows,'egypt');upsert(previous,'egypt_prev')
+    return {'market':'egypt','rows':len(rows),'previous_rows':len(previous),'timeframe':'daily'}
 
 def parse_filters(args):
     selected=[];settings={}
@@ -113,28 +154,74 @@ def parse_filters(args):
 def dashboard(args):
     ensure()
     mode=args.get('mode','historical')
+    market=args.get('market','us')
     if mode not in ('historical','current'):mode='historical'
+    if market not in ('us','sp500','egypt'):market='us'
     selected,settings=parse_filters(args)
-    where=['mode=:mode'];params={'mode':mode}
+    storage='historical' if mode=='historical' else ('egypt' if market=='egypt' else 'current')
+    prev_storage=storage+'_prev' if mode=='current' else None
+    params={'mode':storage};where=['mode=:mode']
     for key in selected:
-        # Missing feature means the row cannot meet the enabled requirement.
         where.append(f'"{key}" BETWEEN :lo_{key} AND :hi_{key}')
-        params['lo_'+key]=settings[key]['min'];params['hi_'+key]=settings[key]['max']
-    clause=' AND '.join(where)
+        params['lo_'+key]=settings[key]['min']; params['hi_'+key]=settings[key]['max']
+    # S&P500 universe: membership from the project's database, not a hard-coded ticker list.
+    if market=='sp500':
+        from monitor.sp500_seven_system import list_symbols
+        members=list_symbols()
+        from sqlalchemy import bindparam
+        member_clause='symbol IN :members'
+        params['members']=members or ['___EMPTY___']
+    elif market=='egypt' and mode=='historical':
+        # The 471-stock retrospective study contains US stocks only.
+        member_clause="symbol LIKE '%.CA'"
+    else:member_clause='1=1'
+    from sqlalchemy import bindparam
+    def query(sql, bind_members=True):
+        stmt=text(sql)
+        if market=='sp500' and bind_members:
+            stmt=stmt.bindparams(bindparam('members',expanding=True))
+        return stmt
+    filtered=' AND '.join(where)+' AND '+member_clause
+    baseline_clause='mode=:mode AND '+member_clause
+    # For current modes, rows are sorted with genuinely NEW matches at the top.
     with database()() as con:
-        baseline=con.execute(text(f'SELECT COUNT(*) rows, COUNT(DISTINCT symbol) stocks FROM {TABLE} WHERE mode=:mode'),{'mode':mode}).mappings().one()
-        stat=con.execute(text(f'SELECT COUNT(*) rows, COUNT(DISTINCT symbol) stocks FROM {TABLE} WHERE {clause}'),params).mappings().one()
-        rows=con.execute(text(f'''SELECT symbol,reference_utc,start_utc,rise_pct,bars_to_peak,{','.join('"'+x+'"' for x in COLS)}
-          FROM {TABLE} WHERE {clause} ORDER BY {'rise_pct DESC NULLS LAST,' if mode=='historical' else ''} symbol,reference_utc DESC LIMIT 200'''),params).mappings().all()
-    return {'mode':mode,'settings':settings,'selected':selected,'baseline':dict(baseline),'stats':dict(stat),
-      'rows':[dict(r) for r in rows],'limited':int(stat['rows'])>len(rows)}
+        baseline=con.execute(query(f'SELECT COUNT(*) rows,COUNT(DISTINCT symbol) stocks FROM {TABLE} WHERE {baseline_clause}'),params).mappings().one()
+        stat=con.execute(query(f'SELECT COUNT(*) rows,COUNT(DISTINCT symbol) stocks FROM {TABLE} WHERE {filtered}'),params).mappings().one()
+        all_rows=con.execute(query(f"""SELECT symbol,reference_utc,start_utc,rise_pct,bars_to_peak,{','.join('"'+x+'"' for x in COLS)}
+          FROM {TABLE} WHERE {filtered} ORDER BY reference_utc DESC,symbol ASC LIMIT 10000"""),params).mappings().all()
+        old_map={}
+        if prev_storage and all_rows:
+            syms=[r['symbol'] for r in all_rows]
+            old_rows=con.execute(text(f"""SELECT symbol,{','.join('"'+x+'"' for x in COLS)} FROM {TABLE}
+                WHERE mode=:previous AND symbol IN :symbols""").bindparams(bindparam('symbols',expanding=True)),
+                {'previous':prev_storage,'symbols':syms}).mappings().all()
+            old_map={r['symbol']:r for r in old_rows}
+    rows=[]
+    for item in all_rows:
+        r=dict(item)
+        if prev_storage:
+            old=old_map.get(r['symbol'])
+            was_matching=bool(old) and all(old[k] is not None and settings[k]['min']<=old[k]<=settings[k]['max'] for k in selected)
+            r['signal_status']=('غير محدد' if old is None else ('مستمر' if was_matching else 'جديد'))
+            r['is_new']=old is not None and not was_matching
+        else:
+            r['signal_status']='تاريخي';r['is_new']=False
+        rows.append(r)
+    if prev_storage:rows.sort(key=lambda r:(not r['is_new'],-pd.Timestamp(r['reference_utc']).timestamp(),r['symbol']))
+    return {'mode':mode,'market':market,'timeframe':'يومي' if market=='egypt' else 'ساعة',
+      'settings':settings,'selected':selected,'baseline':dict(baseline),'stats':dict(stat),
+      'rows':rows[:200],'limited':int(stat['rows'])>200,
+      'new_count':sum(r['is_new'] for r in rows),
+      'note':'الوضع التاريخي مبني على الأسهم الأمريكية فقط' if mode=='historical' and market=='egypt' else ''}
 
 def main():
     p=argparse.ArgumentParser()
     p.add_argument('--historical-features',default='',help='preburst_episodes_features.csv from retrospective run')
     p.add_argument('--build-current',action='store_true')
+    p.add_argument('--build-egypt',action='store_true')
     a=p.parse_args()
-    if not a.historical_features and not a.build_current:p.error('specify --historical-features and/or --build-current')
+    if not a.historical_features and not a.build_current and not a.build_egypt:p.error('specify --historical-features and/or --build-current')
     if a.historical_features:print(json.dumps(historical(a.historical_features),ensure_ascii=False),flush=True)
     if a.build_current:print(json.dumps(current(),ensure_ascii=False),flush=True)
+    if a.build_egypt:print(json.dumps(egypt_current(),ensure_ascii=False),flush=True)
 if __name__=='__main__':main()
