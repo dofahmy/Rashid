@@ -743,7 +743,7 @@ def create_app(db=None,test_config=None):
         except Exception as exc:
             app.logger.exception('Preburst setup screener error')
             error=f'{type(exc).__name__}: {exc}'
-            result={'mode':'historical','settings':{k:{'label':v[0],'min':v[1],'max':v[2],'active':k in DEFAULT_ACTIVE} for k,v in FEATURES.items()},'baseline':{'stocks':0,'rows':0},'stats':{'stocks':0,'rows':0},'rows':[],'limited':False}
+            result={'mode':params.get('mode','historical'),'market':params.get('market','us'),'timeframe':'ساعة','note':'','settings':{k:{'label':v[0],'min':v[1],'max':v[2],'active':k in DEFAULT_ACTIVE} for k,v in FEATURES.items()},'baseline':{'stocks':0,'rows':0},'stats':{'stocks':0,'rows':0},'rows':[],'limited':False}
         return render_template('us_preburst_setup.html',result=result,error=error)
 
     @app.get('/dodz')
