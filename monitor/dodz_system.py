@@ -123,7 +123,6 @@ def run(output_dir, publish=False):
     (out/'dodz_summary.json').write_text(json.dumps(summary,ensure_ascii=False,indent=2))
     if publish:
         ensure_table()
-        from sqlalchemy import text
         fields=('symbol','signal_utc','squaring_factor','factors','entry_price','gap_1h','touches','deadline_bars','status','exit_reason','exit_utc','exit_price','bars_to_exit','observed_bars','last_price','realized_return_pct','floating_return_pct','combined_return_pct','max_adverse_pct','data_end_utc')
         with database().begin() as s:
             s.execute(text(f'DELETE FROM {TRADES}'))
