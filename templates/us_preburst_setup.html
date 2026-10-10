@@ -3,7 +3,13 @@
 <div class="panel">فلتر تفاعلي: القيم الافتراضية مأخوذة من توزيع المؤشرات قبل طفرات الأسهم الـ471، وليست شروطًا مضمونة لاسترجاعها كلها. الوضع التاريخي يفحص ما قبل القاع بأثر رجعي، ولا يمثل إشارة دخول قابلة للتنفيذ عند معرفة القاع مستقبلًا.</div>
 {% if error %}<div class="panel warning">{{error}}</div>{% endif %}
 <form class="panel" method="get">
-<label>وضع الفحص: <select name="mode"><option value="historical" {% if result.mode=='historical' %}selected{% endif %}>قبل الطفرات تاريخيًا — الـ471 سهم</option><option value="current" {% if result.mode=='current' %}selected{% endif %}>آخر شمعة محفوظة — السوق الأمريكي</option></select></label>
+<label>السوق: <select name="market">
+<option value="us" {% if result.market=='us' %}selected{% endif %}>السوق الأمريكي كله</option>
+<option value="sp500" {% if result.market=='sp500' %}selected{% endif %}>S&P 500</option>
+<option value="egypt" {% if result.market=='egypt' %}selected{% endif %}>البورصة المصرية</option>
+</select></label> <label>وضع الفحص: <select name="mode"><option value="historical" {% if result.mode=='historical' %}selected{% endif %}>قبل الطفرات تاريخيًا — الـ471 سهم</option><option value="current" {% if result.mode=='current' %}selected{% endif %}>آخر شمعة محفوظة — السوق الأمريكي</option></select></label>
+<p class="muted">الفريم: {{result.timeframe}} — في فحص السوق الحالي: «جديد» يعني أول تطابق في آخر شمعة مقارنة بالسابقة؛ «مستمر» يعني أنه كان مطابقًا في السابقة أيضًا. النتائج مرتبّة بالجديد أولًا ثم الأحدث فالأقدم. تحديث البيانات يتطلب تشغيل أمر تجهيز السوق.</p>
+{% if result.note %}<div class="warning">{{result.note}}</div>{% endif %}
 <p class="muted">فعّلي المؤشر اللي محتاجة تدخليه في شروط الفرز. كل شرط له حد أدنى وأقصى.</p>
 <div style="overflow-x:auto"><table><thead><tr><th>تفعيل</th><th>المؤشر</th><th>من</th><th>إلى</th></tr></thead><tbody>
 {% for key,conf in result.settings.items() %}
@@ -18,8 +24,8 @@
 <div class="panel"><div class="muted">الإشارات/الصفوف المطابقة</div><div class="metric">{{result.stats.rows}}</div></div>
 <div class="panel"><div class="muted">الأسهم غير المطابقة</div><div class="metric">{{result.baseline.stocks - result.stats.stocks}}</div></div></div>
 {% if result.baseline.rows == 0 %}<div class="panel warning">قاعدة الشاشة خالية في هذا الوضع. شغّلي أمر تجهيز بيانات الدراسة الموضح في README_AR.txt أولًا.</div>{% endif %}
-<div class="panel tablewrap"><h2>النتائج (أول 200 صف)</h2><table><thead><tr><th>السهم</th><th>الوقت المرجعي UTC</th><th>RSI</th><th>Momentum5 %</th><th>Momentum20 %</th><th>SMA20 %</th><th>عائد20 %</th><th>موقع النطاق20 %</th><th>الفوليوم</th><th>طفرة تاريخية %</th></tr></thead><tbody>
-{% for r in result.rows %}<tr><td><strong>{{r.symbol}}</strong></td><td>{{r.reference_utc}}</td><td>{{'%.2f'|format(r.rsi14) if r.rsi14 is not none else '—'}}</td><td>{{'%.2f'|format(r.momentum5_pct) if r.momentum5_pct is not none else '—'}}</td><td>{{'%.2f'|format(r.momentum20_pct) if r.momentum20_pct is not none else '—'}}</td><td>{{'%.2f'|format(r.close_vs_sma20_pct) if r.close_vs_sma20_pct is not none else '—'}}</td><td>{{'%.2f'|format(r.return_20) if r.return_20 is not none else '—'}}</td><td>{{'%.2f'|format(r.position_20_pct) if r.position_20_pct is not none else '—'}}</td><td>{{'%.2f'|format(r.volume5_vs_50) if r.volume5_vs_50 is not none else '—'}}</td><td>{{'%.2f'|format(r.rise_pct) if r.rise_pct is not none else '—'}}</td></tr>{% else %}<tr><td colspan="10">لا توجد نتائج مطابقة لهذه الشروط، أو البيانات لم تُجهَّز بعد.</td></tr>{% endfor %}
+<div class="panel tablewrap"><h2>النتائج (أول 200 صف) — الجديد أولًا، ثم الأحدث فالأقدم</h2><table><thead><tr><th>الحالة</th><th>السهم</th><th>الوقت المرجعي UTC</th><th>RSI</th><th>Momentum5 %</th><th>Momentum20 %</th><th>SMA20 %</th><th>عائد20 %</th><th>موقع النطاق20 %</th><th>الفوليوم</th><th>طفرة تاريخية %</th></tr></thead><tbody>
+{% for r in result.rows %}<tr><td><strong>{{r.signal_status}}</strong></td><td><strong>{{r.symbol}}</strong></td><td>{{r.reference_utc}}</td><td>{{'%.2f'|format(r.rsi14) if r.rsi14 is not none else '—'}}</td><td>{{'%.2f'|format(r.momentum5_pct) if r.momentum5_pct is not none else '—'}}</td><td>{{'%.2f'|format(r.momentum20_pct) if r.momentum20_pct is not none else '—'}}</td><td>{{'%.2f'|format(r.close_vs_sma20_pct) if r.close_vs_sma20_pct is not none else '—'}}</td><td>{{'%.2f'|format(r.return_20) if r.return_20 is not none else '—'}}</td><td>{{'%.2f'|format(r.position_20_pct) if r.position_20_pct is not none else '—'}}</td><td>{{'%.2f'|format(r.volume5_vs_50) if r.volume5_vs_50 is not none else '—'}}</td><td>{{'%.2f'|format(r.rise_pct) if r.rise_pct is not none else '—'}}</td></tr>{% else %}<tr><td colspan="11">لا توجد نتائج مطابقة لهذه الشروط، أو البيانات لم تُجهَّز بعد.</td></tr>{% endfor %}
 </tbody></table>{% if result.limited %}<p class="muted">يعرض أول 200 صف لتجنب بطء المتصفح.</p>{% endif %}</div>
 <div class="panel muted">مهم: العدد 471 هو حجم العينة الأصلية وليس عددًا مفروضًا للنتائج. البيانات السابقة للقاع فقط هي الداخلة في الفلاتر التاريخية. بناء التوقع المستقبلي أو اختبار ارتفاع خلال 100–250 يوم غير متضمن بهذه الشاشة.</div>
 {% endblock %}
