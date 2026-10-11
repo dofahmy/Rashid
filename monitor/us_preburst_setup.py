@@ -184,7 +184,12 @@ def dashboard(args):
         engine_mode='egypt' if market=='egypt' else 'us'
         result=current_dashboard(engine_mode,selected,settings,market)
         from monitor.us_preburst_ledger import report as historical_ledger_report
-        ledger = historical_ledger_report(market, selected, settings)
+        try:
+            target_pct=float(args.get('target_pct',100))
+        except (TypeError,ValueError):
+            raise ValueError('المستهدف يجب أن يكون رقمًا')
+        if not 0<target_pct<=10000:raise ValueError('المستهدف يجب أن يكون بين 0 و10000%')
+        ledger = historical_ledger_report(market, selected, settings, target_pct=target_pct)
         # Keep the same return structure used by the existing Flask view/template.
         return {'mode':mode,'market':market,'timeframe':'يومي' if market=='egypt' else 'ساعة',
           'settings':settings,'selected':selected,
@@ -194,7 +199,7 @@ def dashboard(args):
           'new_count':result['new_confirmed'],
           'diagnostics':{'new_confirmed':result['new_confirmed'],'ongoing':result['ongoing'],
              'unknown':result['unknown'],'history_bars':'كل الشموع المتاحة','old_snapshot_rows':result['history_loaded']},
-          'ledger':ledger,'by_date':result['by_date'],'stale_rows':result['stale_rows'],'stale_count':result['stale_count'], 'market_latest_utc':result['market_latest_utc'],'fresh_available':result['fresh_available'], 'note':''}
+          'ledger':ledger,'target_pct':target_pct,'by_date':result['by_date'],'stale_rows':result['stale_rows'],'stale_count':result['stale_count'], 'market_latest_utc':result['market_latest_utc'],'fresh_available':result['fresh_available'], 'note':''}
     storage='historical' if mode=='historical' else ('egypt' if market=='egypt' else 'current')
     prev_storage=storage+'_prev' if mode=='current' else None
     params={'mode':storage};where=['mode=:mode']

@@ -14,8 +14,8 @@ from monitor.us_preburst_v5_history import TABLE
 LEDGER = 'us_preburst_signal_ledger_v6'
 HORIZONS = (20, 50, 100, 250)
 
-def fingerprint(selected, settings):
-    payload = [[k, float(settings[k]['min']), float(settings[k]['max'])] for k in sorted(selected)]
+def fingerprint(selected, settings, target_pct=100.0):
+    payload = {"filters": [[k, float(settings[k]['min']), float(settings[k]['max'])] for k in sorted(selected)], "target_pct":float(target_pct)}
     return hashlib.sha256(json.dumps(payload, separators=(',', ':')).encode()).hexdigest()[:24]
 
 def ensure():
@@ -26,6 +26,9 @@ def ensure():
           entry_close DOUBLE PRECISION, exit_close DOUBLE PRECISION,
           return_pct DOUBLE PRECISION, max_rise_during_match_pct DOUBLE PRECISION,
           bars_matched INTEGER NOT NULL, bars_available_after INTEGER NOT NULL,
+          exit_reasons TEXT, match_low DOUBLE PRECISION, match_high DOUBLE PRECISION,
+          match_range_pct DOUBLE PRECISION, target_pct DOUBLE PRECISION,
+          target_hit_utc TIMESTAMP, target_hit_bars INTEGER, target_hit_high DOUBLE PRECISION,
           max_rise_20_pct DOUBLE PRECISION, max_rise_50_pct DOUBLE PRECISION,
           max_rise_100_pct DOUBLE PRECISION, max_rise_250_pct DOUBLE PRECISION,
           max_rise_20_complete BOOLEAN NOT NULL, max_rise_50_complete BOOLEAN NOT NULL,
@@ -33,8 +36,14 @@ def ensure():
           PRIMARY KEY(filter_id, market, symbol, start_utc)
         )'''))
         con.execute(text(f'CREATE INDEX IF NOT EXISTS ix_{LEDGER}_filter ON {LEDGER}(filter_id,market,start_utc DESC)'))
+        # Existing V6 installations: safely add columns without dropping history.
+        for col, typ in [('exit_reasons','TEXT'),('match_low','DOUBLE PRECISION'),
+                         ('match_high','DOUBLE PRECISION'),('match_range_pct','DOUBLE PRECISION'),
+                         ('target_pct','DOUBLE PRECISION'),('target_hit_utc','TIMESTAMP'),
+                         ('target_hit_bars','INTEGER'),('target_hit_high','DOUBLE PRECISION')]:
+            con.execute(text(f'ALTER TABLE {LEDGER} ADD COLUMN IF NOT EXISTS {col} {typ}'))
 
-def _stock_events(sym, bars, selected, settings, market, fid):
+def _stock_events(sym, bars, selected, settings, market, fid, target_pct=100.0):
     if not bars: return []
     # rows (time, open, high, low, close, indicators...) already ordered ascending
     mask=[]
@@ -59,11 +68,39 @@ def _stock_events(sym, bars, selected, settings, market, fid):
         exit_price=bars[exit_i]['close']
         status='مغلقة' if closed else 'مفتوحة عند آخر بيانات السهم'
         def pct(p):return (100*(p/entry-1)) if entry and p is not None and np.isfinite(p) else None
+        matched=bars[start:end+1]
+        lows=[float(x['low']) for x in matched if x.get('low') is not None and np.isfinite(x['low'])]
+        highs=[float(x['high']) for x in matched if x.get('high') is not None and np.isfinite(x['high'])]
+        low_price=min(lows) if lows else None
+        high_price=max(highs) if highs else None
+        reasons=[]
+        if closed:
+            for k in selected:
+                val=bars[exit_i].get(k)
+                lo,hi=settings[k]['min'],settings[k]['max']
+                if val is None or not np.isfinite(float(val)):
+                    reasons.append(f'{k}: غير متاح')
+                elif float(val)<lo:
+                    reasons.append(f'{k}: {float(val):.2f} أقل من {lo:g}')
+                elif float(val)>hi:
+                    reasons.append(f'{k}: {float(val):.2f} أكبر من {hi:g}')
+            if not reasons:reasons.append('انتهاء تطابق الشروط أو فقدان سعر صالح')
+        # Target is independent from ending indicator match; first later HIGH that touches it.
+        goal=entry*(1.0+target_pct/100.0)
+        target_i=next((j for j in range(start+1,min(n,start+251))
+                       if bars[j].get('high') is not None
+                       and np.isfinite(bars[j]['high']) and bars[j]['high']>=goal),None)
         row={'filter_id':fid,'market':market,'symbol':sym,
              'start_utc':bars[start]['time'],'end_utc':bars[exit_i]['time'] if closed else None,
              'status':status,'entry_close':entry,'exit_close':exit_price if closed else None,
              'return_pct':pct(exit_price),'bars_matched':end-start+1,
              'bars_available_after':n-start-1,
+             'exit_reasons':'؛ '.join(reasons) if closed else None,
+             'match_low':low_price,'match_high':high_price,
+             'match_range_pct':100*(high_price/low_price-1) if low_price and low_price>0 and high_price is not None else None,
+             'target_pct':target_pct,'target_hit_utc':bars[target_i]['time'] if target_i is not None else None,
+             'target_hit_bars':target_i-start if target_i is not None else None,
+             'target_hit_high':bars[target_i]['high'] if target_i is not None else None,
              'max_rise_during_match_pct':pct(max((x['high'] for x in bars[start+1:end+1] if x['high'] is not None),default=None))}
         for h in HORIZONS:
             future=[x['high'] for x in bars[start+1:min(n,start+h+1)] if x['high'] is not None and np.isfinite(x['high'])]
@@ -76,7 +113,7 @@ def _source_sql(con, market, selected):
     indicators=', '.join(f'h."{k}" AS "{k}"' for k in selected)
     extra=(', '+indicators) if indicators else ''
     if market=='us':
-        return f'''SELECT h.symbol,h.reference_utc AS time,b.high,b.close{extra}
+        return f'''SELECT h.symbol,h.reference_utc AS time,b.high,b.low,b.close{extra}
         FROM {TABLE} h LEFT JOIN us_all_seven_hourly_bars b
         ON b.symbol=h.symbol AND b.bar_time=h.reference_utc
         WHERE h.market=:market ORDER BY h.symbol,h.reference_utc'''
@@ -84,29 +121,29 @@ def _source_sql(con, market, selected):
     tbl=_daily_table(con); fmt=con.get_bind().dialect.identifier_preparer
     names={c.name.lower():c for c in tbl.c}
     def pick(*choices):return next((names[n] for n in choices if n in names),None)
-    sy=pick('symbol','ticker','sym');dt=pick('session_date','date','d');hi=pick('h','high');cl=pick('c','close')
-    if any(x is None for x in [sy,dt,hi,cl]):raise RuntimeError('EGX source requires symbol,date,high,close')
+    sy=pick('symbol','ticker','sym');dt=pick('session_date','date','d');hi=pick('h','high');low=pick('l','low');cl=pick('c','close')
+    if any(x is None for x in [sy,dt,hi,low,cl]):raise RuntimeError('EGX source requires symbol,date,high,close')
     tn=fmt.format_table(tbl)
     return f'''SELECT h.symbol,h.reference_utc AS time,b.{fmt.quote(hi.name)} AS high,
-        b.{fmt.quote(cl.name)} AS close{extra}
+        b.{fmt.quote(low.name)} AS low, b.{fmt.quote(cl.name)} AS close{extra}
         FROM {TABLE} h LEFT JOIN {tn} b
         ON b.{fmt.quote(sy.name)}=h.symbol
         AND CAST(b.{fmt.quote(dt.name)} AS DATE)=CAST(h.reference_utc AS DATE)
         WHERE h.market=:market ORDER BY h.symbol,h.reference_utc'''
 
-def build(market, selected, settings, progress_every=250):
-    ensure(); fid=fingerprint(selected,settings)
+def build(market, selected, settings, progress_every=250, target_pct=100.0):
+    ensure(); fid=fingerprint(selected,settings,target_pct)
     if market=='sp500':raise ValueError('Build --market us, then S&P 500 uses US records with membership filter')
     if market not in ('us','egypt'):raise ValueError(market)
     with database().begin() as con:
         con.execute(text(f'DELETE FROM {LEDGER} WHERE market=:m AND filter_id=:fid'),{'m':market,'fid':fid})
-    insert_cols=['filter_id','market','symbol','start_utc','end_utc','status','entry_close','exit_close','return_pct','max_rise_during_match_pct','bars_matched','bars_available_after']+[f'max_rise_{h}_{s}' for h in HORIZONS for s in ('pct','complete')]
+    insert_cols=['filter_id','market','symbol','start_utc','end_utc','status','entry_close','exit_close','return_pct','max_rise_during_match_pct','bars_matched','bars_available_after','exit_reasons','match_low','match_high','match_range_pct','target_pct','target_hit_utc','target_hit_bars','target_hit_high']+[f'max_rise_{h}_{s}' for h in HORIZONS for s in ('pct','complete')]
     stmt=text(f'INSERT INTO {LEDGER} ({",".join(insert_cols)}) VALUES ({",".join(":"+k for k in insert_cols)}) ON CONFLICT DO NOTHING')
     cnt=0;episodes=0;closed=0;prev=None;rows=[];batch=[]
     def flush_sym(sym, bars):
         nonlocal cnt,episodes,closed,batch
         if sym is None:return
-        cnt+=1;events=_stock_events(sym,bars,selected,settings,market,fid)
+        cnt+=1;events=_stock_events(sym,bars,selected,settings,market,fid,target_pct)
         episodes+=len(events);closed+=sum(r['status']=='مغلقة' for r in events)
         batch.extend(events)
         if len(batch)>=800:
@@ -124,13 +161,14 @@ def build(market, selected, settings, progress_every=250):
             price=r['close'];high=r['high']
             rows.append({'time':r['time'],'close':float(price) if price is not None else None,
                          'high':float(high) if high is not None else None,
+                         'low':float(r['low']) if r['low'] is not None else None,
                          **{k:r[k] for k in selected}})
         flush_sym(prev,rows)
     if batch:
         with database().begin() as writer:writer.execute(stmt,batch)
     return {'market':market,'filter_id':fid,'symbols':cnt,'episodes':episodes,'closed':closed,'open':episodes-closed}
 
-def report(market, selected, settings, limit=200):
+def report(market, selected, settings, limit=200, target_pct=100.0):
     ensure();fid=fingerprint(selected,settings)
     params={'f':fid,'m':'egypt' if market=='egypt' else 'us'}
     member_where='';membership=[]
@@ -155,12 +193,12 @@ def report(market, selected, settings, limit=200):
            LIMIT {int(limit)}'''),params).mappings().all()
     return {'total':int(agg['total']),'closed':int(agg['closed']),'opened':int(agg['opened']),
             'wins':int(agg['wins']),'avg_return':agg['avg_return'],'avg_during':agg['max_during'],
-            'rows':data,'filter_id':fid,'not_built':agg['total']==0}
+            'rows':data,'filter_id':fid,'target_pct':target_pct,'not_built':agg['total']==0}
 
 if __name__=='__main__':
     from monitor.us_preburst_setup import FEATURES, DEFAULT_ACTIVE
     p=argparse.ArgumentParser();p.add_argument('--market',choices=['us','egypt'],required=True);p.add_argument('--build',action='store_true')
-    p.add_argument('--query-string',default='',help='Optional URL query string of active setup filters')
+    p.add_argument('--query-string',default='',help='Optional URL query string of active setup filters');p.add_argument('--target-pct',type=float,default=100.0)
     a=p.parse_args()
     if a.query_string:
         from urllib.parse import parse_qs, urlsplit
@@ -171,4 +209,5 @@ if __name__=='__main__':
     else:
         settings={k:{'min':float(v[1]),'max':float(v[2])} for k,v in FEATURES.items()}
         selected=list(DEFAULT_ACTIVE)
-    print(json.dumps(build(a.market,selected,settings) if a.build else report(a.market,selected,settings),default=str,ensure_ascii=False),flush=True)
+    if a.target_pct<=0 or a.target_pct>10000:raise ValueError('target-pct must be >0 and <=10000')
+    print(json.dumps(build(a.market,selected,settings,target_pct=a.target_pct) if a.build else report(a.market,selected,settings,target_pct=a.target_pct),default=str,ensure_ascii=False),flush=True)
