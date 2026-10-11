@@ -119,10 +119,16 @@ def add_signal_prices(rows, market):
             table_name = fmt.format_table(tbl)
             sym_col, time_col, price_col = fmt.quote(sy.name),fmt.quote(dt.name),fmt.quote(cl.name)
             time_cast = 'DATE'
+            # EGX session_date is stored as VARCHAR, not PostgreSQL DATE.
+            # Compare actual dates and sort by date rather than raw text.
+            latest_time_expr = f'CAST(src.{time_col} AS DATE)'
+            start_time_expr = f'CAST(first_bar.{time_col} AS DATE)'
         else:
             table_name='us_all_seven_hourly_bars'
             sym_col,time_col,price_col='symbol','bar_time','close'
             time_cast='TIMESTAMP'
+            latest_time_expr = f'src.{time_col}'
+            start_time_expr = f'first_bar.{time_col}'
 
         for off in range(0,len(rows),100):
             batch=rows[off:off+100]
@@ -140,12 +146,12 @@ def add_signal_prices(rows, market):
                 SELECT DISTINCT ON (src.{sym_col}) src.{sym_col} AS symbol,
                     src.{price_col} AS current_price
                 FROM {table_name} src JOIN requested req ON src.{sym_col}=req.symbol
-                ORDER BY src.{sym_col},src.{time_col} DESC
+                ORDER BY src.{sym_col},{latest_time_expr} DESC
             )
             SELECT req.symbol, first_bar.{price_col} AS signal_price, latest.current_price
             FROM requested req
             LEFT JOIN {table_name} first_bar
-                ON first_bar.{sym_col}=req.symbol AND first_bar.{time_col}=req.signal_time
+                ON first_bar.{sym_col}=req.symbol AND {start_time_expr}=req.signal_time
             LEFT JOIN latest ON latest.symbol=req.symbol"""
             result={str(x['symbol']):x for x in con.execute(text(q),binds).mappings()}
             for r in batch:
