@@ -114,6 +114,8 @@ def current_dashboard(storage, selected, settings, market='us', limit=200):
     with database()() as con:
         latest=con.execute(sql(f'''SELECT symbol,MAX(reference_utc) reference_utc FROM {TABLE} WHERE market=:market{member_filter} GROUP BY symbol'''),params).mappings().all()
         lmap={r['symbol']:r['reference_utc'] for r in latest}
+        # Global market close comes from the stored universe, not from matching rows.
+        market_latest=max(lmap.values()) if lmap else None
         # Compare latest row for each symbol only; do not mistake older matching rows for live signals.
         now=con.execute(sql(f'''SELECT h.* FROM {TABLE} h JOIN
           (SELECT symbol,MAX(reference_utc) mx FROM {TABLE} WHERE market=:market{member_filter} GROUP BY symbol) q
@@ -128,7 +130,7 @@ def current_dashboard(storage, selected, settings, market='us', limit=200):
     series={}
     for row in history:series.setdefault(row['symbol'],[]).append(row)
     def matches(row):return all(row[k] is not None and settings[k]['min']<=row[k]<=settings[k]['max'] for k in selected)
-    output=[];by_date={};unknown=0
+    output=[];stale_output=[];by_date={};unknown=0
     for current in now:
         symbol=current['symbol'];hist=series.get(symbol,[])
         length=0
@@ -139,11 +141,16 @@ def current_dashboard(storage, selected, settings, market='us', limit=200):
         earlier_exists=len(hist)>length
         status=('جديد مؤكد' if length==1 and earlier_exists else 'مستمر' if length>1 and earlier_exists else 'بداية غير مؤكدة')
         if not earlier_exists:unknown+=1
-        date=str(began)[:10];by_date[date]=by_date.get(date,0)+1
-        v=dict(current);v.update(signal_started_utc=began,matching_bars=length,signal_status=status,is_new=(status=='جديد مؤكد'))
-        output.append(v)
+        fresh=(market_latest is not None and current['reference_utc']==market_latest)
+        v=dict(current);v.update(signal_started_utc=began,matching_bars=length,signal_status=(status if fresh else 'بيانات قديمة — '+status),is_new=(fresh and status=='جديد مؤكد'),is_stale=not fresh)
+        if fresh:
+            date=str(began)[:10];by_date[date]=by_date.get(date,0)+1
+            output.append(v)
+        else:
+            stale_output.append(v)
     output.sort(key=lambda r:(0 if r['is_new'] else 1,-pd.Timestamp(r['signal_started_utc']).timestamp(),r['symbol']))
-    return {'rows':output[:limit],'total':len(output),'baseline':len(lmap),'new_confirmed':sum(r['is_new'] for r in output),'ongoing':sum(r['signal_status']=='مستمر' for r in output),'unknown':unknown,'by_date':sorted(by_date.items(),reverse=True),'history_loaded':len(history)}
+    stale_output.sort(key=lambda r:(-pd.Timestamp(r['reference_utc']).timestamp(),r['symbol']))
+    return {'rows':output[:limit],'total':len(output),'baseline':len(lmap),'new_confirmed':sum(r['is_new'] for r in output),'ongoing':sum(r['signal_status']=='مستمر' for r in output),'unknown':sum(r['signal_status']=='بداية غير مؤكدة' for r in output),'by_date':sorted(by_date.items(),reverse=True),'history_loaded':len(history),'stale_count':len(stale_output),'stale_rows':stale_output[:limit],'market_latest_utc':market_latest,'fresh_available':sum(t==market_latest for t in lmap.values()) if market_latest else 0}
 
 if __name__=='__main__':
     p=argparse.ArgumentParser();p.add_argument('--build-current',action='store_true');p.add_argument('--build-egypt',action='store_true');a=p.parse_args()

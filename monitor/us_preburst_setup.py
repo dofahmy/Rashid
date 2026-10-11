@@ -192,7 +192,7 @@ def dashboard(args):
           'new_count':result['new_confirmed'],
           'diagnostics':{'new_confirmed':result['new_confirmed'],'ongoing':result['ongoing'],
              'unknown':result['unknown'],'history_bars':'كل الشموع المتاحة','old_snapshot_rows':result['history_loaded']},
-          'by_date':result['by_date'],'note':''}
+          'by_date':result['by_date'],'stale_rows':result['stale_rows'],'stale_count':result['stale_count'], 'market_latest_utc':result['market_latest_utc'],'fresh_available':result['fresh_available'], 'note':''}
     storage='historical' if mode=='historical' else ('egypt' if market=='egypt' else 'current')
     prev_storage=storage+'_prev' if mode=='current' else None
     params={'mode':storage};where=['mode=:mode']
