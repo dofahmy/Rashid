@@ -13,9 +13,9 @@ from core import database
 from monitor.us_preburst_ledger import LEDGER, fingerprint
 from monitor.us_preburst_setup import FEATURES, DEFAULT_ACTIVE, parse_filters
 
-VERSION = "V7.2-sql-alias-verified"
+VERSION = "V7.3-first-signal-per-stock"
 
-FIELDS=['market','symbol','signal_start_utc','entry_close','filter_end_utc','filter_status','days_observed','first_hit_day','first_hit_date','classification','max_rise_250d_pct','full_250_days','last_price_date','data_flag']
+FIELDS=['market','symbol','signal_start_utc','entry_close','filter_end_utc','filter_status','days_observed','first_hit_day','first_hit_date','classification','max_rise_250d_pct','max_rise_day','max_rise_date','max_rise_high','full_250_days','last_price_date','data_flag']
 
 def day(x):
     return x.date() if isinstance(x,datetime) else (x if isinstance(x,date) else datetime.fromisoformat(str(x)[:10]).date())
@@ -49,7 +49,7 @@ def daily_rows(market):
 def analyze(symbol, signal, bars, market):
     entry=signal['entry_close']; start=day(signal['start_utc'])
     data=[r for r in bars if r[0]>start] # Conservatively exclude signal date; no same-day lookahead.
-    window=data[:250]; hit=None; peak=None
+    window=data[:250]; hit=None; peak=None; peak_day=None; peak_date=None
     if entry is not None and float(entry)>0:
         goal=float(entry)*2
         for i,(dt,hi,cl) in enumerate(window,1):
@@ -57,7 +57,8 @@ def analyze(symbol, signal, bars, market):
             try: price=float(hi)
             except (ValueError,TypeError): continue
             if price>0:
-                peak=price if peak is None else max(peak,price)
+                if peak is None or price>peak:
+                    peak=price; peak_day=i; peak_date=dt
                 if hit is None and price>=goal: hit=(i,dt)
     complete=len(window)>=250
     if entry is None or float(entry)<=0: label='سعر دخول غير صالح'
@@ -70,6 +71,9 @@ def analyze(symbol, signal, bars, market):
             'days_observed':len(window),'first_hit_day':hit[0] if hit else '',
             'first_hit_date':str(hit[1]) if hit else '', 'classification':label,
             'max_rise_250d_pct':round((peak/float(entry)-1)*100,4) if peak is not None and entry and float(entry)>0 else '',
+            'max_rise_day':peak_day if peak_day is not None else '',
+            'max_rise_date':str(peak_date) if peak_date is not None else '',
+            'max_rise_high':round(peak,6) if peak is not None else '',
             'full_250_days':complete,'last_price_date':str(bars[-1][0]) if bars else '',
             'data_flag':'لا توجد أسعار تالية' if not data else ('الفترة مكتملة' if complete else 'الفترة غير مكتملة')}
 
@@ -91,18 +95,33 @@ def run(market, out_dir, query_string=''):
     signals=get_signals(storage,fid,members)
     if not signals: raise RuntimeError(f'No ledger rows for market={storage}, filter_id={fid}; build ledger with same Setup settings first.')
     out=Path(out_dir);out.mkdir(parents=True,exist_ok=True)
+    # Signals are sorted by symbol/start_utc. Keep ONLY the earliest signal per stock.
     by_symbol={}
-    for s in signals: by_symbol.setdefault(s['symbol'],[]).append(s)
+    for signal in signals:
+        by_symbol.setdefault(signal['symbol'],signal)
     counts=Counter(); rows=0; matched=set();current=None;bars=[]
-    with (out/'all_signals_250_trading_days.csv').open('w',encoding='utf-8-sig',newline='') as fp:
+    rises_by_status={'لم يحقق خلال 250 يوم':[], 'قيد المتابعة — بيانات أقل من 250 يوم':[]}
+    buckets=Counter()
+    with (out/'first_signal_per_stock_250_trading_days.csv').open('w',encoding='utf-8-sig',newline='') as fp:
         writer=csv.DictWriter(fp,fieldnames=FIELDS);writer.writeheader()
         def emit(symbol, barlist):
             nonlocal rows
             if symbol not in by_symbol: return
             matched.add(symbol)
-            for signal in by_symbol[symbol]:
-                item=analyze(symbol,signal,barlist,market);writer.writerow(item)
-                counts[item['classification']]+=1;rows+=1
+            item=analyze(symbol,by_symbol[symbol],barlist,market)
+            writer.writerow(item)
+            counts[item['classification']]+=1;rows+=1
+            cls=item['classification']
+            if cls in rises_by_status and isinstance(item['max_rise_250d_pct'],float):
+                val=item['max_rise_250d_pct']
+                rises_by_status[cls].append(val)
+                if val<0: band='below_0pct'
+                elif val<10: band='0_to_under_10pct'
+                elif val<25: band='10_to_under_25pct'
+                elif val<50: band='25_to_under_50pct'
+                elif val<75: band='50_to_under_75pct'
+                else: band='75_to_under_100pct'
+                buckets[f'{cls}__{band}']+=1
         for symbol,dt,hi,cl in daily_rows(storage):
             if symbol!=current:
                 if current is not None: emit(current,bars)
@@ -111,14 +130,29 @@ def run(market, out_dir, query_string=''):
         if current is not None:emit(current,bars)
         for symbol in sorted(by_symbol.keys()-matched):emit(symbol,[])
     evaluated=counts['متفوق']+counts['ناجح']+counts['لم يحقق خلال 250 يوم']
-    summary={'market':market,'filter_id':fid,'all_signals':len(signals),'processed_signals':rows,
+    from statistics import mean, median
+    rise_stats={}
+    for category,vals in rises_by_status.items():
+        rise_stats[category]={
+            'stocks_with_later_price_data':len(vals),
+            'average_peak_rise_pct':round(mean(vals),2) if vals else None,
+            'median_peak_rise_pct':round(median(vals),2) if vals else None,
+            'best_peak_rise_pct':round(max(vals),2) if vals else None,
+            'worst_peak_rise_pct':round(min(vals),2) if vals else None,
+        }
+    summary={'market':market,'filter_id':fid,'original_signal_rows':len(signals),
+             'distinct_stocks_first_signal_only':len(by_symbol),'ignored_repeat_signals':len(signals)-len(by_symbol),
+             'all_signals':len(by_symbol),'processed_signals':rows,
              'superior_before_day_100':counts['متفوق'],'successful_days_100_through_250':counts['ناجح'],
              'complete_no_100pct':counts['لم يحقق خلال 250 يوم'],
              'incomplete_unresolved':counts['قيد المتابعة — بيانات أقل من 250 يوم'],
              'invalid_entry':counts['سعر دخول غير صالح'],
              'decided_signals':evaluated,
              'success_rate_among_decided_pct':round(100*(counts['متفوق']+counts['ناجح'])/evaluated,2) if evaluated else None,
-             'note':'All signals included. Counts are based on 250 distinct subsequent sessions with price data; same-day High excluded to prevent lookahead. Missing trading sessions or corporate actions can distort results.'}
+             'peak_rise_for_not_reached_100pct':rise_stats,
+             'peak_rise_buckets':dict(sorted(buckets.items())),
+             'csv_file':'first_signal_per_stock_250_trading_days.csv',
+             'note':'ONE earliest signal per symbol, all later occurrences ignored permanently. Peak rise uses subsequent daily HIGH within 250 observed trading sessions (even when filter exits). A negative peak rise means every subsequent daily HIGH was below entry. Incomplete future data is not a failure. Excludes signal-day HIGH to avoid lookahead. Corporate actions, missing sessions and adjusted/unadjusted prices can distort results.'}
     (out/'summary.json').write_text(json.dumps(summary,ensure_ascii=False,indent=2),encoding='utf-8')
     return summary
 
