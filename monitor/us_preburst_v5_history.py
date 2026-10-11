@@ -115,7 +115,7 @@ def add_signal_prices(rows, market):
             sy, dt, cl = pick('symbol', 'ticker', 'sym'), pick('session_date','date','d'), pick('c','close')
             if any(x is None for x in (sy,dt,cl)):
                 raise RuntimeError('EGX OHLC source missing symbol/date/close')
-            fmt = con.dialect.identifier_preparer
+            fmt = con.get_bind().dialect.identifier_preparer
             table_name = fmt.format_table(tbl)
             sym_col, time_col, price_col = fmt.quote(sy.name),fmt.quote(dt.name),fmt.quote(cl.name)
             time_cast = 'DATE'
