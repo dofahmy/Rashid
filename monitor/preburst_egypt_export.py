@@ -14,7 +14,8 @@ from html import escape
 from pathlib import Path
 from zipfile import ZipFile, ZIP_DEFLATED
 
-from flask import Blueprint, Response, request, send_file
+from flask import Blueprint, Response, request, send_file, redirect, make_response, url_for
+from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 
 
 egypt_export_bp = Blueprint('preburst_egypt_browser_export', __name__)
@@ -26,14 +27,63 @@ _LOCK = threading.Lock()
 _STATE = {'running': False, 'error': None, 'finished': None}
 
 
+def _password():
+    return os.environ.get('PREBURST_EXPORT_PASSWORD', '')
+
+
+def _serializer():
+    # Derive a dedicated signing key; no new Railway variable required.
+    import hashlib
+    signing_key = hashlib.sha256(('preburst-egypt-export-cookie-v2:' + _password()).encode()).hexdigest()
+    return URLSafeTimedSerializer(signing_key, salt='preburst-export-v2')
+
+
+def _authenticated():
+    cookie = request.cookies.get('preburst_egypt_auth_v2')
+    if not cookie:
+        return False
+    try:
+        return _serializer().loads(cookie, max_age=4*3600) == 'admin'
+    except (BadSignature, SignatureExpired):
+        return False
+
+
 def _protect():
-    password = os.environ.get('PREBURST_EXPORT_PASSWORD', '')
-    if not password or len(password) < 12:
+    if len(_password()) < 12:
         return Response('Set PREBURST_EXPORT_PASSWORD in Railway Web Variables (at least 12 characters).', status=503)
-    auth = request.authorization
-    if not auth or not (hmac.compare_digest(auth.username or '', 'admin') and hmac.compare_digest(auth.password or '', password)):
-        return Response('Authentication required', status=401, headers={'WWW-Authenticate': 'Basic realm="PreBurst Egypt Export", charset="UTF-8"'})
+    if not _authenticated():
+        return redirect(url_for('preburst_egypt_browser_export.login'))
     return None
+
+
+@egypt_export_bp.route('/preburst/egypt-export/login', methods=['GET', 'POST'])
+def login():
+    if len(_password()) < 12:
+        return Response('Set PREBURST_EXPORT_PASSWORD in Railway Web Variables (at least 12 characters).', status=503)
+    if request.method == 'POST':
+        entered = request.form.get('password', '')
+        if hmac.compare_digest(entered, _password()):
+            result = make_response(redirect(url_for('preburst_egypt_browser_export.page')))
+            result.set_cookie('preburst_egypt_auth_v2', _serializer().dumps('admin'),
+                              max_age=4*3600, secure=True, httponly=True, samesite='Lax', path='/preburst/egypt-export')
+            result.headers['Cache-Control'] = 'no-store'
+            return result
+        return _html('<p style="color:#b22">كلمة المرور غير صحيحة.</p>' + _login_form(), 401)
+    return _html(_login_form())
+
+
+def _login_form():
+    return ('<p>اكتبي كلمة مرور التصدير الموجودة في Railway Web Variables.</p>'
+            '<form method="post" action="/preburst/egypt-export/login">'
+            '<label for="pw">كلمة المرور</label><p><input id="pw" type="password" name="password" required '
+            'autocomplete="current-password" style="padding:12px;width:90%"></p>'
+            '<button type="submit">دخول</button></form>')
+
+
+@egypt_export_bp.route('/preburst/egypt-export/health', methods=['GET'])
+def health():
+    # Public, harmless routing check. Does not leak environment or reports.
+    return Response('EGYPT_EXPORT_V2_ROUTE_OK', mimetype='text/plain', headers={'Cache-Control':'no-store'})
 
 
 def _html(body: str, status=200):
