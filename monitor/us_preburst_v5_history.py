@@ -96,61 +96,62 @@ def build(market='us'):
     return {'market':market,'symbols':count,'feature_rows':bars}
 
 def add_signal_prices(rows, market):
-    """Load close at first matching candle and last stored close for displayed rows.
+    """Enrich UI rows with exact source close at signal bar and latest recorded close.
 
-    No mutation and no guessed prices. Prices are from the source OHLC bars.
+    Return None only when the corresponding OHLC candle is genuinely unavailable.
+    Fetch in batches, with explicit Postgres timestamp casts for reliable joins.
     """
     if not rows:
         return rows
-    from sqlalchemy import text
+    from sqlalchemy import bindparam, select
+    import datetime as _dt
+
     with database()() as con:
         if market == 'egypt':
             from monitor.gann_analysis import _daily_table
             tbl = _daily_table(con)
-            names = {col.name.lower(): col for col in tbl.c}
-            def pick(*opts):
-                return next((names[key] for key in opts if key in names), None)
-            sy = pick('symbol', 'ticker', 'sym')
-            dt = pick('session_date', 'date', 'd')
-            cl = pick('c', 'close')
-            if any(x is None for x in (sy, dt, cl)):
-                raise RuntimeError('EGX price source missing symbol/date/close')
-            preparer = con.dialect.identifier_preparer
-            table_name = preparer.format_table(tbl)
-            symbol_col = preparer.quote(sy.name)
-            time_col = preparer.quote(dt.name)
-            close_col = preparer.quote(cl.name)
-            compare_time = 'CAST(req.started AS DATE)'
+            cmap = {x.name.lower(): x for x in tbl.c}
+            def pick(*opts): return next((cmap[x] for x in opts if x in cmap), None)
+            sy, dt, cl = pick('symbol', 'ticker', 'sym'), pick('session_date','date','d'), pick('c','close')
+            if any(x is None for x in (sy,dt,cl)):
+                raise RuntimeError('EGX OHLC source missing symbol/date/close')
+            fmt = con.dialect.identifier_preparer
+            table_name = fmt.format_table(tbl)
+            sym_col, time_col, price_col = fmt.quote(sy.name),fmt.quote(dt.name),fmt.quote(cl.name)
+            time_cast = 'DATE'
         else:
-            table_name = 'us_all_seven_hourly_bars'
-            symbol_col, time_col, close_col = 'symbol', 'bar_time', 'close'
-            compare_time = 'req.started'
-        for offset in range(0, len(rows), 150):
-            batch = rows[offset:offset + 150]
-            binds = {}
-            values = []
-            for idx, row in enumerate(batch):
-                values.append(f'(:sym{idx}, :started{idx})')
-                binds[f'sym{idx}'] = row['symbol']
-                binds[f'started{idx}'] = row['signal_started_utc'] or row['reference_utc']
-            query = f"""WITH req(symbol, started) AS (VALUES {','.join(values)})
-                SELECT req.symbol, at_signal.price AS signal_price, at_latest.price AS current_price
-                FROM req
-                LEFT JOIN LATERAL (
-                    SELECT src.{close_col} AS price FROM {table_name} src
-                    WHERE src.{symbol_col}=req.symbol AND src.{time_col}={compare_time}
-                    LIMIT 1
-                ) at_signal ON TRUE
-                LEFT JOIN LATERAL (
-                    SELECT src.{close_col} AS price FROM {table_name} src
-                    WHERE src.{symbol_col}=req.symbol
-                    ORDER BY src.{time_col} DESC LIMIT 1
-                ) at_latest ON TRUE"""
-            prices = {r['symbol']: r for r in con.execute(text(query), binds).mappings().all()}
-            for row in batch:
-                info = prices.get(row['symbol'])
-                row['signal_price'] = float(info['signal_price']) if info and info['signal_price'] is not None else None
-                row['current_price'] = float(info['current_price']) if info and info['current_price'] is not None else None
+            table_name='us_all_seven_hourly_bars'
+            sym_col,time_col,price_col='symbol','bar_time','close'
+            time_cast='TIMESTAMP'
+
+        for off in range(0,len(rows),100):
+            batch=rows[off:off+100]
+            binds={}; values=[]
+            for i,r in enumerate(batch):
+                key=str(r['symbol']); start=r.get('signal_started_utc') or r.get('reference_utc')
+                if isinstance(start,str):
+                    start=pd.Timestamp(start).to_pydatetime()
+                binds[f's{i}']=key
+                binds[f't{i}']=start.date() if time_cast=='DATE' and hasattr(start,'date') else start
+                values.append(f'(:s{i}, CAST(:t{i} AS {time_cast}))')
+            # Per-symbol last available close uses DISTINCT ON; start uses the exact timestamp.
+            q=f"""WITH requested(symbol,signal_time) AS (VALUES {','.join(values)}),
+            latest AS (
+                SELECT DISTINCT ON (src.{sym_col}) src.{sym_col} AS symbol,
+                    src.{price_col} AS current_price
+                FROM {table_name} src JOIN requested req ON src.{sym_col}=req.symbol
+                ORDER BY src.{sym_col},src.{time_col} DESC
+            )
+            SELECT req.symbol, first_bar.{price_col} AS signal_price, latest.current_price
+            FROM requested req
+            LEFT JOIN {table_name} first_bar
+                ON first_bar.{sym_col}=req.symbol AND first_bar.{time_col}=req.signal_time
+            LEFT JOIN latest ON latest.symbol=req.symbol"""
+            result={str(x['symbol']):x for x in con.execute(text(q),binds).mappings()}
+            for r in batch:
+                hit=result.get(str(r['symbol']))
+                r['signal_price']=float(hit['signal_price']) if hit and hit['signal_price'] is not None else None
+                r['current_price']=float(hit['current_price']) if hit and hit['current_price'] is not None else None
     return rows
 
 def current_dashboard(storage, selected, settings, market='us', limit=200):
