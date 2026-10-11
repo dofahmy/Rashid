@@ -15,7 +15,7 @@ from core import database
 from monitor.us_preburst_ledger import LEDGER, fingerprint
 from monitor.us_preburst_setup import FEATURES, DEFAULT_ACTIVE, parse_filters
 
-VERSION = "V7.5-us-250-hourly-bars-egypt-250-sessions"
+VERSION = "V7.6-egypt-order-by-fix-us-250-hourly-bars"
 
 FIELDS=['cycle_number','source_signal_count_during_cycle','first_price_date','last_price_date','available_trading_dates','first_signal_to_first_price_days','market_price_source','market_data_end_date','market_data_start_date','market_history_sessions','market_250_day_coverage','market_note','market','symbol','signal_start_utc','entry_close','filter_end_utc','filter_status','days_observed','first_hit_day','first_hit_date','classification','max_rise_250d_pct','max_rise_day','max_rise_date','max_rise_high','full_250_days','last_price_date','data_flag']
 
@@ -51,7 +51,7 @@ def daily_rows(market):
             s,d,h,c=(pre.quote(k.name) for k in (sy,dt,hi,cl)); tn=pre.format_table(t)
             stmt=text(f'''SELECT {s} AS symbol, CAST({d} AS DATE) AS bar_period, MAX(CAST({h} AS DOUBLE PRECISION)) AS bar_high, MAX(CAST({c} AS DOUBLE PRECISION)) AS bar_close
                FROM {tn} WHERE {s} LIKE '%.CA' GROUP BY {s},CAST({d} AS DATE)
-               ORDER BY {s},trade_date''').execution_options(stream_results=True,yield_per=4000)
+               ORDER BY {s},bar_period''').execution_options(stream_results=True,yield_per=4000)
         for r in sess.execute(stmt).mappings(): yield str(r['symbol']),point(r['bar_period'],market),r['bar_high'],r['bar_close']
 
 def analyze(symbol, signal, bars, market):
