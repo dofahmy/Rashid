@@ -95,6 +95,64 @@ def build(market='us'):
         if prev is not None:write(prev,buf)
     return {'market':market,'symbols':count,'feature_rows':bars}
 
+def add_signal_prices(rows, market):
+    """Load close at first matching candle and last stored close for displayed rows.
+
+    No mutation and no guessed prices. Prices are from the source OHLC bars.
+    """
+    if not rows:
+        return rows
+    from sqlalchemy import text
+    with database()() as con:
+        if market == 'egypt':
+            from monitor.gann_analysis import _daily_table
+            tbl = _daily_table(con)
+            names = {col.name.lower(): col for col in tbl.c}
+            def pick(*opts):
+                return next((names[key] for key in opts if key in names), None)
+            sy = pick('symbol', 'ticker', 'sym')
+            dt = pick('session_date', 'date', 'd')
+            cl = pick('c', 'close')
+            if any(x is None for x in (sy, dt, cl)):
+                raise RuntimeError('EGX price source missing symbol/date/close')
+            preparer = con.dialect.identifier_preparer
+            table_name = preparer.format_table(tbl)
+            symbol_col = preparer.quote(sy.name)
+            time_col = preparer.quote(dt.name)
+            close_col = preparer.quote(cl.name)
+            compare_time = 'CAST(req.started AS DATE)'
+        else:
+            table_name = 'us_all_seven_hourly_bars'
+            symbol_col, time_col, close_col = 'symbol', 'bar_time', 'close'
+            compare_time = 'req.started'
+        for offset in range(0, len(rows), 150):
+            batch = rows[offset:offset + 150]
+            binds = {}
+            values = []
+            for idx, row in enumerate(batch):
+                values.append(f'(:sym{idx}, :started{idx})')
+                binds[f'sym{idx}'] = row['symbol']
+                binds[f'started{idx}'] = row['signal_started_utc'] or row['reference_utc']
+            query = f"""WITH req(symbol, started) AS (VALUES {','.join(values)})
+                SELECT req.symbol, at_signal.price AS signal_price, at_latest.price AS current_price
+                FROM req
+                LEFT JOIN LATERAL (
+                    SELECT src.{close_col} AS price FROM {table_name} src
+                    WHERE src.{symbol_col}=req.symbol AND src.{time_col}={compare_time}
+                    LIMIT 1
+                ) at_signal ON TRUE
+                LEFT JOIN LATERAL (
+                    SELECT src.{close_col} AS price FROM {table_name} src
+                    WHERE src.{symbol_col}=req.symbol
+                    ORDER BY src.{time_col} DESC LIMIT 1
+                ) at_latest ON TRUE"""
+            prices = {r['symbol']: r for r in con.execute(text(query), binds).mappings().all()}
+            for row in batch:
+                info = prices.get(row['symbol'])
+                row['signal_price'] = float(info['signal_price']) if info and info['signal_price'] is not None else None
+                row['current_price'] = float(info['current_price']) if info and info['current_price'] is not None else None
+    return rows
+
 def current_dashboard(storage, selected, settings, market='us', limit=200):
     """Find exact latest matching-run starts from ALL available indicator snapshots."""
     ensure();condition=['market=:market'];params={'market':storage}
@@ -150,6 +208,8 @@ def current_dashboard(storage, selected, settings, market='us', limit=200):
             stale_output.append(v)
     output.sort(key=lambda r:(0 if r['is_new'] else 1,-pd.Timestamp(r['signal_started_utc']).timestamp(),r['symbol']))
     stale_output.sort(key=lambda r:(-pd.Timestamp(r['reference_utc']).timestamp(),r['symbol']))
+    add_signal_prices(output[:limit], storage)
+    add_signal_prices(stale_output[:limit], storage)
     return {'rows':output[:limit],'total':len(output),'baseline':len(lmap),'new_confirmed':sum(r['is_new'] for r in output),'ongoing':sum(r['signal_status']=='مستمر' for r in output),'unknown':sum(r['signal_status']=='بداية غير مؤكدة' for r in output),'by_date':sorted(by_date.items(),reverse=True),'history_loaded':len(history),'stale_count':len(stale_output),'stale_rows':stale_output[:limit],'market_latest_utc':market_latest,'fresh_available':sum(t==market_latest for t in lmap.values()) if market_latest else 0}
 
 if __name__=='__main__':
