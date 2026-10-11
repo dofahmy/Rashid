@@ -13,6 +13,8 @@ from core import database
 from monitor.us_preburst_ledger import LEDGER, fingerprint
 from monitor.us_preburst_setup import FEATURES, DEFAULT_ACTIVE, parse_filters
 
+VERSION = "V7.2-sql-alias-verified"
+
 FIELDS=['market','symbol','signal_start_utc','entry_close','filter_end_utc','filter_status','days_observed','first_hit_day','first_hit_date','classification','max_rise_250d_pct','full_250_days','last_price_date','data_flag']
 
 def day(x):
@@ -28,9 +30,9 @@ def daily_rows(market):
     """Yield sorted (symbol, session_date, high, close) from original price source."""
     with database()() as sess:
         if market=='us':
-            stmt=text('''SELECT symbol,CAST(bar_time AS DATE) day, MAX(high) high, MAX(close) close
+            stmt=text('''SELECT symbol,CAST(bar_time AS DATE) AS trade_date, MAX(high) AS day_high, MAX(close) AS day_close
              FROM us_all_seven_hourly_bars WHERE high>0 GROUP BY symbol,CAST(bar_time AS DATE)
-             ORDER BY symbol,day''').execution_options(stream_results=True,yield_per=4000)
+             ORDER BY symbol,trade_date''').execution_options(stream_results=True,yield_per=4000)
         else:
             from monitor.gann_analysis import _daily_table
             t=_daily_table(sess); pre=sess.get_bind().dialect.identifier_preparer
@@ -39,10 +41,10 @@ def daily_rows(market):
             sy=pick('symbol','ticker','sym'); dt=pick('session_date','date','d'); hi=pick('h','high'); cl=pick('c','close')
             if any(v is None for v in (sy,dt,hi,cl)): raise ValueError('Missing Egypt symbol/date/high/close')
             s,d,h,c=(pre.quote(k.name) for k in (sy,dt,hi,cl)); tn=pre.format_table(t)
-            stmt=text(f'''SELECT {s} symbol, CAST({d} AS DATE) day, MAX({h}) high, MAX({c}) close
+            stmt=text(f'''SELECT {s} AS symbol, CAST({d} AS DATE) AS trade_date, MAX(CAST({h} AS DOUBLE PRECISION)) AS day_high, MAX(CAST({c} AS DOUBLE PRECISION)) AS day_close
                FROM {tn} WHERE {s} LIKE '%.CA' GROUP BY {s},CAST({d} AS DATE)
-               ORDER BY {s},day''').execution_options(stream_results=True,yield_per=4000)
-        for r in sess.execute(stmt).mappings(): yield str(r['symbol']),day(r['day']),r['high'],r['close']
+               ORDER BY {s},trade_date''').execution_options(stream_results=True,yield_per=4000)
+        for r in sess.execute(stmt).mappings(): yield str(r['symbol']),day(r['trade_date']),r['day_high'],r['day_close']
 
 def analyze(symbol, signal, bars, market):
     entry=signal['entry_close']; start=day(signal['start_utc'])
@@ -122,4 +124,4 @@ def run(market, out_dir, query_string=''):
 
 if __name__=='__main__':
     p=argparse.ArgumentParser();p.add_argument('--market',required=True,choices=['egypt','us','sp500']);p.add_argument('--output-dir',required=True);p.add_argument('--query-string',default='')
-    a=p.parse_args();print(json.dumps(run(a.market,a.output_dir,a.query_string),ensure_ascii=False,indent=2),flush=True)
+    a=p.parse_args(); print(f'[PreBurst 250d] {VERSION} | file={__file__}', flush=True);print(json.dumps(run(a.market,a.output_dir,a.query_string),ensure_ascii=False,indent=2),flush=True)
