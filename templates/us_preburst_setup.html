@@ -23,7 +23,24 @@
 <div class="panel"><div class="muted">{{'مطابقة ومحدثة لآخر شمعة' if result.mode=='current' else 'الأسهم المطابقة'}}</div><div class="metric">{{result.stats.stocks}}</div></div>
 <div class="panel"><div class="muted">الإشارات/الصفوف المطابقة</div><div class="metric">{{result.stats.rows}}</div></div>
 <div class="panel"><div class="muted">{{'غير مطابقة أو بياناتها متأخرة' if result.mode=='current' else 'الأسهم غير المطابقة'}}</div><div class="metric">{{result.baseline.stocks - result.stats.stocks}}</div></div></div>
-{% if result.mode == 'current' %}<div class="panel"><strong>آخر شمعة للسوق (UTC): {{result.market_latest_utc}}</strong> — أسهم وصلت إليها: {{result.fresh_available}} — مطابقة لكن آخر بياناتها أقدم: <strong>{{result.stale_count}}</strong>. <p class="muted">الأسهم المتأخرة لا تُحسب إشارات مفتوحة حالية، حتى لو كانت مطابقة عند آخر بياناتها.</p><strong>تفصيل الحالات المحدثة:</strong> جديد مؤكد: {{result.diagnostics.new_confirmed}} — مستمر: {{result.diagnostics.ongoing}} — غير مؤكد (الشمعة السابقة غير متاحة): {{result.diagnostics.unknown}}. <span class="muted">صفوف التاريخ التي تمت مراجعتها: {{result.diagnostics.old_snapshot_rows}}. إذا كانت صفرًا، شغّلي أمر بناء تاريخ V5.</span></div>{% endif %}
+{% if result.mode == 'current' %}
+<div class="panel">
+<strong>آخر شمعة للسوق (UTC): {{ result.market_latest_utc|default('—', true) }}</strong>
+— أسهم وصلت إليها: {{ result.fresh_available|default('—', true) }}
+— مطابقة لكن آخر بياناتها أقدم: <strong>{{ result.stale_count|default(0, true) }}</strong>.
+<p class="muted">الأسهم المتأخرة لا تُحسب إشارات مفتوحة حالية، حتى لو كانت مطابقة عند آخر بياناتها.</p>
+{% set diagnostics = result.get('diagnostics') or {} %}
+{% if diagnostics %}
+<strong>تفصيل الحالات المحدثة:</strong>
+جديد مؤكد: {{ diagnostics.get('new_confirmed', '—') }}
+— مستمر: {{ diagnostics.get('ongoing', '—') }}
+— غير مؤكد: {{ diagnostics.get('unknown', '—') }}.
+<span class="muted">صفوف التاريخ التي تمت مراجعتها: {{ diagnostics.get('old_snapshot_rows', '—') }}.</span>
+{% else %}
+<span class="muted">تفاصيل الحالات غير متاحة في نتيجة هذا السوق؛ أرقام المطابقة المعروضة لا تعتمد عليها.</span>
+{% endif %}
+</div>
+{% endif %}
 {% if result.mode == 'current' and result.by_date %}<div class="panel"><h2>عدد الإشارات المفتوحة حسب تاريخ بداية التطابق</h2><table><thead><tr><th>تاريخ البداية</th><th>عدد الأسهم المطابقة حتى الآن</th></tr></thead><tbody>{% for date,n in result.by_date %}<tr><td>{{date}}</td><td>{{n}}</td></tr>{% endfor %}</tbody></table><p class="muted">الجدول يخص الإشارات المفتوحة حاليًا، وليس جميع الإشارات التاريخية المغلقة.</p></div>{% endif %}
 {% if result.baseline.rows == 0 %}<div class="panel warning">قاعدة الشاشة خالية في هذا الوضع. شغّلي أمر تجهيز بيانات الدراسة الموضح في README_AR.txt أولًا.</div>{% endif %}
 <div class="panel tablewrap"><h2>النتائج (أول 200 صف) — الجديد أولًا، ثم الأحدث فالأقدم</h2><table><thead><tr><th>الحالة</th><th>السهم</th><th>بداية فترة التطابق UTC</th><th>شموع متتالية</th><th>آخر شمعة UTC</th><th>سعر تحقق الشروط</th><th>السعر الحالي (للجديد)</th><th>RSI</th><th>Momentum5 %</th><th>Momentum20 %</th><th>SMA20 %</th><th>عائد20 %</th><th>موقع النطاق20 %</th><th>الفوليوم</th><th>طفرة تاريخية %</th></tr></thead><tbody>
