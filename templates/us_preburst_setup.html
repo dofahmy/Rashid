@@ -53,5 +53,25 @@
 {% for r in result.stale_rows %}<tr><td><strong>{{r.symbol}}</strong></td><td>{{r.reference_utc}}</td><td>{{r.signal_status}}</td><td>{{r.signal_started_utc}}</td><td>{{r.matching_bars}}</td><td>{{'%.4f'|format(r.signal_price) if r.signal_price is defined and r.signal_price is not none else '—'}}</td></tr>{% endfor %}
 </tbody></table>{% if result.stale_count > 200 %}<p class="muted">أول 200 سهم متأخر فقط.</p>{% endif %}</div>
 {% endif %}
+
+{% if result.mode == 'current' %}
+{% set ledger = result.get('ledger') or {} %}
+<div class="panel tablewrap" id="preburst-historical-ledger">
+<h2>السجل التاريخي الكامل للإشارات — المفتوحة والمغلقة</h2>
+{% if ledger.not_built %}
+<div class="warning">السجل غير محسوب لهذه الإعدادات والسوق بعد. شغّلي أمر بناء السجل التاريخي من README_AR.txt؛ تغيير حدود المؤشرات يستلزم إعادة بناء سجل هذه الحدود، وليس إعادة بناء المؤشرات.</div>
+{% else %}
+<p>إجمالي الإشارات: <b>{{ledger.total}}</b> — مغلقة: <b>{{ledger.closed}}</b> — مفتوحة عند آخر بيانات السهم: <b>{{ledger.opened}}</b> — مغلقة بعائد موجب: <b>{{ledger.wins}}</b> — متوسط عائد الإشارات المغلقة: <b>{{'%.2f'|format(ledger.avg_return) if ledger.avg_return is not none else '—'}}%</b>.</p>
+<p class="muted">الدخول = إغلاق أول شمعة مطابقة، والخروج = إغلاق أول شمعة لا تحقق الشروط. المفتوحة ليست صفقات حقيقية بل فترات تطابق تاريخية. أقصى صعود محسوب من HIGH الشموع التالية للدخول؛ 20/50/100/250 تشير إلى عدد الشموع، لا الأيام. علامة * تعني أن البيانات لم تكتمل للنافذة.</p>
+<table><thead><tr><th>السهم</th><th>الحالة</th><th>بداية UTC</th><th>سعر الدخول</th><th>نهاية UTC</th><th>سعر الخروج</th><th>العائد %</th><th>شموع التطابق</th><th>أقصى صعود أثناء التطابق %</th><th>أقصى صعود +20 %</th><th>+50 %</th><th>+100 %</th><th>+250 %</th></tr></thead><tbody>
+{% for r in ledger.rows %}
+<tr {% if r.status != 'مغلقة' %}style="background:rgba(34,197,94,.12)"{% endif %}><td><strong>{{r.symbol}}</strong></td><td>{{r.status}}</td><td>{{r.start_utc}}</td><td>{{'%.4f'|format(r.entry_close) if r.entry_close is not none else '—'}}</td><td>{{r.end_utc or '—'}}</td><td>{{'%.4f'|format(r.exit_close) if r.exit_close is not none else '—'}}</td><td>{{'%.2f'|format(r.return_pct) if r.return_pct is not none else '—'}}</td><td>{{r.bars_matched}}</td><td>{{'%.2f'|format(r.max_rise_during_match_pct) if r.max_rise_during_match_pct is not none else '—'}}</td>
+{% for h in [20,50,100,250] %}<td>{{'%.2f'|format(r['max_rise_' ~ h ~ '_pct']) if r['max_rise_' ~ h ~ '_pct'] is not none else '—'}}{% if not r['max_rise_' ~ h ~ '_complete'] %} *{% endif %}</td>{% endfor %}</tr>
+{% endfor %}
+</tbody></table>
+{% if ledger.total > ledger.rows|length %}<p class="muted">يعرض أول {{ledger.rows|length}} إشارة فقط (المفتوحة أولًا، ثم تاريخ البداية الأحدث).</p>{% endif %}
+{% endif %}
+</div>
+{% endif %}
 <div class="panel muted">مهم: العدد 471 هو حجم العينة الأصلية وليس عددًا مفروضًا للنتائج. البيانات السابقة للقاع فقط هي الداخلة في الفلاتر التاريخية. بناء التوقع المستقبلي أو اختبار ارتفاع خلال 100–250 يوم غير متضمن بهذه الشاشة.</div>
 {% endblock %}
