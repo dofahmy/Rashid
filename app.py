@@ -9,6 +9,9 @@ from core import database, Lead, Activity, Outbox, Setting, MARKETS, STATUSES, B
 
 def create_app(db=None,test_config=None):
     app=Flask(__name__)
+    from monitor.preburst_egypt_export import egypt_export_bp
+    app.register_blueprint(egypt_export_bp)
+    
     app.config.update(SECRET_KEY=os.getenv('SECRET_KEY'),MAX_CONTENT_LENGTH=32*1024,SESSION_COOKIE_HTTPONLY=True,SESSION_COOKIE_SAMESITE='Lax',SESSION_COOKIE_SECURE=os.getenv('COOKIE_SECURE','1')=='1',PERMANENT_SESSION_LIFETIME=timedelta(hours=8),ADMIN_PASSWORD_HASH=os.getenv('ADMIN_PASSWORD_HASH',''))
     if test_config: app.config.update(test_config)
     if not app.config['SECRET_KEY'] or not app.config['ADMIN_PASSWORD_HASH']: raise RuntimeError('Set SECRET_KEY and ADMIN_PASSWORD_HASH before starting administration.')
