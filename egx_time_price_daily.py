@@ -36,9 +36,18 @@ def bars_from_db():
     df['session_date'] = pd.to_datetime(df['session_date']).dt.normalize()
     for c in ('h','l','c'):
         df[c] = pd.to_numeric(df[c], errors='coerce')
-    df = df.dropna(subset=['h','l','c'])
-    df = df[(df.l > 0) & (df.h >= df.l) & (df.c > 0)]
-    return df.drop_duplicates(['symbol','session_date'], keep='last')
+    df = df.drop_duplicates(['symbol','session_date'], keep='last')
+    # Preserve a separate quality report; a close outside the day's range
+    # must not generate a touch, pivot, or ATR value.
+    df['data_error'] = np.select(
+        [df[['h','l','c']].isna().any(axis=1),
+         (df['l'] <= 0) | (df['h'] < df['l']) | (df['c'] <= 0),
+         (df['c'] < df['l'] - 1e-7) | (df['c'] > df['h'] + 1e-7)],
+        ['MISSING_PRICE', 'INVALID_RANGE_OR_PRICE', 'CLOSE_OUTSIDE_HIGH_LOW'],
+        default=''
+    )
+    return df
+
 
 def atr14(g):
     pc = g.c.shift(1)
@@ -70,8 +79,12 @@ def pivots(g, side, wing, lookback, min_atr):
     return out
 
 def run(args):
-    df=bars_from_db()
+    raw=bars_from_db()
     out=Path(args.output_dir);out.mkdir(parents=True,exist_ok=True)
+    bad = raw[raw['data_error'] != ''].copy()
+    bad.to_csv(out/'invalid_price_bars.csv', index=False, encoding='utf-8-sig')
+    # Exclude entire invalid bars, not just their signals.
+    df=raw[raw['data_error'] == ''].copy()
     records=[];latest=[];skipped=[]
     # No fabricated bars: trading days measured by actual saved sessions, not calendar days.
     for symbol,g in df.groupby('symbol',sort=True):
@@ -98,8 +111,11 @@ def run(args):
                 if level <= 0:continue
                 touched=lo<=level<=hi
                 near=abs(close-level)<=float(last.atr)*args.near_atr
-                if prev_close < level and close>level:status='CROSS_UP_CLOSE'
-                elif prev_close > level and close<level:status='CROSS_DOWN_CLOSE'
+                prev_level = base + sign*(age-1)*(unit_atr/args.unit_days)*ratio
+                # A cross requires the line to be touched by the current candle.
+                # Compare prev CLOSE with yesterday's level, not today's moving line.
+                if touched and prev_close < prev_level and close>level:status='CROSS_UP_CLOSE'
+                elif touched and prev_close > prev_level and close<level:status='CROSS_DOWN_CLOSE'
                 elif touched and close>=level:status='TOUCHED_CLOSE_ABOVE'
                 elif touched:status='TOUCHED_CLOSE_BELOW'
                 elif near:status='NEAR_CLOSE'
@@ -127,7 +143,11 @@ def run(args):
     pd.DataFrame(skipped).to_csv(out/'skipped.csv',index=False,encoding='utf-8-sig')
     most_common=max(set(x['last_date'] for x in latest),key=lambda d:sum(z['last_date']==d for z in latest))
     summary={
-      'version':'EGX-TIME-PRICE-DAILY-v1',
+      'version':'EGX-TIME-PRICE-DAILY-v2-quality-fix',
+      'recalculated_at_utc':datetime.now(timezone.utc).isoformat(),
+      'invalid_price_bars_excluded':int(len(bad)),
+      'invalid_price_stocks':int(bad.symbol.nunique()),
+      'database_rows_read':int(len(raw)),
       'method':'Fixed numerical angle slopes from last CONFIRMED swing LOW and HIGH; 1x1 means anchor ATR14 divided by unit-days of observed trading sessions; 1x2 half-slope, 2x1 double-slope',
       'calibration':{'atr14_per_n_sessions':args.unit_days,'pivot_wing':args.pivot_wing,'pivot_lookback':args.pivot_lookback,'minimum_pivot_range_in_anchor_atr':args.pivot_min_atr,'near_tolerance_latest_atr':args.near_atr},
       'source_stocks':int(df.symbol.nunique()),'stocks_with_levels':int(result.symbol.nunique()),
@@ -137,11 +157,12 @@ def run(args):
       'touched_levels_latest_session':int((hit.session_date==most_common).sum()),
       'near_or_touch_stocks_latest_session':int(interested[interested.session_date==most_common].symbol.nunique()),
       'unconfirmed_or_short_history':len(skipped),
-      'files':['all_stocks_levels.csv','touched_levels.csv','touched_or_near_levels.csv','last_dates_by_stock.csv','skipped.csv'],
+      'files':['invalid_price_bars.csv','all_stocks_levels.csv','touched_levels.csv','touched_or_near_levels.csv','last_dates_by_stock.csv','skipped.csv'],
       'limitations':['Angle labels are parameterized, not a unique physical 45 degree line. Zoom does not change calculated prices.',
                      'Only confirmed past pivots are used; this is a historical geometry study, not a predictive guarantee.',
                      'Some symbols may have stale last dates; use latest_session_mode filter.',
-                     'Unadjusted corporate actions, illiquid candles, and data errors can distort signals.']}
+                     'Unadjusted corporate actions and illiquid candles can distort signals.',
+                     'This CLI recomputes from stored database bars; it does not fetch new data from a price provider or add backend buttons.']}
     (out/'summary.json').write_text(json.dumps(summary,ensure_ascii=False,indent=2),encoding='utf-8')
     print(json.dumps(summary,ensure_ascii=False,indent=2))
     print('\nLATEST SESSION TOUCHES (first 30)')
