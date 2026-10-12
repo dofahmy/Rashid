@@ -121,7 +121,7 @@ def build(out_dir,unit_days=20.,near_atr=.15,wing=5,lookback=180,min_atr=1.5):
     hits.to_csv(out/'touched_levels.csv',index=False,encoding='utf-8-sig')
     nearby.to_csv(out/'touched_or_near.csv',index=False,encoding='utf-8-sig')
     pd.DataFrame(skip).to_csv(out/'skipped.csv',index=False,encoding='utf-8-sig')
-    summary={'version':'EGX-ANGLE-3D-v2','market_day':mode_day,
+    summary={'version':'EGX-ANGLE-3D-v3','market_day':mode_day,
              'source_stocks':int(df.symbol.nunique()),'analyzed_stocks':len(viz),
              'touching_stocks':int(hits.symbol.nunique()),'touched_levels':len(hits),'low_touching_stocks':int(hits.loc[hits.anchor_type=='LOW','symbol'].nunique()),'high_touching_stocks':int(hits.loc[hits.anchor_type=='HIGH','symbol'].nunique()),
              'invalid_bars':len(bad),'calibration':'1x1 = anchor ATR14 / '+str(unit_days)+' sessions',
@@ -132,16 +132,39 @@ def build(out_dir,unit_days=20.,near_atr=.15,wing=5,lookback=180,min_atr=1.5):
             'nearby':nearby.to_dict(orient='records')}
 
 HTML = '''<!DOCTYPE html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>EGX — Time Price 3D</title><script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
-<style>body{margin:0;background:#f4f7fb;font-family:Tahoma,Arial,sans-serif;color:#183047}header{background:#112b46;color:#fff;padding:18px 4%}main{max-width:1500px;margin:auto;padding:20px}article{background:white;border:1px solid #dce6ee;border-radius:14px;padding:18px;margin-bottom:16px}.toolbar{display:flex;align-items:end;gap:10px;flex-wrap:wrap}button,select,input{padding:11px;border:1px solid #bccbd8;border-radius:8px;font:inherit}button{background:#137a82;color:white;cursor:pointer}button:disabled{opacity:.5}table{width:100%;border-collapse:collapse}th,td{padding:10px;border-bottom:1px solid #e7ebf0;text-align:right}th{background:#edf3f7}.scroll{overflow:auto}#chart{height:570px;width:100%}.small{color:#68798a;font-size:12px;line-height:1.8}.stat{display:inline-block;background:#e7f3ef;border-radius:8px;padding:10px;margin:6px}</style></head><body>
+<style>body{margin:0;background:#f4f7fb;font-family:Tahoma,Arial,sans-serif;color:#183047}header{background:#112b46;color:#fff;padding:18px 4%}main{max-width:1500px;margin:auto;padding:20px}article{background:white;border:1px solid #dce6ee;border-radius:14px;padding:18px;margin-bottom:16px}.toolbar{display:flex;align-items:end;gap:10px;flex-wrap:wrap}button,select,input{padding:11px;border:1px solid #bccbd8;border-radius:8px;font:inherit}button{background:#137a82;color:white;cursor:pointer}button:disabled{opacity:.5}table{width:100%;border-collapse:collapse}th,td{padding:10px;border-bottom:1px solid #e7ebf0;text-align:right}th{background:#edf3f7}.scroll{overflow:auto}#chart{height:570px;width:100%}.small{color:#68798a;font-size:12px;line-height:1.8}.stat{display:inline-block;background:#e7f3ef;border-radius:8px;padding:10px;margin:6px}.sortable{cursor:pointer;user-select:none;white-space:nowrap}.sortable:hover{background:#dae7ef}.sort-hint{font-size:12px;color:#526b7c;margin:7px 0}</style></head><body>
 <header><h2>Time–Price Squaring — السوق المصري</h2><div>لمسات الخطوط الهندسية 1×1 و1×2 و2×1 — من قمم وقيعان مؤكدة</div></header>
 <main><article><div id="stats"></div><div class="small">المقياس الهندسي الرقمي ثابت: 1×1 = ATR14 عند القمة/القاع ÷ 20 جلسة. بُعد العمق للعرض فقط. تم تعطيل تدوير الرسم والـZoom لمنع تغيير الزاوية بصريًا. هذا نموذج معايرة تجريبي وليس زاوية جان مطلقة.</div></article>
 <article><div class="toolbar"><label>نطاق العرض<br><select id="scope"><option value="market">كل السوق — قائمة الأسهم</option><option value="symbol">سهم واحد — شارت 3D</option></select></label><label>القمة / القاع<br><select id="side"><option value="BOTH">LOW و HIGH</option><option value="LOW">LOW — خطوط من القيعان</option><option value="HIGH">HIGH — خطوط من القمم</option></select></label><label>نوع اللمس<br><select id="filter"><option value="touch">لمس فعلي في آخر شمعة</option><option value="near">لمس أو قرب من الخط</option><option value="all">كل المستويات بما فيها غير الملموسة</option></select></label><label id="symbolwrap" style="display:none">السهم<br><select id="symbol"></select></label><button id="refresh">إعادة الحساب من قاعدة البيانات</button><button onclick="location.reload()">تحديث عرض الصفحة</button></div><p id="note" class="small"></p><div id="marketSummary"></div><div id="chart" style="display:none"></div></article>
-<article><h3 id="tableTitle">الأسهم التي لمست مستويات LOW / HIGH في آخر جلسة</h3><div class="small" id="groupCounts"></div><div class="scroll"><table><thead><tr><th>السهم</th><th>مصدر الخط</th><th>تاريخ الارتكاز</th><th>الزاوية</th><th>سعر الخط</th><th>Low / High</th><th>الإغلاق</th><th>الحالة</th></tr></thead><tbody id="rows"></tbody></table></div></article></main>
+<article><h3 id="tableTitle">الأسهم التي لمست مستويات LOW / HIGH في آخر جلسة</h3><div class="small" id="groupCounts"></div><div class="sort-hint" id="sortHint">الترتيب الافتراضي: الاختراق/الكسر أولًا، ثم اللمس، ثم الأقرب للإغلاق. اضغطي على عنوان أي عمود لتغيير الترتيب.</div><div class="scroll"><table><thead><tr><th class="sortable" data-sort="symbol">السهم ⇅</th><th class="sortable" data-sort="anchor_type">مصدر الخط ⇅</th><th class="sortable" data-sort="anchor_date">تاريخ الارتكاز ⇅</th><th class="sortable" data-sort="angle">الزاوية ⇅</th><th class="sortable" data-sort="level">سعر الخط ⇅</th><th class="sortable" data-sort="last_low">Low / High ⇅</th><th class="sortable" data-sort="last_close">الإغلاق ⇅</th><th class="sortable" data-sort="status">الحالة ⇅</th></tr></thead><tbody id="rows"></tbody></table></div></article></main>
 <script>
 const dataset=__DATA__;
 const $=x=>document.getElementById(x);
 const statusAr={CROSS_UP_CLOSE:'اختراق صاعد',CROSS_DOWN_CLOSE:'كسر هابط',TOUCH_ABOVE:'لمس وإغلاق فوق',TOUCH_BELOW:'لمس وإغلاق تحت',NEAR:'قريب من الخط',NONE:'لم يلمس'};
 const s=dataset.summary;
+// Sorting never changes computed touches or levels; priority is a display convention only.
+let sortColumn='priority',sortDirection='asc';
+const statusRank={CROSS_UP_CLOSE:0,CROSS_DOWN_CLOSE:0,TOUCH_ABOVE:1,TOUCH_BELOW:1,NEAR:2,NONE:3};
+function closeDistancePct(x){return Math.abs(x.last_close-x.level)/Math.max(Math.abs(x.level),1e-12)*100;}
+function byPriority(a,b){return (statusRank[a.status]??4)-(statusRank[b.status]??4)||closeDistancePct(a)-closeDistancePct(b)||b.anchor_date.localeCompare(a.anchor_date)||a.symbol.localeCompare(b.symbol)||a.angle.localeCompare(b.angle);}
+function sortRows(a,b){
+ if(sortColumn==='priority')return byPriority(a,b);
+ let x,y;
+ if(sortColumn==='status'){x=statusRank[a.status]??4;y=statusRank[b.status]??4;}
+ else if(['level','last_low','last_close'].includes(sortColumn)){x=Number(a[sortColumn]);y=Number(b[sortColumn]);}
+ else {x=String(a[sortColumn]??'');y=String(b[sortColumn]??'');}
+ let cmp=typeof x==='number'?(x-y):x.localeCompare(y,'en');
+ return sortDirection==='asc'?(cmp||byPriority(a,b)):(-cmp||byPriority(a,b));
+}
+function initSorting(){
+ document.querySelectorAll('th[data-sort]').forEach(th=>th.addEventListener('click',()=>{
+  const col=th.dataset.sort;
+  if(sortColumn===col)sortDirection=sortDirection==='asc'?'desc':'asc';
+  else {sortColumn=col;sortDirection=['anchor_date','level','last_close','last_low'].includes(col)?'desc':'asc';}
+  renderTable();
+ }));
+}
+
 $('stats').innerHTML=`<span class="stat">آخر جلسة: ${s.market_day}</span><span class="stat">أسهم مفحوصة: ${s.analyzed_stocks}</span><span class="stat">أسهم لمست: ${s.touching_stocks}</span><span class="stat">مستويات ملموسة: ${s.touched_levels}</span><span class="stat">شموع غير سليمة: ${s.invalid_bars}</span>`;
 function shown(){
  let f=$('filter').value;
@@ -158,13 +181,14 @@ function renderTable(){
  $('chart').style.display=inMarket?'none':'block';
  $('marketSummary').style.display=inMarket?'block':'none';
  let displayRows=inMarket?rows:rows.filter(x=>x.symbol===$('symbol').value);
- displayRows.sort((a,b)=>a.symbol.localeCompare(b.symbol)||a.anchor_type.localeCompare(b.anchor_type)||a.angle.localeCompare(b.angle));
+ displayRows.sort(sortRows);
  let lows=new Set(rows.filter(x=>x.anchor_type==='LOW').map(x=>x.symbol));
  let highs=new Set(rows.filter(x=>x.anchor_type==='HIGH').map(x=>x.symbol));
  let both=[...lows].filter(x=>highs.has(x));
  $('groupCounts').textContent=`أسهم LOW: ${lows.size} | أسهم HIGH: ${highs.size} | أسهم لمسوا النوعين: ${both.length} | صفوف: ${displayRows.length} | آخر جلسة: ${s.market_day}`;
  $('marketSummary').innerHTML=`<span class="stat">LOW — ${lows.size} سهم</span><span class="stat">HIGH — ${highs.size} سهم</span><span class="stat">LOW + HIGH — ${both.length} سهم</span>`;
  $('tableTitle').textContent=inMarket?'كل أسهم السوق المطابقة للتصفية — آخر جلسة':'تفاصيل مستويات السهم — آخر جلسة';
+ $('sortHint').textContent=sortColumn==='priority'?'الترتيب الافتراضي: الاختراق/الكسر أولًا، ثم اللمس، ثم الأقرب للإغلاق (كنسبة من سعر الخط). لا يمثل تقييمًا لقوة الإشارة. اضغطي على أي عنوان للفرز.':`الترتيب حسب ${document.querySelector('th[data-sort=+sortColumn+]').textContent.replace('⇅','').trim()} — ${sortDirection==='asc'?'تصاعدي':'تنازلي'}. اضغطي مرة أخرى لعكس الترتيب.`;
  $('rows').innerHTML=displayRows.length?displayRows.map(x=>`<tr><td><a href="#chart" class="sym-link" data-symbol="${x.symbol}">${x.symbol}</a></td><td>${x.anchor_type==='LOW'?'LOW — قاع':'HIGH — قمة'}</td><td>${x.anchor_date}</td><td>${x.angle}</td><td>${x.level.toFixed(4)}</td><td>${x.last_low.toFixed(4)} / ${x.last_high.toFixed(4)}</td><td>${x.last_close.toFixed(4)}</td><td>${statusAr[x.status]}</td></tr>`).join(''):'<tr><td colspan="8">لا توجد أسهم مطابقة لشروط التصفية في آخر جلسة.</td></tr>';
  document.querySelectorAll('.sym-link').forEach(a=>a.addEventListener('click',e=>{
    e.preventDefault();$('scope').value='symbol';$('symbol').value=a.dataset.symbol;renderTable();
@@ -193,6 +217,7 @@ Plotly.react('chart',traces,layout,{displayModeBar:false,scrollZoom:false,respon
 }
 $('symbol').addEventListener('change',renderTable);$('filter').addEventListener('change',renderTable);$('side').addEventListener('change',renderTable);$('scope').addEventListener('change',renderTable);
 $('refresh').addEventListener('click',async()=>{let b=$('refresh');b.disabled=true;b.textContent='جارٍ إعادة الحساب...';try{let r=await fetch('/refresh',{method:'POST'});let x=await r.json();if(!r.ok)throw Error(x.error||'فشل');location.reload();}catch(e){alert('تعذر الحساب: '+e.message);b.disabled=false;b.textContent='إعادة الحساب من قاعدة البيانات';}});
+initSorting();
 renderTable();
 </script></body></html>'''
 
