@@ -121,9 +121,9 @@ def build(out_dir,unit_days=20.,near_atr=.15,wing=5,lookback=180,min_atr=1.5):
     hits.to_csv(out/'touched_levels.csv',index=False,encoding='utf-8-sig')
     nearby.to_csv(out/'touched_or_near.csv',index=False,encoding='utf-8-sig')
     pd.DataFrame(skip).to_csv(out/'skipped.csv',index=False,encoding='utf-8-sig')
-    summary={'version':'EGX-ANGLE-3D-v1','market_day':mode_day,
+    summary={'version':'EGX-ANGLE-3D-v2','market_day':mode_day,
              'source_stocks':int(df.symbol.nunique()),'analyzed_stocks':len(viz),
-             'touching_stocks':int(hits.symbol.nunique()),'touched_levels':len(hits),
+             'touching_stocks':int(hits.symbol.nunique()),'touched_levels':len(hits),'low_touching_stocks':int(hits.loc[hits.anchor_type=='LOW','symbol'].nunique()),'high_touching_stocks':int(hits.loc[hits.anchor_type=='HIGH','symbol'].nunique()),
              'invalid_bars':len(bad),'calibration':'1x1 = anchor ATR14 / '+str(unit_days)+' sessions',
              'generated_at_utc':datetime.now(timezone.utc).isoformat(),
              'note':'Geometric visualization uses a fixed price/time conversion, no zoom; depth is illustrative, not an independently measured third variable. Refresh recalculates stored DB prices only.'}
@@ -135,18 +135,44 @@ HTML = '''<!DOCTYPE html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><
 <style>body{margin:0;background:#f4f7fb;font-family:Tahoma,Arial,sans-serif;color:#183047}header{background:#112b46;color:#fff;padding:18px 4%}main{max-width:1500px;margin:auto;padding:20px}article{background:white;border:1px solid #dce6ee;border-radius:14px;padding:18px;margin-bottom:16px}.toolbar{display:flex;align-items:end;gap:10px;flex-wrap:wrap}button,select,input{padding:11px;border:1px solid #bccbd8;border-radius:8px;font:inherit}button{background:#137a82;color:white;cursor:pointer}button:disabled{opacity:.5}table{width:100%;border-collapse:collapse}th,td{padding:10px;border-bottom:1px solid #e7ebf0;text-align:right}th{background:#edf3f7}.scroll{overflow:auto}#chart{height:570px;width:100%}.small{color:#68798a;font-size:12px;line-height:1.8}.stat{display:inline-block;background:#e7f3ef;border-radius:8px;padding:10px;margin:6px}</style></head><body>
 <header><h2>Time–Price Squaring — السوق المصري</h2><div>لمسات الخطوط الهندسية 1×1 و1×2 و2×1 — من قمم وقيعان مؤكدة</div></header>
 <main><article><div id="stats"></div><div class="small">المقياس الهندسي الرقمي ثابت: 1×1 = ATR14 عند القمة/القاع ÷ 20 جلسة. بُعد العمق للعرض فقط. تم تعطيل تدوير الرسم والـZoom لمنع تغيير الزاوية بصريًا. هذا نموذج معايرة تجريبي وليس زاوية جان مطلقة.</div></article>
-<article><div class="toolbar"><label>السهم<br><select id="symbol"></select></label><label>النتائج<br><select id="filter"><option value="touch">لمس فعلي</option><option value="near">لمس أو قريب</option><option value="all">كل الأسهم</option></select></label><button id="refresh">إعادة الحساب من قاعدة البيانات</button><button onclick="location.reload()">تحديث عرض الصفحة</button></div><p id="note" class="small"></p><div id="chart"></div></article>
-<article><h3>تفاصيل المستويات — آخر جلسة</h3><div class="scroll"><table><thead><tr><th>السهم</th><th>القمة/القاع</th><th>تاريخ الارتكاز</th><th>الزاوية</th><th>سعر الخط</th><th>Low / High</th><th>الإغلاق</th><th>الحالة</th></tr></thead><tbody id="rows"></tbody></table></div></article></main>
+<article><div class="toolbar"><label>نطاق العرض<br><select id="scope"><option value="market">كل السوق — قائمة الأسهم</option><option value="symbol">سهم واحد — شارت 3D</option></select></label><label>القمة / القاع<br><select id="side"><option value="BOTH">LOW و HIGH</option><option value="LOW">LOW — خطوط من القيعان</option><option value="HIGH">HIGH — خطوط من القمم</option></select></label><label>نوع اللمس<br><select id="filter"><option value="touch">لمس فعلي في آخر شمعة</option><option value="near">لمس أو قرب من الخط</option><option value="all">كل المستويات بما فيها غير الملموسة</option></select></label><label id="symbolwrap" style="display:none">السهم<br><select id="symbol"></select></label><button id="refresh">إعادة الحساب من قاعدة البيانات</button><button onclick="location.reload()">تحديث عرض الصفحة</button></div><p id="note" class="small"></p><div id="marketSummary"></div><div id="chart" style="display:none"></div></article>
+<article><h3 id="tableTitle">الأسهم التي لمست مستويات LOW / HIGH في آخر جلسة</h3><div class="small" id="groupCounts"></div><div class="scroll"><table><thead><tr><th>السهم</th><th>مصدر الخط</th><th>تاريخ الارتكاز</th><th>الزاوية</th><th>سعر الخط</th><th>Low / High</th><th>الإغلاق</th><th>الحالة</th></tr></thead><tbody id="rows"></tbody></table></div></article></main>
 <script>
 const dataset=__DATA__;
 const $=x=>document.getElementById(x);
 const statusAr={CROSS_UP_CLOSE:'اختراق صاعد',CROSS_DOWN_CLOSE:'كسر هابط',TOUCH_ABOVE:'لمس وإغلاق فوق',TOUCH_BELOW:'لمس وإغلاق تحت',NEAR:'قريب من الخط',NONE:'لم يلمس'};
 const s=dataset.summary;
 $('stats').innerHTML=`<span class="stat">آخر جلسة: ${s.market_day}</span><span class="stat">أسهم مفحوصة: ${s.analyzed_stocks}</span><span class="stat">أسهم لمست: ${s.touching_stocks}</span><span class="stat">مستويات ملموسة: ${s.touched_levels}</span><span class="stat">شموع غير سليمة: ${s.invalid_bars}</span>`;
-function shown(){let f=$('filter').value;if(f==='all')return Object.values(dataset.viz).flatMap(x=>x.angles);return f==='near'?dataset.nearby:dataset.hits;}
-function renderTable(){let rows=shown();let syms=[...new Set(rows.map(x=>x.symbol))].sort();let last=$('symbol').value;$('symbol').innerHTML=syms.map(x=>`<option value="${x}">${x}</option>`).join('');$('symbol').value=syms.includes(last)?last:(syms[0]||''); renderChart();}
-function renderChart(){let sym=$('symbol').value;let set=dataset.viz[sym];if(!set){$('rows').innerHTML='';$('note').textContent='لا توجد مستويات';return;}
-let lines=shown().filter(x=>x.symbol===sym);$('rows').innerHTML=lines.map(x=>`<tr><td>${x.symbol}</td><td>${x.anchor_type}</td><td>${x.anchor_date}</td><td>${x.angle}</td><td>${x.level.toFixed(4)}</td><td>${x.last_low.toFixed(4)} / ${x.last_high.toFixed(4)}</td><td>${x.last_close.toFixed(4)}</td><td>${statusAr[x.status]}</td></tr>`).join('');
+function shown(){
+ let f=$('filter').value;
+ let arr=f==='all'?Object.values(dataset.viz).flatMap(x=>x.angles):(f==='near'?dataset.nearby:dataset.hits);
+ let side=$('side').value;
+ return side==='BOTH'?arr:arr.filter(x=>x.anchor_type===side);
+}
+function renderTable(){
+ let rows=shown();let syms=[...new Set(rows.map(x=>x.symbol))].sort();let last=$('symbol').value;
+ $('symbol').innerHTML=syms.map(x=>`<option value="${x}">${x}</option>`).join('');
+ $('symbol').value=syms.includes(last)?last:(syms[0]||'');
+ let inMarket=$('scope').value==='market';
+ $('symbolwrap').style.display=inMarket?'none':'';
+ $('chart').style.display=inMarket?'none':'block';
+ $('marketSummary').style.display=inMarket?'block':'none';
+ let displayRows=inMarket?rows:rows.filter(x=>x.symbol===$('symbol').value);
+ displayRows.sort((a,b)=>a.symbol.localeCompare(b.symbol)||a.anchor_type.localeCompare(b.anchor_type)||a.angle.localeCompare(b.angle));
+ let lows=new Set(rows.filter(x=>x.anchor_type==='LOW').map(x=>x.symbol));
+ let highs=new Set(rows.filter(x=>x.anchor_type==='HIGH').map(x=>x.symbol));
+ let both=[...lows].filter(x=>highs.has(x));
+ $('groupCounts').textContent=`أسهم LOW: ${lows.size} | أسهم HIGH: ${highs.size} | أسهم لمسوا النوعين: ${both.length} | صفوف: ${displayRows.length} | آخر جلسة: ${s.market_day}`;
+ $('marketSummary').innerHTML=`<span class="stat">LOW — ${lows.size} سهم</span><span class="stat">HIGH — ${highs.size} سهم</span><span class="stat">LOW + HIGH — ${both.length} سهم</span>`;
+ $('tableTitle').textContent=inMarket?'كل أسهم السوق المطابقة للتصفية — آخر جلسة':'تفاصيل مستويات السهم — آخر جلسة';
+ $('rows').innerHTML=displayRows.length?displayRows.map(x=>`<tr><td><a href="#chart" class="sym-link" data-symbol="${x.symbol}">${x.symbol}</a></td><td>${x.anchor_type==='LOW'?'LOW — قاع':'HIGH — قمة'}</td><td>${x.anchor_date}</td><td>${x.angle}</td><td>${x.level.toFixed(4)}</td><td>${x.last_low.toFixed(4)} / ${x.last_high.toFixed(4)}</td><td>${x.last_close.toFixed(4)}</td><td>${statusAr[x.status]}</td></tr>`).join(''):'<tr><td colspan="8">لا توجد أسهم مطابقة لشروط التصفية في آخر جلسة.</td></tr>';
+ document.querySelectorAll('.sym-link').forEach(a=>a.addEventListener('click',e=>{
+   e.preventDefault();$('scope').value='symbol';$('symbol').value=a.dataset.symbol;renderTable();
+ }));
+ if(inMarket){$('note').textContent=`جميع الأسهم المصرية من قاعدة البيانات حسب آخر جلسة مشتركة (${s.market_day}). LOW وHIGH تعنيان مصدر الخط الملموس، وليس أن السعر حقق أدنى أو أعلى سعر تاريخي.`;return;}
+ renderChart();
+}
+function renderChart(){let sym=$('symbol').value;let set=dataset.viz[sym];if(!set){$('note').textContent='لا توجد مستويات للشارت المحدد';return;}
 let candles=set.candles;let angles=set.angles;let timeStart=candles[0].t;let tEnd=candles[candles.length-1].t;
 // Fixed common scale in *normalized* price units: one x session = anchor ATR/20 as y unit.
 let slope=angles.find(a=>a.angle==='1x1')?.unit_per_day||1; let base=candles[0].c;
@@ -165,7 +191,7 @@ $('note').textContent=`${sym} — تحويل السعر المعتمد للرس�
 if(typeof Plotly==='undefined'){$('chart').textContent='مكتبة الرسم لم تتحمل؛ اتصال المتصفح بالإنترنت مطلوب.';return;}
 Plotly.react('chart',traces,layout,{displayModeBar:false,scrollZoom:false,responsive:true});
 }
-$('symbol').addEventListener('change',renderChart);$('filter').addEventListener('change',renderTable);
+$('symbol').addEventListener('change',renderTable);$('filter').addEventListener('change',renderTable);$('side').addEventListener('change',renderTable);$('scope').addEventListener('change',renderTable);
 $('refresh').addEventListener('click',async()=>{let b=$('refresh');b.disabled=true;b.textContent='جارٍ إعادة الحساب...';try{let r=await fetch('/refresh',{method:'POST'});let x=await r.json();if(!r.ok)throw Error(x.error||'فشل');location.reload();}catch(e){alert('تعذر الحساب: '+e.message);b.disabled=false;b.textContent='إعادة الحساب من قاعدة البيانات';}});
 renderTable();
 </script></body></html>'''
