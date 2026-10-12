@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hmac
 import os
+import secrets
 import threading
 import traceback
 from datetime import datetime, timezone
@@ -14,7 +15,7 @@ from html import escape
 from pathlib import Path
 from zipfile import ZipFile, ZIP_DEFLATED
 
-from flask import Blueprint, Response, request, send_file, redirect, make_response, url_for
+from flask import Blueprint, Response, request, send_file, redirect, make_response, url_for, session
 from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 
 
@@ -25,6 +26,15 @@ _CSV = _DIR / 'nonoverlapping_cycles_250_trading_days.csv'
 _SUMMARY = _DIR / 'summary.json'
 _LOCK = threading.Lock()
 _STATE = {'running': False, 'error': None, 'finished': None}
+
+
+def _csrf_hidden():
+    """Populate the existing app-wide session CSRF token on GET and reuse it for POST forms."""
+    token = session.get('csrf')
+    if not token:
+        token = secrets.token_urlsafe(32)
+        session['csrf'] = token
+    return '<input type="hidden" name="csrf" value="' + escape(str(token), quote=True) + '">'
 
 
 def _password():
@@ -74,7 +84,7 @@ def login():
 
 def _login_form():
     return ('<p>اكتبي كلمة مرور التصدير الموجودة في Railway Web Variables.</p>'
-            '<form method="post" action="/preburst/egypt-export/login">'
+            '<form method="post" action="/preburst/egypt-export/login">' + _csrf_hidden() +
             '<label for="pw">كلمة المرور</label><p><input id="pw" type="password" name="password" required '
             'autocomplete="current-password" style="padding:12px;width:90%"></p>'
             '<button type="submit">دخول</button></form>')
@@ -83,7 +93,7 @@ def _login_form():
 @egypt_export_bp.route('/preburst/egypt-export/health', methods=['GET'])
 def health():
     # Public, harmless routing check. Does not leak environment or reports.
-    return Response('EGYPT_EXPORT_V2_ROUTE_OK', mimetype='text/plain', headers={'Cache-Control':'no-store'})
+    return Response('EGYPT_EXPORT_V3_CSRF_ROUTE_OK', mimetype='text/plain', headers={'Cache-Control':'no-store'})
 
 
 def _html(body: str, status=200):
@@ -132,12 +142,12 @@ def page():
     if state['running']:
         return _html('<p>جاري بناء التقرير من قاعدة البيانات في خدمة Web. انتظري ثم حدّثي الصفحة.</p><meta http-equiv="refresh" content="8">')
     if state['error']:
-        return _html('<p>فشل بناء التقرير. آخر تفاصيل الخطأ:</p><pre style="white-space:pre-wrap;direction:ltr;text-align:left">'+escape(state['error'])+'</pre><form method="post"><button>إعادة المحاولة</button></form>', 500)
+        return _html('<p>فشل بناء التقرير. آخر تفاصيل الخطأ:</p><pre style="white-space:pre-wrap;direction:ltr;text-align:left">'+escape(state['error'])+'</pre><form method="post">'+_csrf_hidden()+'<button>إعادة المحاولة</button></form>', 500)
     if _ZIP.exists():
         size_kb = round(_ZIP.stat().st_size / 1024, 1)
         when = state['finished'] or 'تقرير محفوظ داخل خدمة Web'
-        return _html(f'<p>التقرير جاهز — {size_kb} KB</p><p><small>آخر إنشاء: {escape(when)}</small></p><p><a class="button" href="/preburst/egypt-export/download">تحميل التقرير ZIP</a></p><form method="post"><button>تحديث التقرير من قاعدة البيانات</button></form><p><small>الملف يحتوي CSV لكل دورات مصر وsummary.json.</small></p>')
-    return _html('<p>هيتم إنشاء ملف النتائج داخل Web من قاعدة PostgreSQL. لا تحتاجي ملف Railway Console المؤقت.</p><form method="post"><button>إنشاء التقرير المصري</button></form>')
+        return _html(f'<p>التقرير جاهز — {size_kb} KB</p><p><small>آخر إنشاء: {escape(when)}</small></p><p><a class="button" href="/preburst/egypt-export/download">تحميل التقرير ZIP</a></p><form method="post">{_csrf_hidden()}<button>تحديث التقرير من قاعدة البيانات</button></form><p><small>الملف يحتوي CSV لكل دورات مصر وsummary.json.</small></p>')
+    return _html('<p>هيتم إنشاء ملف النتائج داخل Web من قاعدة PostgreSQL. لا تحتاجي ملف Railway Console المؤقت.</p><form method="post">'+_csrf_hidden()+'<button>إنشاء التقرير المصري</button></form>')
 
 
 @egypt_export_bp.route('/preburst/egypt-export/download', methods=['GET'])
