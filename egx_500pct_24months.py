@@ -24,14 +24,15 @@ def main():
         for c in options:
             if c in cols:return c
         raise RuntimeError('Missing column; candidates '+repr(options)+'; available '+repr(cols))
-    sym=choose(['symbol','ticker','stock_symbol']); date=choose(['bar_period','date','trade_date','timestamp','time','period','bar_date']);close=choose(['close','close_price','c']);high=choose(['high','high_price','h'])
-    q='SELECT "'+sym+'" AS symbol, "'+date+'" AS dt, "'+close+'" AS close, "'+high+'" AS high FROM "'+args.table+'" WHERE "'+close+'" > 0 AND "'+high+'" > 0 ORDER BY "'+sym+'", "'+date+'"'
-    with engine.connect() as con: df=pd.read_sql_query(text(q),con)
+    sym=choose(['symbol','ticker','stock_symbol']); date=choose(['session_date','bar_period','date','trade_date','timestamp','time','period','bar_date']);close=choose(['close','close_price','c']);high=choose(['high','high_price','h'])
+    q='SELECT "'+sym+'" AS symbol, "'+date+'" AS dt, "'+close+'" AS close, "'+high+'" AS high FROM "'+args.table+'" WHERE UPPER("'+sym+'") LIKE :egx_suffix AND "'+close+'" > 0 AND "'+high+'" > 0 ORDER BY "'+sym+'", "'+date+'"'
+    with engine.connect() as con: df=pd.read_sql_query(text(q),con,params={'egx_suffix':'%.CA'})
     df['dt']=pd.to_datetime(df.dt,errors='coerce',utc=True).dt.tz_localize(None).dt.normalize()
     df['close']=pd.to_numeric(df.close,errors='coerce');df['high']=pd.to_numeric(df.high,errors='coerce')
     df=df.dropna(subset=['symbol','dt','close','high']);df=df[(df.close>0)&(df.high>0)]
     df=df.sort_values(['symbol','dt']).drop_duplicates(['symbol','dt'],keep='last')
-    print('VALID BARS:',len(df),'SYMBOLS:',df.symbol.nunique(),flush=True)
+    print('VALID EGYPT BARS:',len(df),'EGX SYMBOLS:',df.symbol.nunique(),flush=True)
+    if df.empty: raise RuntimeError('No EGX .CA data returned; verify table and symbols.')
     # O(n) monotonic deque to find maximum future High; once max >=6*entry, use binary search over monotone running max
     # First successful entry per wave, with wave cooldown ending at first target hit to count separate discoveries.
     all_hits=[]; summary=[]
@@ -67,7 +68,7 @@ def main():
     per=pd.DataFrame(summary);epi=pd.DataFrame(all_hits)
     per.to_csv(out/'all_symbols_500pct.csv',index=False,encoding='utf-8-sig')
     epi.to_csv(out/'500pct_episodes.csv',index=False,encoding='utf-8-sig')
-    overview={'definition':'High of a subsequent session reaches >= 6x entry Close within 24 calendar months','first_data_day':df.dt.min().date().isoformat(),'last_data_day':df.dt.max().date().isoformat(),'symbols_scanned':int(per.shape[0]),'distinct_symbols_ever_hit_500pct':int(per.ever_500pct.sum()),'successful_entry_days':int(per.successful_entry_days.sum()),'grouped_episodes':int(per.episodes.sum()),'caution':'Retrospective; recent entries have incomplete 24-month followup; highs not executable prices, and corporate actions/splits/unadjusted price discontinuities can create false hits. Counts are descriptive, not verified investable gains.'}
+    overview={'definition':'High of a subsequent session reaches >= 6x entry Close within 24 calendar months','first_data_day':df.dt.min().date().isoformat(),'last_data_day':df.dt.max().date().isoformat(),'market_scope':'EGX symbol suffix .CA only', 'symbols_scanned':int(per.shape[0]),'distinct_symbols_ever_hit_500pct':int(per.ever_500pct.sum()),'successful_entry_days':int(per.successful_entry_days.sum()),'grouped_episodes':int(per.episodes.sum()),'caution':'Retrospective; recent entries have incomplete 24-month followup; highs not executable prices, and corporate actions/splits/unadjusted price discontinuities can create false hits. Counts are descriptive, not verified investable gains.'}
     (out/'summary.json').write_text(json.dumps(overview,indent=2,ensure_ascii=False),encoding='utf-8')
     print(json.dumps(overview,indent=2,ensure_ascii=False),flush=True)
     print('TOP SYMBOLS BY EPISODES:');print(per.sort_values(['episodes','successful_entry_days'],ascending=False).head(25).to_string(index=False))
