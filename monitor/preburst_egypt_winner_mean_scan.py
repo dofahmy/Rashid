@@ -12,7 +12,7 @@ from sqlalchemy import text
 from core import database
 from monitor.preburst_egypt_feature_study import FIELDS, TABLE
 
-VERSION='EG-MEAN-SCAN-v1'
+VERSION='EG-MEAN-SCAN-v2-compare-fix'
 # Fixed winner cohort from the user-verified 191 Egyptian winning cycles, 2023-2026.
 MEAN={'rsi14':37.570,'momentum5_pct':-4.916,'momentum20_pct':-9.350,'close_vs_sma20_pct':-6.860,'close_vs_sma50_pct':-5.493,'bbz20':-1.856,'atr14_pct':4.559,'return_20':-9.541,'position_20_pct':11.474,'volume5_vs_50':0.986,'repeat_count_1pct_60':3.780}
 STD={'rsi14':4.153,'momentum5_pct':2.422,'momentum20_pct':3.999,'close_vs_sma20_pct':2.408,'close_vs_sma50_pct':5.893,'bbz20':0.572,'atr14_pct':1.768,'return_20':3.559,'position_20_pct':6.080,'volume5_vs_50':4.166,'repeat_count_1pct_60':4.177}
@@ -65,7 +65,7 @@ def calc_outcome(bars, date, entry):
             'max_rise_pct':round(100*(peak/entry-1),4) if peak else None,'peak_bar':peak_bar,
             'peak_date':str(peak_date.date()) if peak_date is not None else None}
 
-def run(output_dir, width=1.0, known_csv='/tmp/preburst-egypt-features/egypt_cycles_with_entry_indicators_2023_2026.csv'):
+def run(output_dir, width=1.0, known_csv='/tmp/preburst-250d-egypt/nonoverlapping_cycles_250_trading_days.csv'):
     if width<=0:raise ValueError('width must be positive')
     out=Path(output_dir);out.mkdir(parents=True,exist_ok=True)
     features=load_history(); prices=load_prices()
@@ -79,11 +79,22 @@ def run(output_dir, width=1.0, known_csv='/tmp/preburst-egypt-features/egypt_cyc
     pd.DataFrame(metadata).to_csv(out/'mean_indicator_ranges.csv',index=False,encoding='utf-8-sig')
     candidates=features[score>=min(THRESHOLDS)].copy()
     all_results=[]
-    known=set(); have_known=False
+    known=set(); old_winners=set(); have_known=False
     known_file=Path(known_csv)
     if known_file.exists():
         old=pd.read_csv(known_file,dtype={'symbol':str})
-        known={(str(s),str(d)[:10]) for s,d in zip(old.symbol,old.signal_start_utc)}
+        if not {'symbol','signal_start_utc'}.issubset(old.columns):
+            raise ValueError('Old ledger must include symbol and signal_start_utc')
+        old['signal_day']=pd.to_datetime(old['signal_start_utc'],errors='coerce').dt.strftime('%Y-%m-%d')
+        old['symbol']=old['symbol'].astype(str)
+        known=set(zip(old.symbol, old.signal_day))
+        if 'outcome' in old.columns:
+            old_win_mask=old['outcome'].astype(str).eq('winner') | old['outcome'].astype(str).isin(['متفوق','ناجح'])
+        elif 'classification' in old.columns:
+            old_win_mask=old['classification'].astype(str).isin(['متفوق','ناجح'])
+        else:
+            raise ValueError('Old ledger must have classification or outcome column')
+        old_winners=set(zip(old.loc[old_win_mask,'symbol'], old.loc[old_win_mask,'signal_day']))
         have_known=True
     for level in THRESHOLDS:
         count=Counter(); rows=[]
@@ -106,7 +117,7 @@ def run(output_dir, width=1.0, known_csv='/tmp/preburst-egypt-features/egypt_cyc
                 key=(str(sym),str(dt.date()))
                 row={'market':'egypt','match_required':level,'symbol':sym,'signal_date':str(dt.date()),
                      'entry_close':entry,'matched_indicators':matched,
-                     'same_exact_start_as_old_191_winner': key in known and bool((old[(old.symbol==sym)&(old.signal_start_utc.astype(str).str[:10]==key[1])].outcome=='winner').any()) if have_known else None,
+                     'same_exact_start_as_old_191_winner': key in old_winners if have_known else None,
                      'matches_old_signal_start':key in known if have_known else None,
                      **result}
                 rows.append(row);count[result['outcome']]+=1
@@ -134,5 +145,5 @@ def run(output_dir, width=1.0, known_csv='/tmp/preburst-egypt-features/egypt_cyc
 
 if __name__=='__main__':
     p=argparse.ArgumentParser();p.add_argument('--output-dir',default='/tmp/preburst-egypt-mean-scan');p.add_argument('--width',type=float,default=1.0)
-    p.add_argument('--known-csv',default='/tmp/preburst-egypt-features/egypt_cycles_with_entry_indicators_2023_2026.csv')
+    p.add_argument('--known-csv',default='/tmp/preburst-250d-egypt/nonoverlapping_cycles_250_trading_days.csv')
     args=p.parse_args();print(json.dumps(run(args.output_dir,args.width,args.known_csv),ensure_ascii=False,indent=2),flush=True)
