@@ -21,16 +21,10 @@ def create_app(db=None,test_config=None):
         return session['csrf']
     @app.context_processor
     def context(): return dict(csrf=csrf,brand=BRAND,markets=MARKETS,statuses=STATUSES)
-    @app.before_request
-    def protect():
-        if request.endpoint in (
-    'preburst_egypt_browser_export.login',
-    'preburst_egypt_browser_export.page',
-):
-    return None
-    
-        if request.method=='POST' and not secrets.compare_digest(str(session.get('csrf','')),str(request.form.get('csrf',''))) or request.method=='POST' and not session.get('csrf'):
-            abort(403)
+@app.before_request
+def protect():
+    if request.method=='POST' and not secrets.compare_digest(str(session.get('csrf','')),str(request.form.get('csrf',''))) or request.method=='POST' and not session.get('csrf'):
+        abort(403)
     @app.after_request
     def headers(r):
         r.headers['X-Content-Type-Options']='nosniff'; r.headers['X-Frame-Options']='DENY'; r.headers['Referrer-Policy']='no-referrer'
