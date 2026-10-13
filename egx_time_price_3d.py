@@ -151,7 +151,9 @@ def build(out_dir,unit_days=20.,near_atr=.15,wing=5,lookback=180,min_atr=1.5):
                           'anchor_t':int(idx),'anchor_price':round(base,6),'angle':label,
                           'level':round(level,6),'ratio':mul,'unit_per_day':round(one_day_price,10),
                           'age_sessions':int(age),'last_low':round(lo,6),'last_high':round(hi,6),
-                          'last_close':round(close,6),'touch':bool(touch),'near':bool(near),'status':status}
+                          'last_close':round(close,6),'touch':bool(touch),'near':bool(near),'status':status,
+                          'anchor_plus_10_close':round(float(g.iloc[idx+10].c),6) if idx+10<len(g) else None,
+                          'anchor_plus_10_date':g.iloc[idx+10].session_date.strftime('%Y-%m-%d') if idx+10<len(g) else None}
                     if touch:historical_hits.append(item)
                     if touch or near:historical_near.append(item)
         viz[sym]={'candles':chart,'angles':angles,'last_close':close}
@@ -163,7 +165,7 @@ def build(out_dir,unit_days=20.,near_atr=.15,wing=5,lookback=180,min_atr=1.5):
     hits.to_csv(out/'touched_levels.csv',index=False,encoding='utf-8-sig')
     nearby.to_csv(out/'touched_or_near.csv',index=False,encoding='utf-8-sig')
     pd.DataFrame(skip).to_csv(out/'skipped.csv',index=False,encoding='utf-8-sig')
-    summary={'version':'EGX-ANGLE-3D-v5','market_day':mode_day,
+    summary={'version':'EGX-ANGLE-3D-v5.1','market_day':mode_day,
              'source_stocks':int(df.symbol.nunique()),'analyzed_stocks':len(viz),
              'touching_stocks':int(hits.symbol.nunique()),'touched_levels':len(hits),'low_touching_stocks':int(hits.loc[hits.anchor_type=='LOW','symbol'].nunique()),'high_touching_stocks':int(hits.loc[hits.anchor_type=='HIGH','symbol'].nunique()),
              'invalid_bars':len(bad),'calibration':'1x1 = anchor ATR14 / '+str(unit_days)+' sessions',
@@ -178,7 +180,7 @@ HTML = '''<!DOCTYPE html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><
 <header><h2>Time–Price Squaring — السوق المصري</h2><div>لمسات الخطوط الهندسية 1×1 و1×2 و2×1 — من قمم وقيعان مؤكدة</div></header>
 <main><article><div id="stats"></div><div class="small">المقياس الهندسي الرقمي ثابت: 1×1 = ATR14 عند القمة/القاع ÷ 20 جلسة. بُعد العمق للعرض فقط. تم تعطيل تدوير الرسم والـZoom لمنع تغيير الزاوية بصريًا. هذا نموذج معايرة تجريبي وليس زاوية جان مطلقة.</div></article>
 <article><div class="toolbar"><label>نطاق العرض<br><select id="scope"><option value="market">كل السوق — قائمة الأسهم</option><option value="symbol">سهم واحد — شارت 3D</option></select></label><label>القمة / القاع<br><select id="side"><option value="BOTH">LOW و HIGH</option><option value="LOW">LOW — خطوط من القيعان</option><option value="HIGH">HIGH — خطوط من القمم</option></select></label><label>نوع اللمس<br><select id="filter"><option value="touch">لمس فعلي في آخر شمعة</option><option value="near">لمس أو قرب من الخط</option><option value="all">كل المستويات بما فيها غير الملموسة</option></select></label><label id="symbolwrap" style="display:none">السهم<br><select id="symbol"></select></label><button id="fetchdata" style="background:#277047">تحديث البيانات</button><button id="refresh">إعادة الحساب من قاعدة البيانات</button><button onclick="location.reload()">تحديث عرض الصفحة</button></div><p id="updateStatus" class="small" role="status" aria-live="polite"></p><p id="note" class="small"></p><div id="marketSummary"></div><div id="chart" style="display:none"></div></article>
-<article><div class="toolbar"><h3 id="tableTitle" style="margin:0;flex:1">ملخص لمسات آخر جلسة بحسب تاريخ القمة/القاع والحالة</h3><label>المدة من تاريخ الارتكاز<br><select id="period"><option value="30">30 يوم</option><option value="90">90 يوم</option><option value="180">6 شهور</option><option value="365">سنة</option><option value="all" selected>كل التاريخ</option></select></label></div><div class="small" id="groupCounts"></div><p class="small">التاريخ في أول عمود هو تاريخ القمة أو القاع الذي خرج منه الخط. كل الحالات تخص لمس آخر جلسة تداول؛ الفترة تحدد عمر القمة/القاع. عدد الأسهم فريد داخل المجموعة حتى لو لمس السهم عدة زوايا.</p><div class="scroll"><table><thead><tr><th>تاريخ القمة / القاع</th><th>النوع</th><th>الحالة</th><th>عدد الأسهم (اضغطي للتفاصيل)</th></tr></thead><tbody id="groups"></tbody></table></div><div id="groupDetail" style="display:none;margin-top:20px"><div class="toolbar"><h3 id="detailTitle" style="flex:1"></h3><button id="closeDetail" type="button">إغلاق التفاصيل</button></div><div class="scroll"><table><thead><tr><th>السهم</th><th>الزاوية</th><th>سعر الخط</th><th>Low / High آخر جلسة</th><th>إغلاق آخر جلسة</th><th>الحالة</th></tr></thead><tbody id="rows"></tbody></table></div></div></article></main>
+<article><div class="toolbar"><h3 id="tableTitle" style="margin:0;flex:1">ملخص لمسات آخر جلسة بحسب تاريخ القمة/القاع والحالة</h3><label>المدة من تاريخ الارتكاز<br><select id="period"><option value="30">30 يوم</option><option value="90">90 يوم</option><option value="180">6 شهور</option><option value="365">سنة</option><option value="all" selected>كل التاريخ</option></select></label></div><div class="toolbar" style="margin:10px 0"><label>فلتر الحالة<br><select id="statusFilter"><option value="ALL">كل الحالات</option><option value="CROSS_UP_CLOSE">اختراق صاعد</option><option value="CROSS_DOWN_CLOSE">كسر هابط</option><option value="TOUCH_ABOVE">لمس وإغلاق فوق</option><option value="TOUCH_BELOW">لمس وإغلاق تحت</option><option value="NEAR">قريب من الخط</option></select></label><label>ترتيب المجموعات<br><select id="groupSort"><option value="date_desc">الأحدث تاريخًا</option><option value="date_asc">الأقدم تاريخًا</option><option value="count_desc">عدد الأسهم: الأكبر أولًا</option><option value="count_asc">عدد الأسهم: الأصغر أولًا</option><option value="status">الحالة</option></select></label></div><div class="small" id="groupCounts"></div><p class="small">التاريخ في أول عمود هو تاريخ القمة أو القاع الذي خرج منه الخط. كل الحالات تخص لمس آخر جلسة تداول؛ الفترة تحدد عمر القمة/القاع. عدد الأسهم فريد داخل المجموعة حتى لو لمس عدة خطوط. سعر +10 محسوب من تاريخ القمة/القاع، وليس بعد لمس آخر جلسة؛ نتيجة 10 جلسات بعد اللمس الحالي غير متاحة بعد.</p><div id="groupDetail" style="display:none;margin:14px 0 20px;padding:14px;background:#f1f7fb;border:1px solid #a6cbd5;border-radius:12px"><div class="toolbar"><h3 id="detailTitle" style="flex:1"></h3><button id="closeDetail" type="button">إغلاق التفاصيل</button></div><div class="scroll"><table><thead><tr><th>السهم</th><th>الزاوية</th><th>سعر الخط</th><th>Low / High آخر جلسة</th><th>إغلاق آخر جلسة</th><th>إغلاق بعد 10 جلسات من الارتكاز</th><th>تاريخ الجلسة +10</th><th>الحالة</th></tr></thead><tbody id="rows"></tbody></table></div></div><div class="scroll"><table><thead><tr><th>تاريخ القمة / القاع</th><th>النوع</th><th>الحالة</th><th>عدد الأسهم (اضغطي للتفاصيل)</th></tr></thead><tbody id="groups"></tbody></table></div></article></main>
 <script>
 const dataset=__DATA__;
 const $=x=>document.getElementById(x);
@@ -228,7 +230,7 @@ function showDetail(key){
  activeKey=key;
  $('groupDetail').style.display='block';
  $('detailTitle').textContent=`${group.date} | ${group.kind==='LOW'?'LOW — قاع':'HIGH — قمة'} | ${statusAr[group.status]} | ${group.symbols.size} سهم`;
- $('rows').innerHTML=group.rows.slice().sort((a,b)=>a.symbol.localeCompare(b.symbol)||a.angle.localeCompare(b.angle)).map(x=>`<tr><td><a href="#chart" class="sym-link" data-symbol="${x.symbol}">${x.symbol}</a></td><td>${x.angle}</td><td>${x.level.toFixed(4)}</td><td>${x.last_low.toFixed(4)} / ${x.last_high.toFixed(4)}</td><td>${x.last_close.toFixed(4)}</td><td>${statusAr[x.status]}</td></tr>`).join('');
+ $('rows').innerHTML=group.rows.slice().sort((a,b)=>a.symbol.localeCompare(b.symbol)||a.angle.localeCompare(b.angle)).map(x=>`<tr><td><a href="#chart" class="sym-link" data-symbol="${x.symbol}">${x.symbol}</a></td><td>${x.angle}</td><td>${x.level.toFixed(4)}</td><td>${x.last_low.toFixed(4)} / ${x.last_high.toFixed(4)}</td><td>${x.last_close.toFixed(4)}</td><td>${x.anchor_plus_10_close==null?'لم تكتمل':Number(x.anchor_plus_10_close).toFixed(4)}</td><td>${x.anchor_plus_10_date||'—'}</td><td>${statusAr[x.status]}</td></tr>`).join('');
  document.querySelectorAll('.sym-link').forEach(a=>a.addEventListener('click',e=>{e.preventDefault();$('scope').value='symbol';$('symbol').value=a.dataset.symbol;renderTable();window.scrollTo({top:0,behavior:'smooth'});}));
 }
 function renderTable(){
@@ -239,7 +241,7 @@ function renderTable(){
  $('symbolwrap').style.display=inMarket?'none':'';
  $('chart').style.display=inMarket?'none':'block';
  $('marketSummary').style.display=inMarket?'block':'none';
- const rows=periodRows(inMarket?unfiltered:unfiltered.filter(x=>x.symbol===$('symbol').value));
+ const statusChoice=$('statusFilter').value;const periodFiltered=periodRows(inMarket?unfiltered:unfiltered.filter(x=>x.symbol===$('symbol').value));const rows=statusChoice==='ALL'?periodFiltered:periodFiltered.filter(x=>x.status===statusChoice);
  let lows=new Set(rows.filter(x=>x.anchor_type==='LOW').map(x=>x.symbol));
  let highs=new Set(rows.filter(x=>x.anchor_type==='HIGH').map(x=>x.symbol));
  let both=[...lows].filter(x=>highs.has(x));
@@ -250,9 +252,17 @@ function renderTable(){
   if(!groupedCache.has(key))groupedCache.set(key,{date:r.anchor_date,kind:r.anchor_type,status:r.status,rows:[],symbols:new Set()});
   const g=groupedCache.get(key);g.rows.push(r);g.symbols.add(r.symbol);
  }
- const groups=[...groupedCache.entries()].sort((a,b)=>b[1].date.localeCompare(a[1].date)||a[1].kind.localeCompare(b[1].kind)||a[1].status.localeCompare(b[1].status));
+ const groupSort=$('groupSort').value;
+ const groups=[...groupedCache.entries()].sort((a,b)=>{
+   const A=a[1],B=b[1];
+   if(groupSort==='count_desc')return B.symbols.size-A.symbols.size||B.date.localeCompare(A.date);
+   if(groupSort==='count_asc')return A.symbols.size-B.symbols.size||B.date.localeCompare(A.date);
+   if(groupSort==='date_asc')return A.date.localeCompare(B.date)||A.kind.localeCompare(B.kind);
+   if(groupSort==='status')return (statusRank[A.status]??4)-(statusRank[B.status]??4)||B.symbols.size-A.symbols.size;
+   return B.date.localeCompare(A.date)||A.kind.localeCompare(B.kind)||A.status.localeCompare(B.status);
+ });
  $('groups').innerHTML=groups.length?groups.map(([key,g])=>`<tr><td>${g.date}</td><td>${g.kind==='LOW'?'LOW — قاع':'HIGH — قمة'}</td><td>${statusAr[g.status]}</td><td><button class="group-open" data-key="${key}" type="button">${g.symbols.size} سهم</button></td></tr>`).join(''):'<tr><td colspan="4">لا توجد مجموعات مطابقة لهذه المدة والتصفية.</td></tr>';
- document.querySelectorAll('.group-open').forEach(b=>b.addEventListener('click',()=>showDetail(b.dataset.key)));
+ document.querySelectorAll('.group-open').forEach(b=>b.addEventListener('click',()=>{showDetail(b.dataset.key);$('groupDetail').scrollIntoView({behavior:'smooth',block:'start'});}));
  if(activeKey && groupedCache.has(activeKey))showDetail(activeKey);else{$('groupDetail').style.display='none';activeKey=null;}
  $('tableTitle').textContent=inMarket?'مجموعات السوق حسب تاريخ القمة/القاع والحالة':'مجموعات السهم المحدد حسب تاريخ القمة/القاع والحالة';
  $('note').textContent=`اللمسات تُحسب من آخر جلسة سوق مشتركة (${s.market_day})، والمدة تصف تاريخ الارتكاز. كل التاريخ يشمل جميع القمم والقيعان المؤكدة المحفوظة في قاعدة البيانات.`;
@@ -260,6 +270,8 @@ function renderTable(){
 }
 $('closeDetail').addEventListener('click',()=>{$('groupDetail').style.display='none';activeKey=null;});
 $('period').addEventListener('change',()=>{activeKey=null;renderTable();});
+$('statusFilter').addEventListener('change',()=>{activeKey=null;renderTable();});
+$('groupSort').addEventListener('change',()=>{activeKey=null;renderTable();});
 function renderChart(){let sym=$('symbol').value;let set=dataset.viz[sym];if(!set){$('note').textContent='لا توجد مستويات للشارت المحدد';return;}
 let candles=set.candles;let angles=set.angles;let timeStart=candles[0].t;let tEnd=candles[candles.length-1].t;
 // Fixed common scale in *normalized* price units: one x session = anchor ATR/20 as y unit.
