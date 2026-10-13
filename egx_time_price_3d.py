@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """EGX Time–Price historic touch dashboard, PostgreSQL-backed and paginated.
 Numeric convention: 1x1 = confirmed pivot ATR14 / unit_days per trading session.
-Only the FIRST confirmed high-low contact is recorded for each symbol / pivot / angle. No future pivot information is used.
+Only the FIRST confirmed high-low contact is recorded for each symbol / pivot / angle.
+Only symbol/days with EXACTLY TWO different first-touch lines are retained. No future pivot information is used.
 """
 import argparse
 import hmac
@@ -44,6 +45,8 @@ def ensure_tables():
             touch_count BIGINT DEFAULT 0, invalid_bars BIGINT DEFAULT 0,
             status TEXT NOT NULL DEFAULT 'building')'''))
         con.execute(text('ALTER TABLE egx_tp3d_runs ADD COLUMN IF NOT EXISTS raw_touch_count BIGINT DEFAULT 0'))
+        con.execute(text('ALTER TABLE egx_tp3d_runs ADD COLUMN IF NOT EXISTS first_touch_before_pair_filter BIGINT DEFAULT 0'))
+        con.execute(text('ALTER TABLE egx_tp3d_runs ADD COLUMN IF NOT EXISTS qualifying_symbol_days BIGINT DEFAULT 0'))
         con.execute(text('''CREATE TABLE IF NOT EXISTS egx_tp3d_touches (
             run_id BIGINT NOT NULL, symbol TEXT NOT NULL, touch_date TEXT NOT NULL,
             anchor_type TEXT NOT NULL, anchor_date TEXT NOT NULL,
@@ -60,7 +63,7 @@ def ensure_tables():
 
 def active_run():
     with engine().connect() as con:
-        r=con.execute(text("SELECT run_id,market_day,stock_count,touch_count,raw_touch_count,invalid_bars,finished_at FROM egx_tp3d_runs WHERE status='complete' ORDER BY run_id DESC LIMIT 1")).mappings().first()
+        r=con.execute(text("SELECT run_id,market_day,stock_count,touch_count,raw_touch_count,first_touch_before_pair_filter,qualifying_symbol_days,invalid_bars,finished_at FROM egx_tp3d_runs WHERE status='complete' ORDER BY run_id DESC LIMIT 1")).mappings().first()
     return dict(r) if r else None
 
 
@@ -159,27 +162,45 @@ def rebuild():
         market_day=str(dates.mode().iloc[0])
         with engine().begin() as con:
             rid=con.execute(text('INSERT INTO egx_tp3d_runs(market_day,invalid_bars) VALUES (:d,:bad) RETURNING run_id'),{'d':market_day,'bad':bad}).scalar_one()
-        stock_count=0; event_count=0; buffer=[]; diagnostics={'raw_contacts':0}
+        stock_count=0; event_count=0; raw_first_touch=0; pair_days=0
+        buffer=[]; diagnostics={'raw_contacts':0}
         for sym,g in data.groupby('symbol',sort=True):
             if len(g)<60 or g.session_date.max().strftime('%Y-%m-%d')!=market_day:continue
             stock_count+=1
-            for event in symbol_events(sym,g,market_day,UNIT_DAYS,diagnostics=diagnostics):
-                event['run_id']=rid;buffer.append(event)
-                if len(buffer)>=4000:
-                    with engine().begin() as con:con.execute(INSERT,buffer)
-                    event_count+=len(buffer);buffer=[]
-            with LOCK:STATE['message']=f'حساب {stock_count} سهم | أول لمسة: {event_count+len(buffer):,} | كل اللمسات: {diagnostics["raw_contacts"]:,}'
+            # Gather only this stock's first-touch events in memory. Avoid storing
+            # non-qualifying days in PostgreSQL (large savings vs deleting later).
+            stock_events=list(symbol_events(sym,g,market_day,UNIT_DAYS,diagnostics=diagnostics))
+            raw_first_touch+=len(stock_events)
+            by_day={}
+            for event in stock_events:
+                by_day.setdefault(event['touch_date'],[]).append(event)
+            for day,items in by_day.items():
+                # Distinct line identity includes the confirmed anchor (date/kind)
+                # and the angle. Repeated copies never count twice.
+                distinct={(r['anchor_type'],r['anchor_date'],r['angle']) for r in items}
+                if len(distinct)!=2:continue
+                pair_days+=1
+                for event in items:
+                    event['run_id']=rid
+                    buffer.append(event)
+                    if len(buffer)>=4000:
+                        with engine().begin() as con:con.execute(INSERT,buffer)
+                        event_count+=len(buffer);buffer=[]
+            with LOCK:
+                STATE['message']=(f'فحص {stock_count} سهم | أيام لمس خطين بالضبط: {pair_days:,} '
+                                  f'| الإشارات بعد الشرط: {event_count+len(buffer):,} '
+                                  f'| أول لمسات قبل الشرط: {raw_first_touch:,}')
         if buffer:
             with engine().begin() as con:con.execute(INSERT,buffer)
             event_count+=len(buffer)
         with engine().begin() as con:
-            con.execute(text("UPDATE egx_tp3d_runs SET status='complete',finished_at=NOW(),stock_count=:n,touch_count=:c,raw_touch_count=:raw WHERE run_id=:id"),{'n':stock_count,'c':event_count,'raw':diagnostics['raw_contacts'],'id':rid})
+            con.execute(text("UPDATE egx_tp3d_runs SET status='complete',finished_at=NOW(),stock_count=:n,touch_count=:c,raw_touch_count=:raw,first_touch_before_pair_filter=:first,qualifying_symbol_days=:pairs WHERE run_id=:id"),{'n':stock_count,'c':event_count,'raw':diagnostics['raw_contacts'],'first':raw_first_touch,'pairs':pair_days,'id':rid})
             # Keep previous successful run as rollback point, not all historical duplicates.
             old=con.execute(text("SELECT run_id FROM egx_tp3d_runs WHERE status='complete' ORDER BY run_id DESC OFFSET 2")).scalars().all()
             if old:
                 con.execute(text('DELETE FROM egx_tp3d_touches WHERE run_id = ANY(:ids)'),{'ids':old})
                 con.execute(text('DELETE FROM egx_tp3d_runs WHERE run_id = ANY(:ids)'),{'ids':old})
-        with LOCK:STATE.update(message=f'اكتمل حساب {stock_count} سهم: أول لمس {event_count:,} من {diagnostics["raw_contacts"]:,} تماس تاريخي حتى {market_day}',version=rid)
+        with LOCK:STATE.update(message=f'اكتمل الفحص: {pair_days:,} حالة سهم/يوم لمس فيها خطين بالضبط، {event_count:,} سطر لمس معتمد، من {raw_first_touch:,} أول لمس قبل التصفية حتى {market_day}',version=rid)
     except Exception as exc:
         if rid is not None:
             with engine().begin() as con:con.execute(text("UPDATE egx_tp3d_runs SET status='failed' WHERE run_id=:id"),{'id':rid})
@@ -224,9 +245,9 @@ HTML = r'''<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8">
 <style>body{margin:0;background:#f4f7fb;color:#172f46;font-family:Tahoma,Arial,sans-serif}header{background:#112b46;color:#fff;padding:18px 4%}main{max-width:1500px;margin:auto;padding:20px}article{background:#fff;border:1px solid #dce6ee;border-radius:13px;padding:18px;margin-bottom:16px}button,select,input{padding:10px;border:1px solid #b9c9d5;border-radius:8px;font:inherit}button{background:#137a82;color:#fff;cursor:pointer}button:disabled{opacity:.5;cursor:wait}.toolbar{display:flex;gap:10px;align-items:end;flex-wrap:wrap;margin-bottom:10px}label{font-size:13px}label select{display:block;margin-top:6px}.muted{color:#637689;font-size:12px;line-height:1.9}.stat{display:inline-block;background:#e7f3ef;padding:9px;margin:4px;border-radius:7px}table{width:100%;border-collapse:collapse}td,th{text-align:right;border-bottom:1px solid #e2e9f0;padding:10px;white-space:nowrap}th{background:#edf3f7}.scroll{overflow:auto}.detail{background:#eef7fb;border:1px solid #a6cbd5;border-radius:10px;padding:12px;display:none;margin-bottom:15px}.pager{display:flex;align-items:center;gap:12px;justify-content:center;margin:12px 0}#chart{height:500px}</style></head><body>
 <header><h2>Time–Price Squaring — السوق المصري</h2><p>تاريخ اللمس الحقيقي، حالة الشمعة، والعائد بعد 10 جلسات تداول</p></header><main>
 <article><div id="stats"></div><p class="muted">الزوايا بمعايرة ثابتة: 1×1 = ATR14 للارتكاز / 20 جلسة. لا يُستخدم الارتكاز قبل تأكيده بخمس جلسات. عمق 3D تمثيلي.</p><div class="toolbar"><button id="update">تحديث البيانات</button><button id="rebuild">إعادة حساب التاريخ</button><button onclick="location.reload()">تحديث الصفحة</button></div><div id="job" class="muted"></div></article>
-<article><div class="toolbar"><label>مدة اللمسات<select id="period"><option value="30">30 يوم</option><option value="90">90 يوم</option><option value="180">6 شهور</option><option value="365">سنة</option><option value="all">كل التاريخ</option></select></label><label>القمة / القاع<select id="side"><option value="BOTH">LOW و HIGH</option><option value="LOW">LOW — قاع</option><option value="HIGH">HIGH — قمة</option></select></label><label>حالة السهم<select id="status"><option value="ALL">كل الحالات</option><option value="CROSS_UP_CLOSE">اختراق صاعد</option><option value="CROSS_DOWN_CLOSE">كسر هابط</option><option value="TOUCH_ABOVE">لمس وإغلاق فوق</option><option value="TOUCH_BELOW">لمس وإغلاق تحت</option></select></label><label>ترتيب المجموعات<select id="sort"><option value="date_desc">الأحدث أولًا</option><option value="date_asc">الأقدم أولًا</option><option value="count_desc">الأكثر أسهم أولًا</option><option value="count_asc">الأقل أسهم أولًا</option></select></label></div>
+<article><div class="toolbar"><label>مدة اللمسات (خطين بالضبط للسهم/الجلسة)<select id="period"><option value="30">30 يوم</option><option value="90">90 يوم</option><option value="180">6 شهور</option><option value="365">سنة</option><option value="all">كل التاريخ</option></select></label><label>القمة / القاع<select id="side"><option value="BOTH">LOW و HIGH</option><option value="LOW">LOW — قاع</option><option value="HIGH">HIGH — قمة</option></select></label><label>حالة السهم<select id="status"><option value="ALL">كل الحالات</option><option value="CROSS_UP_CLOSE">اختراق صاعد</option><option value="CROSS_DOWN_CLOSE">كسر هابط</option><option value="TOUCH_ABOVE">لمس وإغلاق فوق</option><option value="TOUCH_BELOW">لمس وإغلاق تحت</option></select></label><label>ترتيب المجموعات<select id="sort"><option value="date_desc">الأحدث أولًا</option><option value="date_asc">الأقدم أولًا</option><option value="count_desc">الأكثر أسهم أولًا</option><option value="count_asc">الأقل أسهم أولًا</option></select></label></div>
 <div id="detail" class="detail"><div class="toolbar"><h3 id="detailTitle" style="flex:1"></h3><button id="closeDetail">إغلاق التفاصيل</button></div><div class="scroll"><table><thead><tr><th>السهم</th><th>الخط</th><th>تاريخ الارتكاز (مرجع)</th><th>سعر الخط</th><th>إغلاق يوم اللمس</th><th>بعد 10 جلسات</th><th>عائد 10 جلسات</th><th>حالة اللمس</th></tr></thead><tbody id="detailRows"></tbody></table></div><div class="pager"><button id="prevDetail">السابق</button><span id="detailPages"></span><button id="nextDetail">التالي</button></div></div>
-<div id="resultCount" class="muted"></div><div class="scroll"><table><thead><tr><th>تاريخ اللمس</th><th>مصدر الخط</th><th>الحالة</th><th>عدد الأسهم (اضغطي للتفاصيل)</th></tr></thead><tbody id="groups"></tbody></table></div><div class="pager"><button id="prevGroup">السابق</button><span id="groupPages"></span><button id="nextGroup">التالي</button></div></article>
+<div id="resultCount" class="muted"></div><div class="scroll"><table><thead><tr><th>تاريخ اللمس</th><th>مصدر الخط</th><th>الحالة</th><th>عدد الأسهم التي لمست خطين بالضبط (اضغطي للتفاصيل)</th></tr></thead><tbody id="groups"></tbody></table></div><div class="pager"><button id="prevGroup">السابق</button><span id="groupPages"></span><button id="nextGroup">التالي</button></div></article>
 <article><div class="toolbar"><h3 style="flex:1">شارت السهم — آخر 100 جلسة</h3><input id="ticker" placeholder="COMI.CA"><button id="loadChart">عرض الشارت 3D</button></div><div id="chart"></div></article></main>
 <script>
 const $=id=>document.getElementById(id),names={CROSS_UP_CLOSE:'اختراق صاعد',CROSS_DOWN_CLOSE:'كسر هابط',TOUCH_ABOVE:'لمس وإغلاق فوق',TOUCH_BELOW:'لمس وإغلاق تحت'};
@@ -258,7 +279,7 @@ let ys=traces.flatMap(x=>x.y),ymin=Math.min(...ys),ymax=Math.max(...ys),span=Mat
 Plotly.react('chart',traces,{scene:{aspectmode:'manual',aspectratio:{x:(end-start)/span,y:(ymax-ymin)/span,z:.18},dragmode:false,camera:{eye:{x:1.5,y:1.5,z:1.05},projection:{type:'orthographic'}},xaxis:{title:'جلسات',range:[0,end-start]},yaxis:{title:'سعر بمعايرة ثابتة',range:[ymin,ymax]},zaxis:{range:[0,1.5]}},height:490,margin:{l:0,r:0,t:0,b:0}},{scrollZoom:false,displayModeBar:false,responsive:true});
 }catch(e){$('chart').textContent=e.message;}}
 $('loadChart').onclick=chart;
-async function job(){try{let d=await api('/api/job');$('stats').innerHTML=d.run?`<span class="stat">آخر جلسة: ${d.run.market_day}</span><span class="stat">الأسهم: ${d.run.stock_count}</span><span class="stat">إشارات أول لمس: ${d.run.touch_count.toLocaleString()}</span><span class="stat">كل اللمسات قبل التصفية: ${(d.run.raw_touch_count??0).toLocaleString()}</span><span class="stat">الشموع المستبعدة: ${d.run.invalid_bars.toLocaleString()}</span>`:'<span class="stat">السجل التاريخي لم يُبنَ بعد</span>';
+async function job(){try{let d=await api('/api/job');$('stats').innerHTML=d.run?`<span class="stat">آخر جلسة: ${d.run.market_day}</span><span class="stat">الأسهم: ${d.run.stock_count}</span><span class="stat">إشارات (سهم/يوم لمس خطين فقط): ${(d.run.qualifying_symbol_days??0).toLocaleString()}</span><span class="stat">سطور اللمس المعتمدة: ${d.run.touch_count.toLocaleString()}</span><span class="stat">أول اللمسات قبل شرط الخطين: ${(d.run.first_touch_before_pair_filter??0).toLocaleString()}</span><span class="stat">كل التماسات قبل أول لمس: ${(d.run.raw_touch_count??0).toLocaleString()}</span><span class="stat">الشموع المستبعدة: ${d.run.invalid_bars.toLocaleString()}</span>`:'<span class="stat">السجل التاريخي لم يُبنَ بعد</span>';
 $('job').textContent=d.message+(d.error?' | '+d.error:'');if(d.busy){setTimeout(job,4000);}else if(window.refreshAfterJob){window.refreshAfterJob=false;groups();}}catch(e){$('job').textContent=e.message;}}
 async function requestJob(endpoint){let token=prompt('رمز التحديث EGX_3D_REFRESH_TOKEN:');if(!token)return;try{await api(endpoint,{method:'POST',headers:{'X-Refresh-Token':token}});window.refreshAfterJob=true;job();}catch(e){alert(e.message);}}
 $('update').onclick=()=>requestJob('/update-data');$('rebuild').onclick=()=>requestJob('/refresh');groups();job();
