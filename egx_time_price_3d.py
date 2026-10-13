@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """EGX Time–Price historic touch dashboard, PostgreSQL-backed and paginated.
 Numeric convention: 1x1 = confirmed pivot ATR14 / unit_days per trading session.
-A contact is an intersecting daily high-low bar; no future pivot information is used.
+Only the FIRST confirmed high-low contact is recorded for each symbol / pivot / angle. No future pivot information is used.
 """
 import argparse
 import hmac
@@ -22,7 +22,7 @@ STATUS_AR = {'CROSS_UP_CLOSE':'اختراق صاعد','CROSS_DOWN_CLOSE':'كسر
              'TOUCH_ABOVE':'لمس وإغلاق فوق','TOUCH_BELOW':'لمس وإغلاق تحت'}
 ENGINE = None
 LOCK = threading.Lock()
-STATE = {'busy':False,'message':'جاهز','error':None,'version':None}
+STATE = {'busy':False,'message':'جاهز — اضغطي إعادة الحساب لتطبيق قاعدة أول لمس على النتائج القديمة','error':None,'version':None}
 OUTPUT = '/tmp/egx-time-price-3d'
 UNIT_DAYS = 20.
 
@@ -43,6 +43,7 @@ def ensure_tables():
             finished_at TIMESTAMPTZ, market_day TEXT, stock_count INT DEFAULT 0,
             touch_count BIGINT DEFAULT 0, invalid_bars BIGINT DEFAULT 0,
             status TEXT NOT NULL DEFAULT 'building')'''))
+        con.execute(text('ALTER TABLE egx_tp3d_runs ADD COLUMN IF NOT EXISTS raw_touch_count BIGINT DEFAULT 0'))
         con.execute(text('''CREATE TABLE IF NOT EXISTS egx_tp3d_touches (
             run_id BIGINT NOT NULL, symbol TEXT NOT NULL, touch_date TEXT NOT NULL,
             anchor_type TEXT NOT NULL, anchor_date TEXT NOT NULL,
@@ -59,7 +60,7 @@ def ensure_tables():
 
 def active_run():
     with engine().connect() as con:
-        r=con.execute(text("SELECT run_id,market_day,stock_count,touch_count,invalid_bars,finished_at FROM egx_tp3d_runs WHERE status='complete' ORDER BY run_id DESC LIMIT 1")).mappings().first()
+        r=con.execute(text("SELECT run_id,market_day,stock_count,touch_count,raw_touch_count,invalid_bars,finished_at FROM egx_tp3d_runs WHERE status='complete' ORDER BY run_id DESC LIMIT 1")).mappings().first()
     return dict(r) if r else None
 
 
@@ -99,7 +100,7 @@ def tr_atr(g):
     return tr.rolling(14,min_periods=14).mean().to_numpy(dtype=float)
 
 
-def symbol_events(sym,g,market_day,unit_days,wing=5):
+def symbol_events(sym,g,market_day,unit_days,wing=5,diagnostics=None):
     g=g[g.session_date<=pd.Timestamp(market_day)].sort_values('session_date').reset_index(drop=True)
     if len(g)<60 or g.session_date.iloc[-1].strftime('%Y-%m-%d')!=market_day:return
     n=len(g); dates=g.session_date.dt.strftime('%Y-%m-%d').to_numpy()
@@ -117,7 +118,12 @@ def symbol_events(sym,g,market_day,unit_days,wing=5):
                 levels=base+(t-idx)*slope
                 prev_levels=levels-slope
                 touched=(levels>0)&(lows-1e-8<=levels)&(levels<=highs+1e-8)
-                for offset in np.flatnonzero(touched):
+                # Count all qualifying contacts for before/after comparison, but
+                # record only the first after this pivot is CONFIRMED.
+                offsets=np.flatnonzero(touched)
+                if diagnostics is not None:
+                    diagnostics['raw_contacts']+=int(len(offsets))
+                for offset in offsets[:1]:
                     j=int(t[offset]); level=float(levels[offset]);close=float(closes[offset])
                     prevclose=float(prev_closes[offset]);prev_level=float(prev_levels[offset])
                     if prevclose<prev_level and close>level:status='CROSS_UP_CLOSE'
@@ -153,27 +159,27 @@ def rebuild():
         market_day=str(dates.mode().iloc[0])
         with engine().begin() as con:
             rid=con.execute(text('INSERT INTO egx_tp3d_runs(market_day,invalid_bars) VALUES (:d,:bad) RETURNING run_id'),{'d':market_day,'bad':bad}).scalar_one()
-        stock_count=0; event_count=0; buffer=[]
+        stock_count=0; event_count=0; buffer=[]; diagnostics={'raw_contacts':0}
         for sym,g in data.groupby('symbol',sort=True):
             if len(g)<60 or g.session_date.max().strftime('%Y-%m-%d')!=market_day:continue
             stock_count+=1
-            for event in symbol_events(sym,g,market_day,UNIT_DAYS):
+            for event in symbol_events(sym,g,market_day,UNIT_DAYS,diagnostics=diagnostics):
                 event['run_id']=rid;buffer.append(event)
                 if len(buffer)>=4000:
                     with engine().begin() as con:con.execute(INSERT,buffer)
                     event_count+=len(buffer);buffer=[]
-            with LOCK:STATE['message']=f'حساب {stock_count} سهم | {event_count+len(buffer):,} لمس حتى الآن'
+            with LOCK:STATE['message']=f'حساب {stock_count} سهم | أول لمسة: {event_count+len(buffer):,} | كل اللمسات: {diagnostics["raw_contacts"]:,}'
         if buffer:
             with engine().begin() as con:con.execute(INSERT,buffer)
             event_count+=len(buffer)
         with engine().begin() as con:
-            con.execute(text("UPDATE egx_tp3d_runs SET status='complete',finished_at=NOW(),stock_count=:n,touch_count=:c WHERE run_id=:id"),{'n':stock_count,'c':event_count,'id':rid})
+            con.execute(text("UPDATE egx_tp3d_runs SET status='complete',finished_at=NOW(),stock_count=:n,touch_count=:c,raw_touch_count=:raw WHERE run_id=:id"),{'n':stock_count,'c':event_count,'raw':diagnostics['raw_contacts'],'id':rid})
             # Keep previous successful run as rollback point, not all historical duplicates.
             old=con.execute(text("SELECT run_id FROM egx_tp3d_runs WHERE status='complete' ORDER BY run_id DESC OFFSET 2")).scalars().all()
             if old:
                 con.execute(text('DELETE FROM egx_tp3d_touches WHERE run_id = ANY(:ids)'),{'ids':old})
                 con.execute(text('DELETE FROM egx_tp3d_runs WHERE run_id = ANY(:ids)'),{'ids':old})
-        with LOCK:STATE.update(message=f'اكتمل حساب {stock_count} سهم و{event_count:,} لمسة حتى {market_day}',version=rid)
+        with LOCK:STATE.update(message=f'اكتمل حساب {stock_count} سهم: أول لمس {event_count:,} من {diagnostics["raw_contacts"]:,} تماس تاريخي حتى {market_day}',version=rid)
     except Exception as exc:
         if rid is not None:
             with engine().begin() as con:con.execute(text("UPDATE egx_tp3d_runs SET status='failed' WHERE run_id=:id"),{'id':rid})
@@ -252,7 +258,7 @@ let ys=traces.flatMap(x=>x.y),ymin=Math.min(...ys),ymax=Math.max(...ys),span=Mat
 Plotly.react('chart',traces,{scene:{aspectmode:'manual',aspectratio:{x:(end-start)/span,y:(ymax-ymin)/span,z:.18},dragmode:false,camera:{eye:{x:1.5,y:1.5,z:1.05},projection:{type:'orthographic'}},xaxis:{title:'جلسات',range:[0,end-start]},yaxis:{title:'سعر بمعايرة ثابتة',range:[ymin,ymax]},zaxis:{range:[0,1.5]}},height:490,margin:{l:0,r:0,t:0,b:0}},{scrollZoom:false,displayModeBar:false,responsive:true});
 }catch(e){$('chart').textContent=e.message;}}
 $('loadChart').onclick=chart;
-async function job(){try{let d=await api('/api/job');$('stats').innerHTML=d.run?`<span class="stat">آخر جلسة: ${d.run.market_day}</span><span class="stat">الأسهم: ${d.run.stock_count}</span><span class="stat">اللمسات التاريخية: ${d.run.touch_count.toLocaleString()}</span><span class="stat">الشموع المستبعدة: ${d.run.invalid_bars.toLocaleString()}</span>`:'<span class="stat">السجل التاريخي لم يُبنَ بعد</span>';
+async function job(){try{let d=await api('/api/job');$('stats').innerHTML=d.run?`<span class="stat">آخر جلسة: ${d.run.market_day}</span><span class="stat">الأسهم: ${d.run.stock_count}</span><span class="stat">إشارات أول لمس: ${d.run.touch_count.toLocaleString()}</span><span class="stat">كل اللمسات قبل التصفية: ${(d.run.raw_touch_count??0).toLocaleString()}</span><span class="stat">الشموع المستبعدة: ${d.run.invalid_bars.toLocaleString()}</span>`:'<span class="stat">السجل التاريخي لم يُبنَ بعد</span>';
 $('job').textContent=d.message+(d.error?' | '+d.error:'');if(d.busy){setTimeout(job,4000);}else if(window.refreshAfterJob){window.refreshAfterJob=false;groups();}}catch(e){$('job').textContent=e.message;}}
 async function requestJob(endpoint){let token=prompt('رمز التحديث EGX_3D_REFRESH_TOKEN:');if(!token)return;try{await api(endpoint,{method:'POST',headers:{'X-Refresh-Token':token}});window.refreshAfterJob=true;job();}catch(e){alert(e.message);}}
 $('update').onclick=()=>requestJob('/update-data');$('rebuild').onclick=()=>requestJob('/refresh');groups();job();
