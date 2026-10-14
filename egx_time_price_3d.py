@@ -60,7 +60,7 @@ def ensure_tables():
             touch_close DOUBLE PRECISION NOT NULL, after10_close DOUBLE PRECISION,
             after10_date TEXT, return10_pct DOUBLE PRECISION,
             PRIMARY KEY(run_id,signal_type,symbol,touch_date,anchor_type,anchor_date,angle))'''))
-        for col,typ in [('after20_close','DOUBLE PRECISION'),('after20_date','TEXT'),('return20_pct','DOUBLE PRECISION'),('current_close','DOUBLE PRECISION'),('current_date','TEXT'),('return_current_pct','DOUBLE PRECISION')]:
+        for col,typ in [('after20_close','DOUBLE PRECISION'),('after20_date','TEXT'),('return20_pct','DOUBLE PRECISION'),('current_close','DOUBLE PRECISION'),('latest_price_date','TEXT'),('return_current_pct','DOUBLE PRECISION')]:
             con.execute(text(f'ALTER TABLE egx_tp3d_signals_v10 ADD COLUMN IF NOT EXISTS {col} {typ}'))
         con.execute(text('''CREATE TABLE IF NOT EXISTS egx_tp3d_v11_checkpoint(symbol TEXT PRIMARY KEY,last_day TEXT NOT NULL,bar_count BIGINT NOT NULL,updated_at TIMESTAMPTZ DEFAULT now())'''))
         con.execute(text('''CREATE INDEX IF NOT EXISTS idx_egx_tp3d_v10_groups
@@ -129,7 +129,7 @@ def contact_event(sym,dates,a,kind,idx,angle,j,level,prev_level,first_date=None)
             'return10_pct':(after/close-1)*100 if after is not None else None,
             'after20_close':after20,'after20_date':str(dates[j+20]) if after20 is not None else None,
             'return20_pct':(after20/close-1)*100 if after20 is not None else None,
-            'current_close':current,'current_date':str(dates[-1]),
+            'current_close':current,'latest_price_date':str(dates[-1]),
             'return_current_pct':(current/close-1)*100}
 
 
@@ -169,9 +169,9 @@ def symbol_events(sym,g,market_day,unit_days,wing=10,diagnostics=None):
 
 INSERT = text('''INSERT INTO egx_tp3d_signals_v10
  (run_id,signal_type,symbol,touch_date,first_touch_date,anchor_type,anchor_date,angle,status,level,candle_low,candle_high,
- touch_close,after10_close,after10_date,return10_pct,after20_close,after20_date,return20_pct,current_close,current_date,return_current_pct)
+ touch_close,after10_close,after10_date,return10_pct,after20_close,after20_date,return20_pct,current_close,latest_price_date,return_current_pct)
  VALUES (:run_id,:signal_type,:symbol,:touch_date,:first_touch_date,:anchor_type,:anchor_date,:angle,:status,:level,
- :candle_low,:candle_high,:touch_close,:after10_close,:after10_date,:return10_pct,:after20_close,:after20_date,:return20_pct,:current_close,:current_date,:return_current_pct)
+ :candle_low,:candle_high,:touch_close,:after10_close,:after10_date,:return10_pct,:after20_close,:after20_date,:return20_pct,:current_close,:latest_price_date,:return_current_pct)
  ON CONFLICT(run_id,signal_type,symbol,touch_date,anchor_type,anchor_date,angle) DO NOTHING''')
 
 
@@ -200,7 +200,7 @@ def update_outcomes(con, run_id, sym, g):
         con.execute(text("""UPDATE egx_tp3d_signals_v10 SET
             after10_close=:a10,after10_date=:d10,return10_pct=:r10,
             after20_close=:a20,after20_date=:d20,return20_pct=:r20,
-            current_close=:cur,current_date=:dc,return_current_pct=:rc
+            current_close=:cur,latest_price_date=:dc,return_current_pct=:rc
             WHERE run_id=:run AND symbol=:sym AND touch_date=:day"""),
             {'run':run_id,'sym':sym,'day':day,'a10':a10,'d10':dates[j+10] if a10 is not None else None,
              'r10':(a10/base-1)*100 if a10 is not None else None,
@@ -419,7 +419,7 @@ document.querySelectorAll('.showDetail').forEach(b=>b.onclick=()=>{selected={day
 async function performance(){try{let d=await api('/api/performance?'+filt()); $('performance').innerHTML='<table><thead><tr><th>نوع الإشارة</th><th>سهم/يوم</th><th>10 جلسات: عينة / متوسط %</th><th>20 جلسة: عينة / متوسط %</th><th>حتى الآن: عينة / متوسط %</th></tr></thead><tbody>'+d.items.map(x=>`<tr><td>${signalNames[x.signal_type]}</td><td>${x.stock_days}</td><td>${x.complete10} / ${x.avg10??'—'}</td><td>${x.complete20} / ${x.avg20??'—'}</td><td>${x.current_count} / ${x.avg_current??'—'}</td></tr>`).join('')+'</tbody></table>'; }catch(e){$('performance').textContent=e.message;}}
 async function details(){if(!selected)return;try{let q=new URLSearchParams({day:selected.day,side:selected.side,status:selected.status,signal:selected.signal,angle:$('angle').value,page:detailPage});let d=await api('/api/details?'+q);
 $('detail').style.display='block';$('detailTitle').textContent=`${selected.day} | ${signalNames[selected.signal]} | ${selected.side==='LOW'?'LOW — قاع':'HIGH — قمة'} | ${names[selected.status]} | ${d.stocks} سهم`;
-$('detailRows').innerHTML=d.items.map(x=>`<tr><td><a href="#chart" class="chartLink" data-sym="${safe(x.symbol)}">${safe(x.symbol)}</a></td><td>${signalNames[x.signal_type]}</td><td>${x.angle}</td><td>${x.first_touch_date||'—'}</td><td>${x.anchor_date}</td><td>${x.level.toFixed(4)}</td><td>${x.touch_close.toFixed(4)}</td><td>${x.after10_close==null?'قيد الانتظار':x.after10_close.toFixed(4)}</td><td>${x.return10_pct==null?'—':x.return10_pct.toFixed(2)+'%'}</td><td>${x.after20_close==null?'قيد الانتظار':x.after20_close.toFixed(4)}</td><td>${x.return20_pct==null?'—':x.return20_pct.toFixed(2)+'%'}</td><td>${x.current_close==null?'—':x.current_close.toFixed(4)}</td><td>${x.current_date||'—'}</td><td>${x.return_current_pct==null?'—':x.return_current_pct.toFixed(2)+'%'}</td><td>${names[x.status]}</td></tr>`).join('');
+$('detailRows').innerHTML=d.items.map(x=>`<tr><td><a href="#chart" class="chartLink" data-sym="${safe(x.symbol)}">${safe(x.symbol)}</a></td><td>${signalNames[x.signal_type]}</td><td>${x.angle}</td><td>${x.first_touch_date||'—'}</td><td>${x.anchor_date}</td><td>${x.level.toFixed(4)}</td><td>${x.touch_close.toFixed(4)}</td><td>${x.after10_close==null?'قيد الانتظار':x.after10_close.toFixed(4)}</td><td>${x.return10_pct==null?'—':x.return10_pct.toFixed(2)+'%'}</td><td>${x.after20_close==null?'قيد الانتظار':x.after20_close.toFixed(4)}</td><td>${x.return20_pct==null?'—':x.return20_pct.toFixed(2)+'%'}</td><td>${x.current_close==null?'—':x.current_close.toFixed(4)}</td><td>${x.latest_price_date||'—'}</td><td>${x.return_current_pct==null?'—':x.return_current_pct.toFixed(2)+'%'}</td><td>${names[x.status]}</td></tr>`).join('');
 $('detailPages').textContent=`${detailPage} / ${d.pages||1}`;detailTotal=d.pages;$('prevDetail').disabled=detailPage<=1;$('nextDetail').disabled=detailPage>=d.pages;
 document.querySelectorAll('.chartLink').forEach(x=>x.onclick=()=>{$('ticker').value=x.dataset.sym;chart();});$('detail').scrollIntoView({behavior:'smooth',block:'start'});
 }catch(e){alert(e.message);}}
@@ -485,7 +485,7 @@ def create_app():
         with engine().connect() as con:
             count=con.execute(text(f'SELECT COUNT(*) FROM egx_tp3d_signals_v10 WHERE {w}'),params).scalar_one()
             syms=con.execute(text(f'SELECT COUNT(DISTINCT symbol) FROM egx_tp3d_signals_v10 WHERE {w}'),params).scalar_one()
-            items=[dict(r) for r in con.execute(text(f'''SELECT symbol,signal_type,angle,first_touch_date,anchor_date,status,level,touch_close,after10_close,after10_date,return10_pct,after20_close,after20_date,return20_pct,current_close,current_date,return_current_pct
+            items=[dict(r) for r in con.execute(text(f'''SELECT symbol,signal_type,angle,first_touch_date,anchor_date,status,level,touch_close,after10_close,after10_date,return10_pct,after20_close,after20_date,return20_pct,current_close,latest_price_date,return_current_pct
                                 FROM egx_tp3d_signals_v10 WHERE {w} ORDER BY symbol,angle,anchor_date LIMIT 75 OFFSET :offset'''),params).mappings()]
         return jsonify(items=items,total=count,stocks=syms,pages=math.ceil(count/75))
 
