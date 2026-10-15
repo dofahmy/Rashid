@@ -215,7 +215,7 @@ def publish(s,day,clock):
             AND anchor_type='LOW'
             AND status IN ('CROSS_DOWN_CLOSE','TOUCH_ABOVE')
           GROUP BY 1,2,3,4
-          HAVING COUNT(DISTINCT symbol)>=5)
+          HAVING COUNT(DISTINCT symbol)>=3)
           SELECT c.* FROM us_tp_daily_candidates c JOIN groups g USING(day,signal_type,anchor_type,status)
           WHERE c.day=:day
             AND c.signal_type='SAME_ANGLE_DIFF_ANCHORS'
