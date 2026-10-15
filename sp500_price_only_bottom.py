@@ -134,12 +134,14 @@ def main():
     for n,e in enumerate(events,1):
         # representative: most deeply declined from past 60-session high
         rep=min(e,key=lambda r:(r['fromhigh60'],r['date']))
-        eventout.append(dict(event=n,start=e[0]['date'],end=e[-1]['date'],
+        first=e[0]
+        # ALL event returns measured from FIRST qualifying close, not hindsight representative.
+        eventout.append(dict(event=n,start=first['date'],end=e[-1]['date'],
              representative=rep['date'],days=len(e),
              matched_selected_examples=','.join(r['date'] for r in e if r['date'] in chosen),
              is_selected_event=int(any(r['date'] in chosen for r in e)),
-             prior20_pct=round(rep['prior20'],4),fromhigh60_pct=round(rep['fromhigh60'],4),
-             pos60_pct=round(rep['pos60'],4), **diagnostics(bars,rep)))
+             prior20_pct=round(first['prior20'],4),fromhigh60_pct=round(first['fromhigh60'],4),
+             pos60_pct=round(first['pos60'],4), **diagnostics(bars,first)))
     chosenout=[]
     for r in rows:
         if r['date'] in chosen:
@@ -155,6 +157,7 @@ def main():
         other_events=sum(not x['is_selected_event'] for x in eventout),
         other_days=sum(not x['selected_example'] for x in output),
         clustering_gap_sessions=args.gap,excluded=list(excluded),
+        event_metrics_origin='first qualifying day CLOSE; following sessions HIGH/LOW/CLOSE',
         caveats=['five dates manually selected in hindsight', 'same period used to choose thresholds and evaluate them',
                  'other matching events do not imply good bottoms',
                  '60 session future prices used in reports only, never conditions',
@@ -167,6 +170,7 @@ def main():
     for r in chosenout:print('FIVE:',r)
     print('MATCHED DAYS:',len(matched),'MATCHED EVENTS:',len(events),
           'ADDITIONAL EVENTS:',summary['other_events'])
+    print('EVENT RETURNS FROM FIRST QUALIFYING DAY CLOSE (start), NOT REPRESENTATIVE; future windows start NEXT session')
     print('ALL EVENTS (including false-positive candidates):')
     for r in eventout:print('EVENT:',r)
     print('FILES:',str(outfile)+'_days.csv',str(outfile)+'_events.csv',
