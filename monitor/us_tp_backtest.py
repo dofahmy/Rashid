@@ -63,7 +63,7 @@ def main():
     if a.min_stocks<2 or a.max_sessions<1 or a.target_pct<=0:
         p.error('invalid settings')
     DB=database()
-    with DB.connect() as s:
+    with DB() as s:
         candidates=[dict(x) for x in s.execute(GROUP_SQL, {'minimum':a.min_stocks}).mappings()]
     if not candidates:
         print('No groups qualified. No changes made.');return
@@ -75,7 +75,7 @@ def main():
     # One SQL query per symbol, instead of tens of thousands of per-signal queries.
     for i,(symbol,signals) in enumerate(by_symbol.items(),1):
         first_day=min(sg['day'] for sg in signals)
-        with DB.connect() as s:
+        with DB() as s:
             bars=[dict(x) for x in s.execute(text('''
                 SELECT day,h,c FROM us_tp_daily_bars
                 WHERE symbol=:symbol AND day>:first_day ORDER BY day
