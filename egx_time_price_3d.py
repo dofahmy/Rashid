@@ -402,26 +402,30 @@ HTML = r'''<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8">
 <article><div id="stats"></div><p class="muted">الزوايا بمعايرة ثابتة: 1×1 = ATR14 للارتكاز / 20 جلسة. لا يُستخدم الارتكاز قبل تأكيده بعشر جلسات. عمق 3D تمثيلي.</p><div class="toolbar"><button id="update">تحديث البيانات</button><button id="rebuild">فحص التحديثات</button><button onclick="location.reload()">تحديث الصفحة</button></div><div id="job" class="muted"></div></article>
 <article><div class="toolbar"><label>مدة اللمسات<select id="period"><option value="30">30 يوم</option><option value="90">90 يوم</option><option value="180">6 شهور</option><option value="365">سنة</option><option value="all">كل التاريخ</option></select></label><label>نوع الإشارة<select id="signal"><option value="ALL">الأنواع الثلاثة</option><option value="DIFFERENT_ANGLES">زاويتان مختلفتان في نفس الجلسة</option><option value="SAME_ANGLE_DIFF_ANCHORS">نفس الزاوية من ارتكازين مختلفين</option><option value="SAME_LINE_TWICE">نفس الخط مرتين في يومين مختلفين</option></select></label><label>القمة / القاع<select id="side"><option value="BOTH">LOW و HIGH</option><option value="LOW">LOW — قاع</option><option value="HIGH">HIGH — قمة</option></select></label><label>حالة السهم<select id="status"><option value="ALL">كل الحالات</option><option value="CROSS_UP_CLOSE">اختراق صاعد</option><option value="CROSS_DOWN_CLOSE">كسر هابط</option><option value="TOUCH_ABOVE">لمس وإغلاق فوق</option><option value="TOUCH_BELOW">لمس وإغلاق تحت</option></select></label><label>نوع الخط الهندسي<select id="angle"><option value="ALL">كل الخطوط</option><option value="1x1">1×1</option><option value="1x2">1×2</option><option value="2x1">2×1</option></select></label><label>الحد الأدنى لعدد الأسهم في المجموعة<input id="minStocks" type="number" min="1" max="216" step="1" value="5" style="display:block;margin-top:6px;width:105px"></label><label>ترتيب المجموعات<select id="sort"><option value="date_desc">الأحدث أولًا</option><option value="date_asc">الأقدم أولًا</option><option value="count_desc">الأكثر أسهم أولًا</option><option value="count_asc">الأقل أسهم أولًا</option></select></label></div>
 <div id="detail" class="detail"><div class="toolbar"><h3 id="detailTitle" style="flex:1"></h3><button id="closeDetail">إغلاق التفاصيل</button></div><div class="scroll"><table><thead><tr><th>السهم</th><th>نوع الإشارة</th><th>الخط</th><th>اللمسة الأولى</th><th>تاريخ الارتكاز (مرجع)</th><th>سعر الخط</th><th>إغلاق يوم اللمس</th><th>بعد 10 جلسات</th><th>عائد 10 جلسات</th><th>بعد 20 جلسة</th><th>عائد 20 جلسة</th><th>آخر إغلاق</th><th>تاريخه</th><th>العائد حتى الآن</th><th>حالة اللمس</th></tr></thead><tbody id="detailRows"></tbody></table></div><div class="pager"><button id="prevDetail">السابق</button><span id="detailPages"></span><button id="nextDetail">التالي</button></div></div>
-<div class="toolbar" style="margin-top:15px"><h3 style="flex:1">أسهم عائد أول 20 جلسة أكبر من صفر وأقل من 10%</h3><label>ترتيب العائد من +20 للآن<select id="after20Sort"><option value="desc">الأعلى أولًا</option><option value="asc">الأقل أولًا</option><option value="date">الإشارة الأحدث</option></select></label></div>
+<div class="toolbar" style="margin-top:15px"><h3 style="flex:1">أسهم عائد أول 20 جلسة أكبر من صفر وأقل من 10%</h3><button id="toggleAfter20" type="button" aria-expanded="false" aria-controls="after20Panel">إظهار نتائج 20 جلسة</button></div>
+<div id="after20Panel" style="display:none">
+<div class="toolbar"><label>ترتيب العائد من +20 للآن<select id="after20Sort"><option value="desc">الأعلى أولًا</option><option value="asc">الأقل أولًا</option><option value="date">الإشارة الأحدث</option></select></label></div>
 <p class="muted">النتائج تتبع مدة اللمسات وباقي الفلاتر أعلاه. كل سهم يظهر مرة لكل تاريخ إشارة ونوع إشارة، حتى إذا لمس أكثر من خط. لا تظهر الإشارات التي لم تكتمل لها 20 جلسة.</p>
 <div id="after20Count" class="muted"></div><div class="scroll"><table><thead><tr><th>السهم</th><th>تاريخ الإشارة</th><th>نوع الإشارة</th><th>المصدر</th><th>الحالة</th><th>إغلاق الإشارة</th><th>تاريخ +20</th><th>إغلاق +20</th><th>عائد 20 جلسة %</th><th>آخر إغلاق</th><th>تاريخ آخر سعر</th><th>العائد من +20 حتى الآن %</th></tr></thead><tbody id="after20Rows"></tbody></table></div>
 <div class="pager"><button id="prevAfter20">السابق</button><span id="after20Pages"></span><button id="nextAfter20">التالي</button></div>
+</div>
 <div id="performance" class="scroll"></div><div id="resultCount" class="muted"></div><p class="muted">نوع 1: أول لمس لخطين بزاويتين مختلفتين في نفس الجلسة. نوع 2: أول لمس لخطين بنفس الزاوية من ارتكازين مختلفين في نفس الجلسة. نوع 3: ثاني لمس لنفس الخط بعد جلسة واحدة على الأقل دون لمس. عوائد 10 و20 جلسة وحتى الآن تبدأ من يوم الإشارة. قد يظهر السهم في أكثر من نوع.</p><div class="scroll"><table><thead><tr><th>تاريخ الإشارة</th><th>نوع الإشارة</th><th>مصدر الخط</th><th>الحالة</th><th>عدد الأسهم (اضغطي للتفاصيل)</th></tr></thead><tbody id="groups"></tbody></table></div><div class="pager"><button id="prevGroup">السابق</button><span id="groupPages"></span><button id="nextGroup">التالي</button></div></article>
 <article><div class="toolbar"><h3 style="flex:1">شارت السهم — آخر 100 جلسة</h3><input id="ticker" placeholder="COMI.CA"><button id="loadChart">عرض الشارت 3D</button></div><div id="chart"></div></article></main>
 <script>
 const $=id=>document.getElementById(id),signalNames={DIFFERENT_ANGLES:'زاويتان مختلفتان',SAME_ANGLE_DIFF_ANCHORS:'نفس الزاوية من ارتكازين',SAME_LINE_TWICE:'نفس الخط مرتين'},names={CROSS_UP_CLOSE:'اختراق صاعد',CROSS_DOWN_CLOSE:'كسر هابط',TOUCH_ABOVE:'لمس وإغلاق فوق',TOUCH_BELOW:'لمس وإغلاق تحت'};
 let page=1,detailPage=1,selected=null, groupTotal=0, detailTotal=0;
 let after20Page=1,after20TotalPages=0;
+let after20Visible=false;
 const filt=()=>new URLSearchParams({period:$('period').value,signal:$('signal').value,side:$('side').value,status:$('status').value,angle:$('angle').value,sort:$('sort').value,min_stocks:$('minStocks').value});
 const safe=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 async function api(url,opts){const r=await fetch(url,opts);const d=await r.json();if(!r.ok)throw Error(d.error||r.status);return d;}
-async function groups(){try{performance();loadAfter20();let q=filt();q.set('page',page);const d=await api('/api/groups?'+q);groupTotal=d.pages;
+async function groups(){try{performance();if(after20Visible)loadAfter20();let q=filt();q.set('page',page);const d=await api('/api/groups?'+q);groupTotal=d.pages;
 $('resultCount').textContent=`${d.total} مجموعة | ${d.unique_stocks} سهم فريد ضمن الفلتر`;
 $('groups').innerHTML=d.items.map(g=>`<tr><td>${g.touch_date}</td><td>${signalNames[g.signal_type]}</td><td>${g.anchor_type==='LOW'?'LOW — قاع':'HIGH — قمة'}</td><td>${names[g.status]}</td><td><button class="showDetail" data-day="${g.touch_date}" data-side="${g.anchor_type}" data-status="${g.status}" data-signal="${g.signal_type}">${g.stocks} سهم</button></td></tr>`).join('')||'<tr><td colspan="5">لا توجد نتائج بهذه الشروط.</td></tr>';
 $('groupPages').textContent=`${page} / ${d.pages||1}`;$('prevGroup').disabled=page<=1;$('nextGroup').disabled=page>=d.pages;
 document.querySelectorAll('.showDetail').forEach(b=>b.onclick=()=>{selected={day:b.dataset.day,side:b.dataset.side,status:b.dataset.status,signal:b.dataset.signal};detailPage=1;details();});
 }catch(e){$('groups').innerHTML='<tr><td>'+safe(e.message)+'</td></tr>';}}
-async function loadAfter20(){try{
+async function loadAfter20(){if(!after20Visible)return;try{
 let q=filt();q.set('page',after20Page);q.set('after_sort',$('after20Sort').value);
 const d=await api('/api/after20?'+q);after20TotalPages=d.pages;
 $('after20Count').textContent=`${d.total} حالة سهم/يوم مطابقة | ${d.unique_stocks} سهم فريد | العائد من +20 حتى الآن يُحسب من إغلاق الجلسة العشرين`;
@@ -430,7 +434,14 @@ $('after20Rows').innerHTML=d.items.map(x=>`<tr><td><a href="#chart" class="after
 $('after20Pages').textContent=`${after20Page} / ${d.pages||1}`;$('prevAfter20').disabled=after20Page<=1;$('nextAfter20').disabled=after20Page>=d.pages;
 document.querySelectorAll('.after20Chart').forEach(x=>x.onclick=()=>{$('ticker').value=x.dataset.symbol;chart();});
 }catch(e){$('after20Count').textContent='خطأ في عرض الأسهم: '+e.message;}}
-$('after20Sort').onchange=()=>{after20Page=1;loadAfter20();};
+$('toggleAfter20').onclick=()=>{
+ after20Visible=!after20Visible;
+ $('after20Panel').style.display=after20Visible?'block':'none';
+ $('toggleAfter20').setAttribute('aria-expanded',String(after20Visible));
+ $('toggleAfter20').textContent=after20Visible?'إخفاء نتائج 20 جلسة':'إظهار نتائج 20 جلسة';
+ if(after20Visible)loadAfter20();
+};
+$('after20Sort').onchange=()=>{after20Page=1;if(after20Visible)loadAfter20();};
 $('prevAfter20').onclick=()=>{if(after20Page>1){after20Page--;loadAfter20();}};
 $('nextAfter20').onclick=()=>{if(after20Page<after20TotalPages){after20Page++;loadAfter20();}};
 async function performance(){try{let d=await api('/api/performance?'+filt()); $('performance').innerHTML='<table><thead><tr><th>نوع الإشارة</th><th>سهم/يوم</th><th>10 جلسات: عينة / متوسط %</th><th>20 جلسة: عينة / متوسط %</th><th>حتى الآن: عينة / متوسط %</th></tr></thead><tbody>'+d.items.map(x=>`<tr><td>${signalNames[x.signal_type]}</td><td>${x.stock_days}</td><td>${x.complete10} / ${x.avg10??'—'}</td><td>${x.complete20} / ${x.avg20??'—'}</td><td>${x.current_count} / ${x.avg_current??'—'}</td></tr>`).join('')+'</tbody></table>'; }catch(e){$('performance').textContent=e.message;}}
