@@ -210,12 +210,25 @@ def publish(s,day,clock):
     # Group qualification deliberately based on all symbols, AFTER signal/side/status.
     rows=s.execute(text('''WITH groups AS (
           SELECT day,signal_type,anchor_type,status,COUNT(DISTINCT symbol) AS n
-          FROM us_tp_daily_candidates WHERE day=:day GROUP BY 1,2,3,4
+          FROM us_tp_daily_candidates
+          WHERE day=:day AND signal_type='SAME_ANGLE_DIFF_ANCHORS'
+            AND anchor_type='LOW'
+            AND status IN ('CROSS_DOWN_CLOSE','TOUCH_ABOVE')
+          GROUP BY 1,2,3,4
           HAVING COUNT(DISTINCT symbol)>=5)
           SELECT c.* FROM us_tp_daily_candidates c JOIN groups g USING(day,signal_type,anchor_type,status)
-          WHERE c.day=:day ORDER BY c.symbol,c.signal_type,c.anchor_type,c.status'''),{'day':day}).mappings().all()
+          WHERE c.day=:day
+            AND c.signal_type='SAME_ANGLE_DIFF_ANCHORS'
+            AND c.anchor_type='LOW'
+            AND c.status IN ('CROSS_DOWN_CLOSE','TOUCH_ABOVE')
+          ORDER BY c.symbol,c.signal_type,c.anchor_type,c.status'''),{'day':day}).mappings().all()
+    # Defense in depth: preserve only the two explicitly selected patterns.
+    allowed_statuses={'CROSS_DOWN_CLOSE','TOUCH_ABOVE'}
     by_symbol={}
-    for r in rows:by_symbol.setdefault(r['symbol'],dict(r))
+    for r in rows:
+        if (r['signal_type']=='SAME_ANGLE_DIFF_ANCHORS' and
+                r['anchor_type']=='LOW' and r['status'] in allowed_statuses):
+            by_symbol.setdefault(r['symbol'],dict(r))
     counts=0
     for sym,r in by_symbol.items():
         entry=float(r['close_price']);ts=int(datetime.strptime(day,'%Y-%m-%d').replace(tzinfo=NY).timestamp())+16*3600
