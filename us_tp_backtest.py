@@ -21,10 +21,14 @@ GROUP_SQL = text('''
  JOIN (
    SELECT day,signal_type,anchor_type,status,COUNT(DISTINCT symbol) AS stock_count
    FROM us_tp_daily_candidates
+   WHERE signal_type='SAME_ANGLE_DIFF_ANCHORS' AND anchor_type='LOW'
+     AND status IN ('CROSS_DOWN_CLOSE','TOUCH_ABOVE')
    GROUP BY day,signal_type,anchor_type,status
    HAVING COUNT(DISTINCT symbol)>=:minimum
  ) g ON g.day=c.day AND g.signal_type=c.signal_type
      AND g.anchor_type=c.anchor_type AND g.status=c.status
+ WHERE c.signal_type='SAME_ANGLE_DIFF_ANCHORS' AND c.anchor_type='LOW'
+   AND c.status IN ('CROSS_DOWN_CLOSE','TOUCH_ABOVE')
  ORDER BY c.symbol,c.day,c.signal_type,c.anchor_type,c.status
 ''')
 
@@ -56,7 +60,7 @@ def summarise(rows):
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--out', default='/tmp/us_tp_backtest', help='Local file prefix (no DB writes)')
-    p.add_argument('--min-stocks',type=int,default=5)
+    p.add_argument('--min-stocks',type=int,default=3)
     p.add_argument('--max-sessions',type=int,default=20)
     p.add_argument('--target-pct',type=float,default=3.0)
     a=p.parse_args()
