@@ -287,7 +287,9 @@ async def scan(DB, day, concurrency, batch, publish_flag):
     with DB() as s:
         symbols=s.scalars(select(Stock.symbol).where(Stock.market=='US').order_by(Stock.symbol)).all()
         done=set(s.scalars(text('SELECT symbol FROM us_tp_daily_done WHERE day=:day AND ok=TRUE'),{'day':day}).all())
-    todo=[x for x in symbols if x not in done]
+    with DB() as session:
+        attempted=set(session.scalars(text("SELECT symbol FROM us_tp_daily_done WHERE day=:day"),{"day":day}).all())
+    todo=[x for x in symbols if x not in attempted]
     if batch>0:todo=todo[:batch]
     LOG.info('US stocks=%d done=%d this_batch=%d',len(symbols),len(done),len(todo))
     # Progress visible immediately, even if a process is interrupted.
@@ -313,6 +315,12 @@ async def scan(DB, day, concurrency, batch, publish_flag):
             chunk=todo[offset:offset+max(1,concurrency*2)]
             results=await asyncio.gather(*[one(sym) for sym in chunk])
             errors=[(sym,e) for sym,e in results if e]
+            # Persist failures for this trading day without overwriting successful rows.
+            # These symbols remain eligible for a retry on a future trading day.
+            if errors:
+                with DB.begin() as session:
+                    session.execute(text("INSERT INTO us_tp_daily_done(day,symbol,ok) VALUES(:day,:symbol,FALSE) ON CONFLICT(day,symbol) DO NOTHING"),
+                                    [{"day":day,"symbol":sym} for sym,_ in errors])
             attempts+=len(results)
             n=save_scan_progress(DB,day,len(symbols))
             LOG.info('PROGRESS done=%d/%d attempted=%d/%d, recent_failures=%d examples=%s',
