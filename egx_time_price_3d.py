@@ -401,7 +401,7 @@ HTML = r'''<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8">
 <header><h2>Time–Price Squaring — السوق المصري</h2><p>تاريخ اللمس الحقيقي وعوائد 10 و20 جلسة وحتى الآن</p></header><main>
 <article><div id="stats"></div><p class="muted">الزوايا بمعايرة ثابتة: 1×1 = ATR14 للارتكاز / 20 جلسة. لا يُستخدم الارتكاز قبل تأكيده بعشر جلسات. عمق 3D تمثيلي.</p><div class="toolbar"><button id="update">تحديث البيانات</button><button id="rebuild">فحص التحديثات</button><button onclick="location.reload()">تحديث الصفحة</button></div><div id="job" class="muted"></div></article>
 <article><div class="toolbar"><label>مدة اللمسات<select id="period"><option value="30">30 يوم</option><option value="90">90 يوم</option><option value="180">6 شهور</option><option value="365">سنة</option><option value="all">كل التاريخ</option></select></label><label>نوع الإشارة<select id="signal"><option value="ALL">الأنواع الثلاثة</option><option value="DIFFERENT_ANGLES">زاويتان مختلفتان في نفس الجلسة</option><option value="SAME_ANGLE_DIFF_ANCHORS">نفس الزاوية من ارتكازين مختلفين</option><option value="SAME_LINE_TWICE">نفس الخط مرتين في يومين مختلفين</option></select></label><label>القمة / القاع<select id="side"><option value="BOTH">LOW و HIGH</option><option value="LOW">LOW — قاع</option><option value="HIGH">HIGH — قمة</option></select></label><label>حالة السهم<select id="status"><option value="ALL">كل الحالات</option><option value="CROSS_UP_CLOSE">اختراق صاعد</option><option value="CROSS_DOWN_CLOSE">كسر هابط</option><option value="TOUCH_ABOVE">لمس وإغلاق فوق</option><option value="TOUCH_BELOW">لمس وإغلاق تحت</option></select></label><label>نوع الخط الهندسي<select id="angle"><option value="ALL">كل الخطوط</option><option value="1x1">1×1</option><option value="1x2">1×2</option><option value="2x1">2×1</option></select></label><label>الحد الأدنى لعدد الأسهم في المجموعة<input id="minStocks" type="number" min="1" max="216" step="1" value="5" style="display:block;margin-top:6px;width:105px"></label><label>ترتيب المجموعات<select id="sort"><option value="date_desc">الأحدث أولًا</option><option value="date_asc">الأقدم أولًا</option><option value="count_desc">الأكثر أسهم أولًا</option><option value="count_asc">الأقل أسهم أولًا</option></select></label></div>
-<div id="detail" class="detail"><div class="toolbar"><h3 id="detailTitle" style="flex:1"></h3><button id="closeDetail">إغلاق التفاصيل</button></div><div class="scroll"><table><thead><tr><th>السهم</th><th>نوع الإشارة</th><th>الخط</th><th>اللمسة الأولى</th><th>تاريخ الارتكاز (مرجع)</th><th>سعر الخط</th><th>إغلاق يوم اللمس</th><th>بعد 10 جلسات</th><th>عائد 10 جلسات</th><th>بعد 20 جلسة</th><th>عائد 20 جلسة</th><th>آخر إغلاق</th><th>تاريخه</th><th>العائد حتى الآن</th><th>حالة اللمس</th></tr></thead><tbody id="detailRows"></tbody></table></div><div class="pager"><button id="prevDetail">السابق</button><span id="detailPages"></span><button id="nextDetail">التالي</button></div></div>
+<div id="detail" class="detail"><div class="toolbar"><h3 id="detailTitle" style="flex:1"></h3><button id="closeDetail">إغلاق التفاصيل</button></div><div class="scroll"><table><thead><tr><th>السهم</th><th>نوع الإشارة</th><th>الخط</th><th>اللمسة الأولى</th><th>تاريخ الارتكاز (مرجع)</th><th>سعر الخط</th><th>إغلاق يوم اللمس</th><th>عائد 10 جلسات</th><th>عائد 20 جلسة</th><th>عائد سنة</th><th>آخر إغلاق</th><th>تاريخه</th><th>العائد حتى الآن</th><th>أعلى عائد منذ الإشارة</th><th>حالة اللمس</th></tr></thead><tbody id="detailRows"></tbody></table></div><div class="pager"><button id="prevDetail">السابق</button><span id="detailPages"></span><button id="nextDetail">التالي</button></div></div>
 <div class="toolbar" style="margin-top:15px"><h3 style="flex:1">أسهم عائد أول 20 جلسة أكبر من صفر وأقل من 10%</h3><button id="toggleAfter20" type="button" aria-expanded="false" aria-controls="after20Panel">إظهار نتائج 20 جلسة</button></div>
 <div id="after20Panel" style="display:none">
 <div class="toolbar"><label>ترتيب العائد من +20 للآن<select id="after20Sort"><option value="desc">الأعلى أولًا</option><option value="asc">الأقل أولًا</option><option value="date">الإشارة الأحدث</option></select></label></div>
@@ -447,7 +447,7 @@ $('nextAfter20').onclick=()=>{if(after20Page<after20TotalPages){after20Page++;lo
 async function performance(){try{let d=await api('/api/performance?'+filt()); $('performance').innerHTML='<table><thead><tr><th>نوع الإشارة</th><th>سهم/يوم</th><th>10 جلسات: عينة / متوسط %</th><th>20 جلسة: عينة / متوسط %</th><th>حتى الآن: عينة / متوسط %</th></tr></thead><tbody>'+d.items.map(x=>`<tr><td>${signalNames[x.signal_type]}</td><td>${x.stock_days}</td><td>${x.complete10} / ${x.avg10??'—'}</td><td>${x.complete20} / ${x.avg20??'—'}</td><td>${x.current_count} / ${x.avg_current??'—'}</td></tr>`).join('')+'</tbody></table>'; }catch(e){$('performance').textContent=e.message;}}
 async function details(){if(!selected)return;try{let q=new URLSearchParams({day:selected.day,side:selected.side,status:selected.status,signal:selected.signal,angle:$('angle').value,page:detailPage});let d=await api('/api/details?'+q);
 $('detail').style.display='block';$('detailTitle').textContent=`${selected.day} | ${signalNames[selected.signal]} | ${selected.side==='LOW'?'LOW — قاع':'HIGH — قمة'} | ${names[selected.status]} | ${d.stocks} سهم`;
-$('detailRows').innerHTML=d.items.map(x=>`<tr><td><a href="#chart" class="chartLink" data-sym="${safe(x.symbol)}">${safe(x.symbol)}</a></td><td>${signalNames[x.signal_type]}</td><td>${x.angle}</td><td>${x.first_touch_date||'—'}</td><td>${x.anchor_date}</td><td>${x.level.toFixed(4)}</td><td>${x.touch_close.toFixed(4)}</td><td>${x.after10_close==null?'قيد الانتظار':x.after10_close.toFixed(4)}</td><td>${x.return10_pct==null?'—':x.return10_pct.toFixed(2)+'%'}</td><td>${x.after20_close==null?'قيد الانتظار':x.after20_close.toFixed(4)}</td><td>${x.return20_pct==null?'—':x.return20_pct.toFixed(2)+'%'}</td><td>${x.current_close==null?'—':x.current_close.toFixed(4)}</td><td>${x.latest_price_date||'—'}</td><td>${x.return_current_pct==null?'—':x.return_current_pct.toFixed(2)+'%'}</td><td>${names[x.status]}</td></tr>`).join('');
+$('detailRows').innerHTML=d.items.map(x=>`<tr><td><a href="#chart" class="chartLink" data-sym="${safe(x.symbol)}">${safe(x.symbol)}</a></td><td>${signalNames[x.signal_type]}</td><td>${x.angle}</td><td>${x.first_touch_date||'—'}</td><td>${x.anchor_date}</td><td>${x.level.toFixed(4)}</td><td>${x.touch_close.toFixed(4)}</td><td>${x.return10_pct==null?'قيد الانتظار':x.return10_pct.toFixed(2)+'%'}</td><td>${x.return20_pct==null?'قيد الانتظار':x.return20_pct.toFixed(2)+'%'}</td><td title="أول جلسة تداول في أو بعد الذكرى السنوية للإشارة">${x.return_year_pct==null?'قيد الانتظار':x.return_year_pct.toFixed(2)+'%'}</td><td>${x.current_close==null?'—':x.current_close.toFixed(4)}</td><td>${x.latest_price_date||'—'}</td><td>${x.return_current_pct==null?'—':x.return_current_pct.toFixed(2)+'%'}</td><td title="أعلى High من يوم الإشارة إلى أحدث جلسة متاحة">${x.max_return_pct==null?'—':x.max_return_pct.toFixed(2)+'%'}</td><td>${names[x.status]}</td></tr>`).join('');
 $('detailPages').textContent=`${detailPage} / ${d.pages||1}`;detailTotal=d.pages;$('prevDetail').disabled=detailPage<=1;$('nextDetail').disabled=detailPage>=d.pages;
 document.querySelectorAll('.chartLink').forEach(x=>x.onclick=()=>{$('ticker').value=x.dataset.sym;chart();});$('detail').scrollIntoView({behavior:'smooth',block:'start'});
 }catch(e){alert(e.message);}}
@@ -569,6 +569,45 @@ def create_app():
             syms=con.execute(text(f'SELECT COUNT(DISTINCT symbol) FROM egx_tp3d_signals_v10 WHERE {w}'),params).scalar_one()
             items=[dict(r) for r in con.execute(text(f'''SELECT symbol,signal_type,angle,first_touch_date,anchor_date,status,level,touch_close,after10_close,after10_date,return10_pct,after20_close,after20_date,return20_pct,current_close,latest_price_date,return_current_pct
                                 FROM egx_tp3d_signals_v10 WHERE {w} ORDER BY symbol,angle,anchor_date LIMIT 75 OFFSET :offset'''),params).mappings()]
+        # Enrich only the requested detail page, without changing stored signals or
+        # rebuilding history. Historical prices are fetched for relevant symbols only.
+        # One-year return: close of first session on/after calendar-year anniversary.
+        # Maximum return: highest intraday HIGH from signal session through latest data.
+        if items:
+            by_symbol = {}
+            for row in items:
+                by_symbol.setdefault(row['symbol'], []).append(row)
+            with engine().connect() as price_con:
+                for symbol, events in by_symbol.items():
+                    earliest = min(day for day in (e['touch_date'] for e in events))
+                    candles = price_con.execute(text('''SELECT session_date,h,c
+                        FROM market_candles_1d
+                        WHERE symbol=:symbol AND session_date>=:start
+                        ORDER BY session_date'''),
+                        {'symbol':symbol,'start':earliest}).all()
+                    history = []
+                    for bar_date, bar_high, bar_close in candles:
+                        try:
+                            date_str = str(bar_date)[:10]
+                            high = float(bar_high)
+                            close = float(bar_close)
+                            if math.isfinite(high) and math.isfinite(close) and high>0 and close>0:
+                                history.append((date_str,high,close))
+                        except (ValueError,TypeError):
+                            continue
+                    for event in events:
+                        signal_day = event['touch_date']
+                        base = float(event['touch_close'])
+                        valid_prices = [bar for bar in history if bar[0]>=signal_day]
+                        event['max_return_pct'] = (
+                            round((max(bar[1] for bar in valid_prices)/base-1)*100,4)
+                            if valid_prices and base>0 else None)
+                        anniversary = (pd.Timestamp(signal_day)+pd.DateOffset(years=1)).strftime('%Y-%m-%d')
+                        year_bars = [bar for bar in valid_prices if bar[0]>=anniversary]
+                        event['return_year_pct'] = (
+                            round((year_bars[0][2]/base-1)*100,4)
+                            if year_bars and base>0 else None)
+                        event['year_price_date'] = year_bars[0][0] if year_bars else None
         return jsonify(items=items,total=count,stocks=syms,pages=math.ceil(count/75))
 
     @app.get('/api/performance')
