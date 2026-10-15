@@ -400,7 +400,7 @@ HTML = r'''<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8">
 <style>body{margin:0;background:#f4f7fb;color:#172f46;font-family:Tahoma,Arial,sans-serif}header{background:#112b46;color:#fff;padding:18px 4%}main{max-width:1500px;margin:auto;padding:20px}article{background:#fff;border:1px solid #dce6ee;border-radius:13px;padding:18px;margin-bottom:16px}button,select,input{padding:10px;border:1px solid #b9c9d5;border-radius:8px;font:inherit}button{background:#137a82;color:#fff;cursor:pointer}button:disabled{opacity:.5;cursor:wait}.toolbar{display:flex;gap:10px;align-items:end;flex-wrap:wrap;margin-bottom:10px}label{font-size:13px}label select{display:block;margin-top:6px}.muted{color:#637689;font-size:12px;line-height:1.9}.stat{display:inline-block;background:#e7f3ef;padding:9px;margin:4px;border-radius:7px}table{width:100%;border-collapse:collapse}td,th{text-align:right;border-bottom:1px solid #e2e9f0;padding:10px;white-space:nowrap}th{background:#edf3f7}.scroll{overflow:auto}.detail{background:#eef7fb;border:1px solid #a6cbd5;border-radius:10px;padding:12px;display:none;margin-bottom:15px}.pager{display:flex;align-items:center;gap:12px;justify-content:center;margin:12px 0}#chart{height:500px}</style></head><body>
 <header><h2>Time–Price Squaring — السوق المصري</h2><p>تاريخ اللمس الحقيقي وعوائد 10 و20 جلسة وحتى الآن</p></header><main>
 <article><div id="stats"></div><p class="muted">الزوايا بمعايرة ثابتة: 1×1 = ATR14 للارتكاز / 20 جلسة. لا يُستخدم الارتكاز قبل تأكيده بعشر جلسات. عمق 3D تمثيلي.</p><div class="toolbar"><button id="update">تحديث البيانات</button><button id="rebuild">فحص التحديثات</button><button onclick="location.reload()">تحديث الصفحة</button></div><div id="job" class="muted"></div></article>
-<article><div class="toolbar"><label>مدة اللمسات<select id="period"><option value="30">30 يوم</option><option value="90">90 يوم</option><option value="180">6 شهور</option><option value="365">سنة</option><option value="all">كل التاريخ</option></select></label><label>نوع الإشارة<select id="signal"><option value="ALL">الأنواع الثلاثة</option><option value="DIFFERENT_ANGLES">زاويتان مختلفتان في نفس الجلسة</option><option value="SAME_ANGLE_DIFF_ANCHORS">نفس الزاوية من ارتكازين مختلفين</option><option value="SAME_LINE_TWICE">نفس الخط مرتين في يومين مختلفين</option></select></label><label>القمة / القاع<select id="side"><option value="BOTH">LOW و HIGH</option><option value="LOW">LOW — قاع</option><option value="HIGH">HIGH — قمة</option></select></label><label>حالة السهم<select id="status"><option value="ALL">كل الحالات</option><option value="CROSS_UP_CLOSE">اختراق صاعد</option><option value="CROSS_DOWN_CLOSE">كسر هابط</option><option value="TOUCH_ABOVE">لمس وإغلاق فوق</option><option value="TOUCH_BELOW">لمس وإغلاق تحت</option></select></label><label>نوع الخط الهندسي<select id="angle"><option value="ALL">كل الخطوط</option><option value="1x1">1×1</option><option value="1x2">1×2</option><option value="2x1">2×1</option></select></label><label>ترتيب المجموعات<select id="sort"><option value="date_desc">الأحدث أولًا</option><option value="date_asc">الأقدم أولًا</option><option value="count_desc">الأكثر أسهم أولًا</option><option value="count_asc">الأقل أسهم أولًا</option></select></label></div>
+<article><div class="toolbar"><label>مدة اللمسات<select id="period"><option value="30">30 يوم</option><option value="90">90 يوم</option><option value="180">6 شهور</option><option value="365">سنة</option><option value="all">كل التاريخ</option></select></label><label>نوع الإشارة<select id="signal"><option value="ALL">الأنواع الثلاثة</option><option value="DIFFERENT_ANGLES">زاويتان مختلفتان في نفس الجلسة</option><option value="SAME_ANGLE_DIFF_ANCHORS">نفس الزاوية من ارتكازين مختلفين</option><option value="SAME_LINE_TWICE">نفس الخط مرتين في يومين مختلفين</option></select></label><label>القمة / القاع<select id="side"><option value="BOTH">LOW و HIGH</option><option value="LOW">LOW — قاع</option><option value="HIGH">HIGH — قمة</option></select></label><label>حالة السهم<select id="status"><option value="ALL">كل الحالات</option><option value="CROSS_UP_CLOSE">اختراق صاعد</option><option value="CROSS_DOWN_CLOSE">كسر هابط</option><option value="TOUCH_ABOVE">لمس وإغلاق فوق</option><option value="TOUCH_BELOW">لمس وإغلاق تحت</option></select></label><label>نوع الخط الهندسي<select id="angle"><option value="ALL">كل الخطوط</option><option value="1x1">1×1</option><option value="1x2">1×2</option><option value="2x1">2×1</option></select></label><label>الحد الأدنى لعدد الأسهم في المجموعة<input id="minStocks" type="number" min="1" max="216" step="1" value="5" style="display:block;margin-top:6px;width:105px"></label><label>ترتيب المجموعات<select id="sort"><option value="date_desc">الأحدث أولًا</option><option value="date_asc">الأقدم أولًا</option><option value="count_desc">الأكثر أسهم أولًا</option><option value="count_asc">الأقل أسهم أولًا</option></select></label></div>
 <div id="detail" class="detail"><div class="toolbar"><h3 id="detailTitle" style="flex:1"></h3><button id="closeDetail">إغلاق التفاصيل</button></div><div class="scroll"><table><thead><tr><th>السهم</th><th>نوع الإشارة</th><th>الخط</th><th>اللمسة الأولى</th><th>تاريخ الارتكاز (مرجع)</th><th>سعر الخط</th><th>إغلاق يوم اللمس</th><th>بعد 10 جلسات</th><th>عائد 10 جلسات</th><th>بعد 20 جلسة</th><th>عائد 20 جلسة</th><th>آخر إغلاق</th><th>تاريخه</th><th>العائد حتى الآن</th><th>حالة اللمس</th></tr></thead><tbody id="detailRows"></tbody></table></div><div class="pager"><button id="prevDetail">السابق</button><span id="detailPages"></span><button id="nextDetail">التالي</button></div></div>
 <div class="toolbar" style="margin-top:15px"><h3 style="flex:1">أسهم عائد أول 20 جلسة أكبر من صفر وأقل من 10%</h3><label>ترتيب العائد من +20 للآن<select id="after20Sort"><option value="desc">الأعلى أولًا</option><option value="asc">الأقل أولًا</option><option value="date">الإشارة الأحدث</option></select></label></div>
 <p class="muted">النتائج تتبع مدة اللمسات وباقي الفلاتر أعلاه. كل سهم يظهر مرة لكل تاريخ إشارة ونوع إشارة، حتى إذا لمس أكثر من خط. لا تظهر الإشارات التي لم تكتمل لها 20 جلسة.</p>
@@ -412,7 +412,7 @@ HTML = r'''<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8">
 const $=id=>document.getElementById(id),signalNames={DIFFERENT_ANGLES:'زاويتان مختلفتان',SAME_ANGLE_DIFF_ANCHORS:'نفس الزاوية من ارتكازين',SAME_LINE_TWICE:'نفس الخط مرتين'},names={CROSS_UP_CLOSE:'اختراق صاعد',CROSS_DOWN_CLOSE:'كسر هابط',TOUCH_ABOVE:'لمس وإغلاق فوق',TOUCH_BELOW:'لمس وإغلاق تحت'};
 let page=1,detailPage=1,selected=null, groupTotal=0, detailTotal=0;
 let after20Page=1,after20TotalPages=0;
-const filt=()=>new URLSearchParams({period:$('period').value,signal:$('signal').value,side:$('side').value,status:$('status').value,angle:$('angle').value,sort:$('sort').value});
+const filt=()=>new URLSearchParams({period:$('period').value,signal:$('signal').value,side:$('side').value,status:$('status').value,angle:$('angle').value,sort:$('sort').value,min_stocks:$('minStocks').value});
 const safe=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 async function api(url,opts){const r=await fetch(url,opts);const d=await r.json();if(!r.ok)throw Error(d.error||r.status);return d;}
 async function groups(){try{performance();loadAfter20();let q=filt();q.set('page',page);const d=await api('/api/groups?'+q);groupTotal=d.pages;
@@ -441,7 +441,7 @@ $('detailPages').textContent=`${detailPage} / ${d.pages||1}`;detailTotal=d.pages
 document.querySelectorAll('.chartLink').forEach(x=>x.onclick=()=>{$('ticker').value=x.dataset.sym;chart();});$('detail').scrollIntoView({behavior:'smooth',block:'start'});
 }catch(e){alert(e.message);}}
 $('closeDetail').onclick=()=>{$('detail').style.display='none';selected=null;};
-for(let key of ['period','signal','side','status','angle','sort'])$(key).onchange=()=>{after20Page=1;page=1;selected=null;$('detail').style.display='none';groups();};
+for(let key of ['period','signal','side','status','angle','sort','minStocks'])$(key).onchange=()=>{after20Page=1;page=1;selected=null;$('detail').style.display='none';groups();};
 $('prevGroup').onclick=()=>{page--;groups();};$('nextGroup').onclick=()=>{page++;groups();};$('prevDetail').onclick=()=>{detailPage--;details();};$('nextDetail').onclick=()=>{detailPage++;details();};
 async function chart(){try{let d=await api('/api/chart?symbol='+encodeURIComponent($('ticker').value));let candles=d.candles, angles=d.angles;
 if(typeof Plotly==='undefined')throw Error('مكتبة Plotly لم يتم تحميلها');
@@ -478,13 +478,28 @@ def create_app():
         sort=request.args.get('sort','date_desc')
         order={'date_desc':'touch_date DESC,stocks DESC','date_asc':'touch_date ASC,stocks DESC',
                'count_desc':'stocks DESC,touch_date DESC','count_asc':'stocks ASC,touch_date DESC'}.get(sort,'touch_date DESC,stocks DESC')
+        # Filter AFTER all other filters and count DISTINCT stocks per group.
+        # Leave the historical signals untouched: this is a lightweight read-only filter.
+        minimum=bounded_int(request.args.get('min_stocks'),5,1,216)
         base=f'FROM egx_tp3d_signals_v10 WHERE {where}'
+        grouped=f'''SELECT touch_date,signal_type,anchor_type,status,
+                        COUNT(DISTINCT symbol) AS stocks
+                        {base} GROUP BY 1,2,3,4
+                        HAVING COUNT(DISTINCT symbol)>=:min_stocks'''
+        parameters={**params,'min_stocks':minimum}
         with engine().connect() as con:
-            count=con.execute(text(f'''SELECT count(*) FROM (SELECT touch_date,signal_type,anchor_type,status {base} GROUP BY 1,2,3,4) g'''),params).scalar_one()
-            unique=con.execute(text(f'SELECT COUNT(DISTINCT symbol) {base}'),params).scalar_one()
-            sql=f'''SELECT touch_date,signal_type,anchor_type,status,COUNT(DISTINCT symbol) AS stocks
-                      {base} GROUP BY 1,2,3,4 ORDER BY {order} LIMIT 75 OFFSET :offset'''
-            rows=[dict(r) for r in con.execute(text(sql),{**params,'offset':(pg-1)*75}).mappings()]
+            count=con.execute(text(f'SELECT COUNT(*) FROM ({grouped}) q'),parameters).scalar_one()
+            # Only count symbols present in qualifying groups, never the removed groups.
+            unique_sql=f'''SELECT COUNT(DISTINCT s.symbol)
+                FROM (SELECT symbol,touch_date,signal_type,anchor_type,status {base}) s
+                JOIN ({grouped}) q
+                  ON s.touch_date=q.touch_date AND s.signal_type=q.signal_type
+                 AND s.anchor_type=q.anchor_type AND s.status=q.status
+                '''
+            unique=con.execute(text(unique_sql),parameters).scalar_one()
+            rows=[dict(r) for r in con.execute(text(
+                f'SELECT * FROM ({grouped}) q ORDER BY {order} LIMIT 75 OFFSET :offset'),
+                {**parameters,'offset':(pg-1)*75}).mappings()]
         return jsonify(items=rows,total=count,pages=math.ceil(count/75),unique_stocks=unique)
 
     @app.get('/api/after20')
