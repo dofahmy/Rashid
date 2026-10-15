@@ -83,7 +83,7 @@ def refresh_daily_data(days_back=14):
                 for _,r in x.iterrows():
                     d=pd.Timestamp(r["date"]).date();close=_scalar(r["close"])
                     if close is None or close<=0:continue
-                   vals={cs.name:sym,cd.name:d.isoformat(),cc.name:close}
+                    vals={cs.name:sym,cd.name:d.isoformat(),cc.name:close}
                     if cts is not None:vals[cts.name]=int(pd.Timestamp(d,tz="UTC").timestamp())
                     if co is not None:vals[co.name]=_scalar(r["open"]) or close
                     if ch is not None:vals[ch.name]=_scalar(r["high"]) or close
@@ -94,7 +94,7 @@ def refresh_daily_data(days_back=14):
                     if csource is not None:vals[csource.name]="YAHOO_EGX_PAGE_REFRESH"
                     if cretrieved is not None:vals[cretrieved.name]=now_utc
                     if cmeta is not None:vals[cmeta.name]=json.dumps({"refresh":"backend_button","source":"yfinance"},ensure_ascii=False)
-               exists=s.scalar(select(cs).where(cs==sym,cd==d.isoformat()).limit(1))
+                    exists=s.scalar(select(cs).where(cs==sym,cd==d.isoformat()).limit(1))
                     if exists is None:s.execute(insert(t).values(**vals))
                     else:
                         upd={k:v for k,v in vals.items() if k not in (cs.name,cd.name)}
