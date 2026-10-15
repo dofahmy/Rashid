@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Read-only two-branch S&P 500 signal backtest, frozen 86 dates minus 2024-12-18.
+"""Read-only two-branch S&P 500 signal backtest, live DB dates minus 2024-12-18.
 
 RISING (prior 20-session close return > 0): place 3%-below-signal-close
 buy limit starting next session; target original signal close.
 FALLING (prior return <= -3%): buy next session open and target
-entry * (1 + 0.6*abs(prior20 return)). This applies the 50%-of-drop
+entry * (1 + 0.6*abs(prior20 return)). This applies the 60%-of-drop
 percentage to executable next-session entry rather than the signal close.
 OTHER: ignored. Uses daily candles; conservatively does not permit a limit
 entry and profit exit on the same daily candle because intraday order is unknown.
-All trades still open at the end of a 20/90-session horizon are marked to
+All trades still open at the end of the chosen horizon are marked to
 market at the final available close (not forced exited in reality).
 """
 import argparse
@@ -22,7 +22,7 @@ from urllib.request import urlopen, Request
 from urllib.parse import quote, urlencode
 from urllib.error import HTTPError, URLError
 import time
-from us_tp_sp500_market_test import load_dates
+
 
 EXCLUDED = '2024-12-18'
 
@@ -143,9 +143,12 @@ def main():
     p.add_argument('--out',default='/tmp/sp500_two_way')
     p.add_argument('--ticker',default='^GSPC')
     p.add_argument('--horizons',type=int,nargs='+',default=[60])
-    p.add_argument('--live',action='store_true',help='Use updated DB dates (not frozen 86 dates)')
+    p.add_argument('--min-stocks',type=int,default=5,help='Minimum distinct symbols in one day, default 5')
+    p.add_argument('--min-sectors',type=int,default=2,help='Minimum distinct sectors in one day, default 2')
+    p.add_argument('--compare-old',action='store_true',help='Also report the original 9 stocks / 3 sectors filter on the same database snapshot')
     a=p.parse_args()
-    ev=[e for e in load_dates(a.live) if e['day']!=EXCLUDED]
+    if a.min_stocks < 1 or a.min_sectors < 1: p.error('Minimums must be positive')
+    ev=[e for e in load_dates_live_threshold(a.min_stocks,a.min_sectors) if e['day']!=EXCLUDED]
     bars=get_bars(a.ticker)
     index={b['date']:i for i,b in enumerate(bars)}
     rows=[];missing=[]
@@ -158,7 +161,15 @@ def main():
     path=Path(a.out);path.parent.mkdir(parents=True,exist_ok=True)
     write(str(path)+'_trades.csv',rows)
     agg=summary(rows);write(str(path)+'_summary.csv',agg)
+    print('NEW FILTER: distinct stocks >=',a.min_stocks,'distinct sectors >=',a.min_sectors,'; SAME_ANGLE_DIFF_ANCHORS / LOW / valid statuses; original 5-stock subgroup requirement preserved')
     print('SIGNALS:',len(ev),'EXCLUDED:',EXCLUDED,'MISSING:',missing)
+    if a.compare_old:
+        older=[e for e in load_dates_live_threshold(9,3) if e['day']!=EXCLUDED]
+        older_rows=[trial(bars,index[e['day']],e,h) for e in older for h in a.horizons if e['day'] in index and index[e['day']]>=20]
+        write(str(path)+'_old_9x3_trades.csv',older_rows)
+        oldagg=summary(older_rows);write(str(path)+'_old_9x3_summary.csv',oldagg)
+        print('OLD FILTER SIGNALS:',len(older))
+        for old in oldagg: print('OLD SUMMARY',old)
     print('INDEX BARS:',len(bars),bars[0]['date'],'to',bars[-1]['date'],a.ticker)
     print('TRADING RULES: prior20>0 => -3% buy limit, exit at signal close; prior20<=-3 => next session OPEN, target +60% of abs(prior20%); others SKIP.')
     print('EXIT ENTRY CANDLE: NOT counted. No stoploss or forced liquidation.')
@@ -170,5 +181,48 @@ def main():
     print('FILES:',str(path)+'_trades.csv',str(path)+'_summary.csv')
     print('READ ONLY; daily index proxy is not tradable; no fees, slippage or financing. Overlapping signal dates are correlated.')
     print('WARNING: historical signal pivot confirmation and current sector labels may introduce look-ahead/survivorship bias.')
+
+def load_dates_live_threshold(min_stocks=5, min_sectors=2):
+    """Daily market breadth built from original eligible candidate groups.
+
+    Requires >=5 distinct stocks inside each (day, signal_type, anchor_type,
+    status) group, then combines eligible groups into unique day-symbol rows;
+    sector classification is one row per symbol. Does not modify the DB.
+    """
+    from core import database
+    from sqlalchemy import text
+    sql = text("""
+    WITH qualified_groups AS (
+      SELECT day, signal_type, anchor_type, status
+      FROM us_tp_daily_candidates
+      WHERE signal_type='SAME_ANGLE_DIFF_ANCHORS'
+        AND anchor_type='LOW'
+        AND status IN ('CROSS_DOWN_CLOSE','TOUCH_ABOVE')
+      GROUP BY day, signal_type, anchor_type, status
+      HAVING COUNT(DISTINCT symbol) >= 5
+    ), unique_signals AS (
+      SELECT DISTINCT c.day, c.symbol
+      FROM us_tp_daily_candidates c
+      JOIN qualified_groups g ON
+        (c.day,c.signal_type,c.anchor_type,c.status) =
+        (g.day,g.signal_type,g.anchor_type,g.status)
+    ), daily AS (
+      SELECT u.day,
+             COUNT(DISTINCT u.symbol) AS stocks,
+             COUNT(DISTINCT NULLIF(TRIM(s.sector),'')) AS sectors
+      FROM unique_signals u
+      LEFT JOIN us_tp_sector_lookup s ON s.symbol=u.symbol
+      GROUP BY u.day
+    )
+    SELECT day, stocks, sectors
+    FROM daily
+    WHERE stocks >= :min_stocks AND sectors >= :min_sectors
+    ORDER BY day
+    """)
+    maker = database()
+    with maker() as session:
+        rows = session.execute(sql, {'min_stocks':min_stocks,'min_sectors':min_sectors}).mappings().all()
+    return [dict(day=str(r['day'])[:10], stocks=int(r['stocks']), sectors=int(r['sectors'])) for r in rows]
+
 
 if __name__=='__main__':main()
