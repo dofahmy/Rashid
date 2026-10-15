@@ -567,7 +567,7 @@ def create_app():
         with engine().connect() as con:
             count=con.execute(text(f'SELECT COUNT(*) FROM egx_tp3d_signals_v10 WHERE {w}'),params).scalar_one()
             syms=con.execute(text(f'SELECT COUNT(DISTINCT symbol) FROM egx_tp3d_signals_v10 WHERE {w}'),params).scalar_one()
-            items=[dict(r) for r in con.execute(text(f'''SELECT symbol,signal_type,angle,first_touch_date,anchor_date,status,level,touch_close,after10_close,after10_date,return10_pct,after20_close,after20_date,return20_pct,current_close,latest_price_date,return_current_pct
+            items=[dict(r) for r in con.execute(text(f'''SELECT symbol,touch_date,signal_type,angle,first_touch_date,anchor_date,status,level,touch_close,after10_close,after10_date,return10_pct,after20_close,after20_date,return20_pct,current_close,latest_price_date,return_current_pct
                                 FROM egx_tp3d_signals_v10 WHERE {w} ORDER BY symbol,angle,anchor_date LIMIT 75 OFFSET :offset'''),params).mappings()]
         # Enrich only the requested detail page, without changing stored signals or
         # rebuilding history. Historical prices are fetched for relevant symbols only.
