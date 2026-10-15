@@ -44,15 +44,15 @@ def ensure(s):
         PRIMARY KEY(day,symbol))'''))
 
 
-def fetch_chart(session, symbol, semaphore):
+def fetch_chart(session, symbol, semaphore, price_range="5y"):
     async def go():
         from urllib.parse import quote
         url='https://query1.finance.yahoo.com/v8/finance/chart/'+quote(symbol,safe='')
-        params={'interval':'1d','range':'5y','includePrePost':'false'}
+        params={'interval':'1d','range':price_range,'includePrePost':'false'}
         async with semaphore:
-            for attempt in range(3):
+            for attempt in range(2):
                 try:
-                    async with session.get(url,params=params,timeout=aiohttp.ClientTimeout(total=35)) as r:
+                    async with session.get(url,params=params,timeout=aiohttp.ClientTimeout(total=20,connect=8)) as r:
                         if r.status in (429,500,502,503,504):
                             await asyncio.sleep(2**attempt+2);continue
                         if r.status!=200:raise ValueError('HTTP '+str(r.status))
@@ -69,7 +69,7 @@ def fetch_chart(session, symbol, semaphore):
                                 if h>=max(o,c,l) and l<=min(o,c,h):bars.append((day,o,h,l,c))
                         return list({r[0]:r for r in bars}.values())
                 except (aiohttp.ClientError,asyncio.TimeoutError,ValueError,KeyError,IndexError,TypeError) as e:
-                    if attempt==2:raise ValueError(str(e)) from None
+                    if attempt==1:raise ValueError(str(e)) from None
                     await asyncio.sleep(2**attempt+1)
         raise ValueError('retries_exhausted')
     return go()
@@ -134,29 +134,46 @@ def candidates_for_symbol(symbol,bars):
     return [{k:v for k,v in r.items() if k!='anchor'} for r in grouped.values()]
 
 
-def save_symbol(DB,day,symbol,bars):
+UPSERT_BARS = text('''INSERT INTO us_tp_daily_bars(symbol,day,o,h,l,c)
+ VALUES(:symbol,:day,:o,:h,:l,:c)
+ ON CONFLICT(symbol,day) DO UPDATE SET
+ o=excluded.o,h=excluded.h,l=excluded.l,c=excluded.c''')
+UPSERT_CANDIDATES = text('''INSERT INTO us_tp_daily_candidates
+ (day,symbol,signal_type,anchor_type,status,angles,close_price)
+ VALUES(:day,:symbol,:signal_type,:anchor_type,:status,:angles,:close_price)
+ ON CONFLICT(day,symbol,signal_type,anchor_type,status)
+ DO UPDATE SET angles=excluded.angles,close_price=excluded.close_price''')
+
+def cached_bars(DB,symbol):
+    with DB() as s:
+        return [tuple(r) for r in s.execute(text(
+            'SELECT day,o,h,l,c FROM us_tp_daily_bars WHERE symbol=:sym ORDER BY day'),
+            {'sym':symbol})]
+
+def save_symbol(DB,day,symbol,bars,old_bars=None):
+    old_bars=old_bars or []
+    # An initial 5-year fetch is necessary once; later scans fetch only recent bars.
+    # Bulk insert/upsert instead of round-tripping for each of ~1,250 daily candles.
+    old_by_day={r[0]:r for r in old_bars}
+    fresh=[r for r in bars if old_by_day.get(r[0]) != r]
+    merged=dict(old_by_day)
+    merged.update((r[0],r) for r in bars)
+    complete=sorted(merged.values())
+    rows=candidates_for_symbol(symbol,complete)
     with DB.begin() as s:
-        for d,o,h,l,c in bars:
-            s.execute(text('''INSERT INTO us_tp_daily_bars(symbol,day,o,h,l,c)
-            VALUES(:symbol,:day,:o,:h,:l,:c) ON CONFLICT(symbol,day)
-            DO UPDATE SET o=excluded.o,h=excluded.h,l=excluded.l,c=excluded.c'''),
-            dict(symbol=symbol,day=d,o=o,h=h,l=l,c=c))
-        # Re-evaluate all stored dates for the symbol so retouch events don't disappear.
+        for i in range(0,len(fresh),300):
+            payload=[dict(symbol=symbol,day=d,o=o,h=h,l=l,c=c)
+                     for d,o,h,l,c in fresh[i:i+300]]
+            if payload:s.execute(UPSERT_BARS,payload)
         s.execute(text('DELETE FROM us_tp_daily_candidates WHERE symbol=:symbol'),{'symbol':symbol})
-        # Keep Rajih current-performance view aligned to the daily close.
+        for i in range(0,len(rows),300):
+            s.execute(UPSERT_CANDIDATES,rows[i:i+300])
         stock=s.get(Stock,symbol)
         if stock is not None:
-            stock.last_price=float(bars[-1][4])
-            stock.last_bar=int(datetime.strptime(bars[-1][0],'%Y-%m-%d').replace(tzinfo=NY).timestamp())+16*3600
+            stock.last_price=float(complete[-1][4])
+            stock.last_bar=int(datetime.strptime(complete[-1][0],'%Y-%m-%d').replace(tzinfo=NY).timestamp())+16*3600
             stock.checked_at=now()
             stock.error=''
-        rows=candidates_for_symbol(symbol,bars)
-        for r in rows:
-            s.execute(text('''INSERT INTO us_tp_daily_candidates
-              (day,symbol,signal_type,anchor_type,status,angles,close_price)
-              VALUES(:day,:symbol,:signal_type,:anchor_type,:status,:angles,:close_price)
-              ON CONFLICT(day,symbol,signal_type,anchor_type,status)
-              DO UPDATE SET angles=excluded.angles,close_price=excluded.close_price'''),r)
         s.execute(text('''INSERT INTO us_tp_daily_done(day,symbol,ok) VALUES(:day,:symbol,TRUE)
            ON CONFLICT(day,symbol) DO UPDATE SET ok=TRUE'''),{'day':day,'symbol':symbol})
 
@@ -234,44 +251,62 @@ def publish(s,day,clock):
     return counts
 
 
+def save_scan_progress(DB,day,expected,allow_publication=False,publish_flag=False):
+    with DB.begin() as s:
+        n=int(s.scalar(text('SELECT COUNT(*) FROM us_tp_daily_done WHERE day=:day AND ok=TRUE'),{'day':day}) or 0)
+        was=s.execute(text('SELECT published FROM us_tp_daily_scan WHERE day=:day'),{'day':day}).scalar()
+        s.execute(text('''INSERT INTO us_tp_daily_scan(day,expected_count,scanned_count,errors_count,completed,published,updated_at)
+          VALUES(:day,:expected,:n,:err,:complete,:published,NOW())
+          ON CONFLICT(day) DO UPDATE SET expected_count=excluded.expected_count,
+          scanned_count=excluded.scanned_count,errors_count=excluded.errors_count,
+          completed=excluded.completed,updated_at=NOW()'''),
+          dict(day=day,expected=expected,n=n,err=max(0,expected-n),complete=n==expected,published=bool(was)))
+        if allow_publication and n==expected and expected>0:
+            close_plans(s,day)
+            if publish_flag and not bool(was):
+                total=publish(s,day,int(time.time()))
+                s.execute(text('UPDATE us_tp_daily_scan SET published=TRUE WHERE day=:day'),{'day':day})
+                LOG.info('Published %s distinct stock signals for %s',total,day)
+    return n
+
 async def scan(DB, day, concurrency, batch, publish_flag):
     with DB.begin() as s:ensure(s)
     with DB() as s:
         symbols=s.scalars(select(Stock.symbol).where(Stock.market=='US').order_by(Stock.symbol)).all()
-        done=set(s.scalars(text('SELECT symbol FROM us_tp_daily_done WHERE day=:day'),{'day':day}).all())
+        done=set(s.scalars(text('SELECT symbol FROM us_tp_daily_done WHERE day=:day AND ok=TRUE'),{'day':day}).all())
     todo=[x for x in symbols if x not in done]
     if batch>0:todo=todo[:batch]
     LOG.info('US stocks=%d done=%d this_batch=%d',len(symbols),len(done),len(todo))
-    sem=asyncio.Semaphore(concurrency)
+    # Progress visible immediately, even if a process is interrupted.
+    save_scan_progress(DB,day,len(symbols))
+    sem=asyncio.Semaphore(max(1,min(concurrency,8)))
+    attempts=0
     async with aiohttp.ClientSession(headers={'User-Agent':'Mozilla/5.0'}) as http:
         async def one(sym):
             try:
-                bars=await fetch_chart(http,sym,sem)
-                # Validate full day present; otherwise don't mark as completed.
-                if len(bars)<60 or bars[-1][0]!=day:return sym,'not_ready_or_insufficient_history'
-                await asyncio.to_thread(save_symbol,DB,day,sym,bars)
+                history=await asyncio.to_thread(cached_bars,DB,sym)
+                # Reuse existing history when it is long enough to cover the pivots.
+                # A 1-month fetch handles recent corrections, holidays and new sessions.
+                price_range='1mo' if len(history)>=600 else '5y'
+                bars=await fetch_chart(http,sym,sem,price_range)
+                last=max(history[-1][0] if history else '',bars[-1][0] if bars else '')
+                if last != day or len(history)+len(bars)<60:
+                    return sym,'not_ready_or_insufficient_history'
+                await asyncio.to_thread(save_symbol,DB,day,sym,bars,history)
                 return sym,None
-            except Exception as e:return sym,str(e)[:130]
-        for offset in range(0,len(todo),concurrency*3):
-            results=await asyncio.gather(*[one(sym) for sym in todo[offset:offset+concurrency*3]])
+            except Exception as e:
+                return sym,str(e)[:130]
+        for offset in range(0,len(todo),max(1,concurrency*2)):
+            chunk=todo[offset:offset+max(1,concurrency*2)]
+            results=await asyncio.gather(*[one(sym) for sym in chunk])
             errors=[(sym,e) for sym,e in results if e]
-            LOG.info('batch done %d/%d; failures=%d %s',min(offset+len(results),len(todo)),len(todo),len(errors),errors[:3])
-    with DB.begin() as s:
-        completed=int(s.scalar(text('SELECT COUNT(*) FROM us_tp_daily_done WHERE day=:day'),{'day':day}) or 0)
-        existing=s.execute(text('SELECT published FROM us_tp_daily_scan WHERE day=:day'),{'day':day}).scalar()
-        s.execute(text('''INSERT INTO us_tp_daily_scan(day,expected_count,scanned_count,errors_count,completed,published)
-          VALUES(:day,:expected,:n,:err,:complete,:published)
-          ON CONFLICT(day) DO UPDATE SET expected_count=:expected,scanned_count=:n,
-           errors_count=:err,completed=:complete'''),dict(day=day,expected=len(symbols),n=completed,
-              err=len(symbols)-completed,complete=completed==len(symbols),published=bool(existing)))
-        # Only publish when ALL configured symbols have valid daily data. Fail closed.
-        if completed==len(symbols) and len(symbols)>0:
-            close_plans(s,day)
-            if publish_flag and not bool(existing):
-                n=publish(s,day,int(time.time()))
-                s.execute(text('UPDATE us_tp_daily_scan SET published=TRUE WHERE day=:day'),{'day':day})
-                LOG.info('Published %s distinct stock signals for %s',n,day)
-        else:LOG.warning('Incomplete universe %d/%d. NO new customer signals.',completed,len(symbols))
+            attempts+=len(results)
+            n=save_scan_progress(DB,day,len(symbols))
+            LOG.info('PROGRESS done=%d/%d attempted=%d/%d, recent_failures=%d examples=%s',
+                     n,len(symbols),attempts,len(todo),len(errors),errors[:3])
+    n=save_scan_progress(DB,day,len(symbols),allow_publication=True,publish_flag=publish_flag)
+    if n!=len(symbols):
+        LOG.warning('Incomplete universe %d/%d; NO new customer signals.',n,len(symbols))
 
 
 def main():

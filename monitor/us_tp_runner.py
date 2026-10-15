@@ -35,19 +35,20 @@ def main():
         if not acquired:raise SystemExit('Another monitor worker is running (legacy or Time–Price)')
         LOG.info('M15 strategy OFF. US daily Time–Price monitor: alerts=%s',live)
         previous=None
+        batch=max(1,int(os.getenv('US_TP_BATCH','25')))
         while True:
             try:
                 now=datetime.now(NY)
                 day=last_session_candidate(now)
                 if previous!=day:
-                    asyncio.run(scan(DB,day,int(os.getenv('US_TP_CONCURRENCY','4')),0,live))
+                    asyncio.run(scan(DB,day,int(os.getenv('US_TP_CONCURRENCY','4')),batch,live))
                     previous=day
                     LOG.info('Daily scan attempted: %s. Incomplete scans send no new recommendations.',day)
                 else:
                     # Retry incomplete scans, e.g. Yahoo rate limiting, without double-publishing.
-                    asyncio.run(scan(DB,day,int(os.getenv('US_TP_CONCURRENCY','4')),0,live))
+                    asyncio.run(scan(DB,day,int(os.getenv('US_TP_CONCURRENCY','4')),batch,live))
             except Exception:
                 LOG.exception('Time–Price worker scan failed; will retry, M15 remains disabled')
-            time.sleep(int(os.getenv('US_TP_POLL_SECONDS','3600')))
+            time.sleep(int(os.getenv('US_TP_POLL_SECONDS','60')))
 
 if __name__=='__main__':main()
