@@ -74,7 +74,7 @@ def main():
     g=p.add_mutually_exclusive_group()
     g.add_argument('--date', default=None, help='YYYY-MM-DD, e.g. 2026-10-12')
     g.add_argument('--all-history', action='store_true', help='scan every cached trading date, in calendar-month batches')
-    p.add_argument('--deviation', type=float, default=10, help='relative percentage tolerance per one of 4 features, default 10')
+    p.add_argument('--deviation', type=float, default=20, help='relative percentage tolerance per one of 4 features, default 20')
     p.add_argument('--out', default='/tmp/us_lstr_bottom_signature')
     args=p.parse_args()
     if not (0 <= args.deviation <=100):p.error('--deviation must be 0..100')
@@ -148,13 +148,26 @@ def main():
     cols=['date','symbol','company','signal_close','latest_day','latest_close','change_to_latest_pct']+list(REF)+['deviation_'+k for k in REF]+['max_deviation_pct']
     write_csv(str(output)+'_matches.csv',found,cols)
     write_csv(str(output)+'_counts.csv',[{'date':d,'count':v} for d,v in sorted(counts.items())],['date','count'])
+    years=sorted({str(r['date'])[:4] for r in found} | ({str(db_start.year),str(db_end.year)} if not args.all_history else {str(y) for y in range(db_start.year,db_end.year+1)}))
+    yearly=[]
+    for year in years:
+        group=[r for r in found if r['date'].startswith(year)]
+        yearly.append({'year':year,'matching_rows':len(group),
+                       'unique_stocks':len({r['symbol'] for r in group}),
+                       'matching_dates':len({r['date'] for r in group})})
+    write_csv(str(output)+'_yearly.csv',yearly,
+              ['year','matching_rows','unique_stocks','matching_dates'])
+    print('YEARLY SUMMARY (matching_rows counts stock/date signals; unique_stocks deduplicates symbols):')
+    print('YEAR | MATCHING SIGNALS | UNIQUE STOCKS | MATCHING DATES')
+    for yr in yearly:
+        print(yr['year'],'|',yr['matching_rows'],'|',yr['unique_stocks'],'|',yr['matching_dates'])
     print('TOTAL MATCHING ROWS:',len(found),'DATES WITH MATCH:',len(counts))
     for d,n in sorted(counts.items()):print('DATE:',d,'MATCHES:',n)
     if not args.all_history:
         for r in found:
             print('STOCK',r['symbol'],r['company'],'SIGNAL',r['date'],r['signal_close'],'LATEST',r['latest_day'],r['latest_close'],'CHANGE %',r['change_to_latest_pct'],'MAX DEV %',r['max_deviation_pct'])
         if not found:print('NO MATCHES for requested date; check cached bars and try --all-history for wider search.')
-    print('FILES:',str(output)+'_matches.csv',str(output)+'_counts.csv')
+    print('FILES:',str(output)+'_matches.csv',str(output)+'_counts.csv',str(output)+'_yearly.csv')
     print('READ ONLY. No trading, Time-Price, or index-relative comparison. 2021+ cached coverage is incomplete and has survivorship bias.')
 
 if __name__=='__main__':main()
