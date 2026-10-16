@@ -41,7 +41,7 @@ def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--matches',default='/tmp/lstr_dev20_matches.csv',help='matches CSV from --all-history --deviation 20')
     p.add_argument('--out',default='/tmp/lstr_dev20_target3',help='file prefix for outputs')
-    p.add_argument('--target',type=float,default=3.0,help='take profit percent, default 3')
+    p.add_argument('--target',type=float,default=3.0,help='take profit percentage from console, e.g. --target 3 or --target 5')
     p.add_argument('--year',type=int,default=None,help='optional one signal year filter')
     args=p.parse_args()
     if args.target <= 0 or args.target > 100: p.error('--target must be >0 and <=100')
@@ -68,6 +68,10 @@ def main():
                  'first_target_session':first_hit if first_hit else '',
                  'first_target_date':str(bars[first_hit-1]['day'])[:10] if first_hit else '',
                  'target_hit_within_60':1 if first_hit else (0 if observed>=60 else ''),
+                 'trade_status_60':'TARGET_CLOSED' if first_hit else ('NO_TARGET_60' if observed>=60 else 'OPEN_WAITING'),
+                 'trade_exit_day':str(bars[first_hit-1]['day'])[:10] if first_hit else '',
+                 'trade_exit_price':rnd(target_price) if first_hit else '',
+                 'trade_realized_return_pct':rnd(args.target) if first_hit else '',
                  'latest_available_day':str(bars[-1]['day'])[:10] if bars else ''}
             for horizon in HORIZONS:
                 tag=str(horizon)
@@ -90,14 +94,15 @@ def main():
                 else:
                     for key in ('day_','close_','return_','max_rise_','max_fall_','strategy_','strategy_'):
                         row[key+tag+('_pct' if key in ('return_','max_rise_','max_fall_','strategy_') else '')]=''
-                    row['strategy_'+tag+'_status']='INCOMPLETE'
+                    row['strategy_'+tag+'_status']='TARGET_CLOSED' if hit else 'OPEN_WAITING'
             rows.append(row)
             if i%200==0 or i==len(signals):
                 print('PROCESSED:',i,'/',len(signals),flush=True)
     finally: session.close()
     prefix=Path(args.out);prefix.parent.mkdir(parents=True,exist_ok=True)
     columns=['date','year','symbol','company','signal_close','target_price','max_deviation_pct',
-             'observed_sessions','first_target_session','first_target_date','target_hit_within_60','latest_available_day']
+             'observed_sessions','first_target_session','first_target_date','target_hit_within_60',
+             'trade_status_60','trade_exit_day','trade_exit_price','trade_realized_return_pct','latest_available_day']
     for h in HORIZONS:
         t=str(h)
         columns += ['complete_'+t,'hit_'+t,'day_'+t,'close_'+t,'return_'+t+'_pct',
@@ -119,9 +124,11 @@ def main():
                 'year':y,'horizon_sessions':h,'signals':len(group),
                 'complete':len(complete),'incomplete':len(group)-len(complete),
                 'target_hits_of_complete':target_hits,
-                'distinct_stocks_with_target_hit':len({r['symbol'] for r in complete if r['hit_'+t]==1}),
                 'target_hit_pct_of_complete':rnd(100*target_hits/len(complete)) if complete else '',
                 'target_hits_in_incomplete':hit_early,
+                'all_confirmed_target_exits':target_hits+hit_early,
+                'open_not_yet_horizon':sum(r['hit_'+t]!='1' and r['hit_'+t]!=1 and not r['complete_'+t] for r in group),
+                'no_target_at_horizon':len(complete)-target_hits,
                 'avg_close_return_pct':rnd(mean(endrets)) if endrets else '',
                 'median_close_return_pct':rnd(median(endrets)) if endrets else '',
                 'close_positive':sum(v>0 for v in endrets),
@@ -137,11 +144,13 @@ def main():
     print('\nMETHOD: signal CLOSE -> subsequent daily HIGH touches +'+str(args.target)+'% to take profit.')
     print('CLOSE PERFORMANCE: signal CLOSE -> CLOSE after exact horizon.')
     print('TARGET-FIRST PERFORMANCE: +'+str(args.target)+'% if reached by horizon, else horizon closing return.')
-    print('Only COMPLETE horizon observations enter comparative percentages. INCOMPLETE hits listed separately.')
-    print('YEAR | DAYS | SIGNALS | COMPLETE | INCOMPLETE | TARGET_HITS | HIT_RATE | AVG_CLOSE_RETURN | AVG_TARGET_FIRST')
+    print('TARGET_CLOSED_ALL includes hits even when the full horizon has not elapsed. Those trades exit on FIRST HIT, not at session 60.')
+    print('Incomplete, not-hit signals remain OPEN_WAITING; the horizon is NOT a forced sell unless you separately choose to model one.')
+    print('Only COMPLETE horizon observations enter comparable average returns. Target-first horizon average assumes closing at horizon when unfilled, as a separate scenario.')
+    print('YEAR | DAYS | SIGNALS | TARGET_CLOSED_ALL | OPEN_WAITING | NO_TARGET_AT_HORIZON | COMPLETE | HIT_RATE_COMPLETE | AVG_CLOSE_RETURN | AVG_TARGET_FIRST')
     for s in summaries:
-        print(s['year'],'|',s['horizon_sessions'],'|',s['signals'],'|',s['complete'],'|',s['incomplete'],
-              '|',s['target_hits_of_complete'],'|',s['target_hit_pct_of_complete'],
+        print(s['year'],'|',s['horizon_sessions'],'|',s['signals'],'|',s['all_confirmed_target_exits'],'|',s['open_not_yet_horizon'],'|',s['no_target_at_horizon'],'|',s['complete'],
+              '|',s['target_hit_pct_of_complete'],
               '|',s['avg_close_return_pct'],'|',s['avg_target_first_return_pct'])
     print('FILES:',str(prefix)+'_details.csv',str(prefix)+'_summary.csv')
     print('READ ONLY. No broker execution. Multiple signals may overlap; incomplete history/survivorship bias and unadjusted corporate actions can distort returns.')
