@@ -110,7 +110,11 @@ def main():
     found=[]
     with db() as session:
         for i,(start,finish) in enumerate(chunks,1):
-            params={**queryargs,'lookback':start-timedelta(days=180),'start':start,'finish':finish}
+            # The database stores day as ISO-formatted TEXT, not a SQL DATE.
+            # Pass text parameters so lexical YYYY-MM-DD comparisons remain correct
+            # and PostgreSQL can use an existing index on day.
+            params={**queryargs,'lookback':(start-timedelta(days=180)).isoformat(),
+                    'start':start.isoformat(),'finish':finish.isoformat()}
             for raw in session.execute(text(CANDIDATES_SQL),params).mappings():
                 row=dict(raw)
                 row['date']=str(row.pop('day'))
