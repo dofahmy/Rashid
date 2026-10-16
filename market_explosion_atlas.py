@@ -11,8 +11,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-VERSION='1.0.0'
-ALIASES = {'symbol':['symbol','ticker','stock','code'], 'date':['date','datetime','timestamp','time'],
+VERSION='1.0.1'
+ALIASES = {'symbol':['symbol','ticker','stock','code'], 'date':['date','session_date','datetime','timestamp','time'],
            'open':['open','o'], 'high':['high','h'], 'low':['low','l'],
            'close':['close','c','adj_close','adjusted_close'], 'volume':['volume','vol','v']}
 
@@ -92,10 +92,16 @@ def read_sources(a):
             match=next((c for c in fields if c.lower() in ALIASES[k]),None)
             if match:pick[k]=match
         if 'symbol' not in pick or 'date' not in pick:raise ValueError('SQL table needs symbol and date columns')
-        query=f'SELECT * FROM "{a.table}"'
+        # Only fetch the necessary columns; avoid transferring large JSON metadata.
+        cols=', '.join(f'"{pick[k]}" AS "{k}"' for k in ['symbol','date','open','high','low','close','volume'] if k in pick)
+        missing=[k for k in ['open','high','low','close','volume'] if k not in pick]
+        if missing: raise ValueError(f'SQL table missing OHLCV columns: {missing}')
+        query=f'SELECT {cols} FROM "{a.table}"'
+        if a.end: query+=f" WHERE \"{pick['date']}\" <= :end_date"
+        params={'end_date':a.end} if a.end else {}
         with engine.connect() as con:
             # Streaming iterator avoids huge database allocation at once.
-            for chunk in pd.read_sql_query(text(query),con,chunksize=150000):
+            for chunk in pd.read_sql_query(text(query),con,params=params,chunksize=150000):
                 yield normalize(chunk)
 
 def feature_frame(history):
@@ -150,7 +156,9 @@ def compute_symbol(s,g,a):
     for m, sub in g.groupby(months,sort=True):
         month_first=m.to_timestamp()
         if month_first<pd.Timestamp(a.start).to_period('M').to_timestamp():continue
-        if not a.include_partial and m == pd.Timestamp.today().to_period('M'):continue
+        # An explicitly requested end date in the middle of a month is partial too.
+        cutoff=pd.Timestamp(a.end) if a.end else pd.Timestamp.today().normalize()
+        if not a.include_partial and m == cutoff.to_period('M') and cutoff.day < cutoff.days_in_month:continue
         history=g[g.date<month_first]
         if len(history)<a.min_bars_history or len(sub)<a.min_bars_month:continue
         pre=feature_frame(history)
