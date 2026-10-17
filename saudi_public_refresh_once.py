@@ -38,7 +38,22 @@ def download(symbol):
 def main():
     url=os.environ['DATABASE_URL']
     engine=create_engine(url,pool_pre_ping=True)
-    with engine.connect() as conn: symbols=universe(conn)
+    with engine.connect() as conn:
+        symbols=universe(conn)
+        required=conn.execute(text("""
+            SELECT column_name FROM information_schema.columns
+            WHERE table_schema=current_schema()
+              AND table_name='market_candles_1d'
+              AND is_nullable='NO'
+              AND column_default IS NULL
+              AND is_generated='NEVER'
+        """)).scalars().all()
+        handled={'symbol','session_date','c','adj_c','o','h','l','v','ts',
+                 'feed_symbol','source','retrieved_at','metadata_json'}
+        missing=set(required)-handled
+        if missing:
+            raise RuntimeError(f'Unhandled mandatory DB columns: {sorted(missing)}')
+    log.info('Required database columns verified: %s', ', '.join(required))
     log.info('Candidate Saudi symbols: %d',len(symbols))
     success=0;failed=0
     for idx,symbol in enumerate(symbols,1):
@@ -53,6 +68,7 @@ def main():
                     c['feed_symbol']=symbol  # Required NOT NULL by the shared market_candles_1d schema.
                     c['source']='yahoo_chart_saudi'
                     c['retrieved_at']=datetime.now(timezone.utc)  # Required NOT NULL timestamp in shared DB.
+                    c['metadata_json']=json.dumps({'feed':'yahoo_chart_saudi','market':'SA','symbol':symbol}, ensure_ascii=False)
                     vals={k:v for k,v in c.items() if k in existing_cols}
                     if 'symbol' not in vals or 'session_date' not in vals or 'c' not in vals:raise RuntimeError('Required DB columns absent')
                     upd={k:v for k,v in vals.items() if k not in ('symbol','session_date')}
