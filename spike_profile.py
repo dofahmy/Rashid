@@ -21,13 +21,35 @@ Steps
  5. trade test of the chosen rule set: buy next open, take-profit / stop / max days
  6. live_signals.csv           stocks passing the rules at the last complete day
 """
-import argparse, os
+import argparse, json, os, urllib.request
 from pathlib import Path
 import numpy as np
 import pandas as pd
 from sqlalchemy import create_engine, text
 
 SPLIT_K = [2,3,4,5,8,10,15,20,25,30,40,50,100]
+LISTS = ['https://raw.githubusercontent.com/rreichel3/US-Stock-Symbols/main/{e}/{e}_full_tickers.json'
+         .format(e=e) for e in ('nasdaq', 'nyse', 'amex')]
+
+
+def load_groups(symbols, min_members=5):
+    """symbol -> industry (or sector when the industry has < min_members liquid stocks)."""
+    rows = []
+    for u in LISTS:
+        try:
+            with urllib.request.urlopen(u, timeout=60) as r:
+                rows += json.loads(r.read().decode())
+        except Exception as ex:
+            print('WARNING: could not download sector list', u, ex, flush=True)
+    m = pd.DataFrame(rows, columns=['symbol', 'sector', 'industry']) if rows else \
+        pd.DataFrame(columns=['symbol', 'sector', 'industry'])
+    m['symbol'] = m.symbol.astype(str).str.upper().str.replace('/', '-', regex=False)
+    m = m.drop_duplicates('symbol').set_index('symbol')
+    sec = pd.Series(symbols, index=symbols).map(m.sector).replace('', np.nan).fillna('unknown')
+    ind = pd.Series(symbols, index=symbols).map(m.industry).replace('', np.nan)
+    ind = ind.fillna(sec)
+    size = ind.map(ind.value_counts())
+    return ind.where(size >= min_members, 'S:' + sec), sec
 AR = {
     'ret_5': 'عائد ٥ أيام', 'ret_20': 'عائد ٢٠ يوم', 'ret_60': 'عائد ٦٠ يوم', 'ret_120': 'عائد ١٢٠ يوم',
     'dist_sma20': 'البعد عن متوسط ٢٠', 'dist_sma50': 'البعد عن متوسط ٥٠', 'dist_sma100': 'البعد عن متوسط ١٠٠',
@@ -39,6 +61,10 @@ AR = {
     'min_ret_20': 'أكبر هبوط يومي ٢٠', 'turnover_pct': 'نسبة التداول من القيمة السوقية',
     'mcap_log': 'لوغاريتم القيمة السوقية', 'log_price': 'لوغاريتم السعر', 'beta_mkt60': 'الحركة مع السوق ٦٠',
     'corr_mkt60': 'الارتباط بالسوق ٦٠', 'rel_ret_20': 'العائد ٢٠ يوم ناقص السوق',
+    'grp_ret20': 'عائد الصناعة ٢٠ يوم', 'grp_dist_sma50': 'بعد الصناعة عن متوسط ٥٠',
+    'grp_above50': 'نسبة أسهم الصناعة فوق متوسط ٥٠', 'grp_hot': 'نسبة أسهم الصناعة طالعة +٢٠٪ في ٢٠ يوم',
+    'rel_grp_ret20': 'عائد السهم ناقص صناعته ٢٠ يوم', 'mkt_ret20': 'عائد السوق ٢٠ يوم',
+    'mkt_dist_sma50': 'بعد السوق عن متوسط ٥٠', 'mkt_above50': 'نسبة أسهم السوق فوق متوسط ٥٠',
 }
 
 
@@ -97,6 +123,8 @@ def main():
     ap.add_argument('--max-steps', type=int, default=8)
     ap.add_argument('--cost', type=float, default=1.0)
     ap.add_argument('--use-step', type=int, help='force this rule step for live signals (e.g. 2)')
+    ap.add_argument('--test-start', default='2026-01-01',
+                    help='rules are learned BEFORE this date and tested from it on (whole waves stay on one side)')
     ap.add_argument('--open-col', default='o'); ap.add_argument('--high-col', default='h')
     ap.add_argument('--low-col', default='l'); ap.add_argument('--close-col', default='c')
     ap.add_argument('--volume-col', default='v')
@@ -194,6 +222,31 @@ def main():
     F['corr_mkt60'] = cov.div((F['vol60'] / np.sqrt(252)).mul(np.sqrt(vx), axis=0))
     mlvl = (1 + mkt.fillna(0)).cumprod()
     F['rel_ret_20'] = F['ret_20'].sub(mlvl / mlvl.shift(20) - 1, axis=0)
+
+    # ---- industry-group and market-wide features (all known at the close) ----
+    grp, sector_of = load_groups(list(cols))
+    print('groups:', grp.nunique(), '| symbols with known sector:', int((sector_of != 'unknown').sum()),
+          'of', len(cols), flush=True)
+    sma50 = C.rolling(50, min_periods=40).mean()
+    above50 = (C > sma50).astype(float).where(C.notna() & sma50.notna())
+    hot = (F['ret_20'] >= 0.2).astype(float).where(F['ret_20'].notna())
+    G = {k: np.full(C.shape, np.nan, dtype='float32') for k in ['grp_ret20', 'grp_dist_sma50', 'grp_above50', 'grp_hot']}
+    for g, members in grp.groupby(grp).groups.items():
+        idx = [cols.get_loc(m) for m in members]
+        gr = r.iloc[:, idx].mean(axis=1)
+        lvl = (1 + gr.fillna(0)).cumprod()
+        vals = {'grp_ret20': lvl / lvl.shift(20) - 1, 'grp_dist_sma50': lvl / lvl.rolling(50).mean() - 1,
+                'grp_above50': above50.iloc[:, idx].mean(axis=1), 'grp_hot': hot.iloc[:, idx].mean(axis=1)}
+        for k, v in vals.items():
+            G[k][:, idx] = v.values[:, None]
+    for k, v in G.items():
+        F[k] = pd.DataFrame(v, index=dates, columns=cols)
+    F['rel_grp_ret20'] = F['ret_20'] - F['grp_ret20']
+    mret20 = mlvl / mlvl.shift(20) - 1
+    mdist = mlvl / mlvl.rolling(50).mean() - 1
+    mab = above50.mean(axis=1)
+    for k, v in (('mkt_ret20', mret20), ('mkt_dist_sma50', mdist), ('mkt_above50', mab)):
+        F[k] = pd.DataFrame(np.broadcast_to(v.values[:, None], C.shape), index=dates, columns=cols)
     feats = list(F)
     for k_ in feats:
         F[k_] = F[k_].astype('float32')
@@ -206,7 +259,7 @@ def main():
     for f in feats:
         T[f] = F[f].values[ii, jj].astype('float32')
     T = T.dropna(subset=feats, thresh=len(feats) - 3)
-    days = np.sort(T.date.unique()); cut = days[len(days) // 2]
+    days = np.sort(T.date.unique()); cut = np.datetime64(pd.Timestamp(a.test_start))
     T['half'] = np.where(T.date < cut, 1, 2)
     print(f'labeled stock-days {len(T)} | spike days {int(T.spike.sum())} '
           f'| base rate {T.spike.mean():.4%} | split day {pd.Timestamp(cut).date()}', flush=True)
@@ -339,24 +392,25 @@ def main():
 
     # ---------- report ----------
     L_ = [f'الأسهم: قيمة سوقية ≥ {a.min_cap/1e9:g} مليار، سيولة ≥ {a.min_liquidity/1e6:g} مليون/يوم، سعر ≥ {a.min_price:g}، بدون تقسيمات',
-          f'الطفرة: +{a.gain:g}% خلال {a.window} يوم تداول | النص الأول قبل {pd.Timestamp(cut).date()}',
-          f'عدد الطفرات: {len(E)} في {E.symbol.nunique()} سهم', '',
+          f'الطفرة: +{a.gain:g}% خلال {a.window} يوم تداول | الاستنتاج قبل {pd.Timestamp(cut).date()} والاختبار من بعده',
+          f'عدد الطفرات: {len(E)} في {E.symbol.nunique()} سهم',
+          'في الجداول: h1 = فترة الاستنتاج، h2 = فترة الاختبار (الشروط مشافتهاش)', '',
           '--- أكتر ١٢ مؤشر بيميز أسهم الطفرة (قبلها بيوم) ---']
     for r_ in FC.head(12).itertuples():
         L_.append(f'{r_.name_ar}: الطفرات {r_.events_median:.3g} مقابل الباقي {r_.others_median:.3g} | قوة التمييز {r_.strength:.2f}')
     L_.append('\n--- خطوات الشروط ---')
     for r_ in S.itertuples():
         L_.append(f'خطوة {r_.step}: {r_.rule}')
-        L_.append(f'   النص الأول: نسبة الطفرة {r_.h1_rate_pct}% (×{r_.h1_lift}) يلقط {r_.h1_recall_pct}% منها | '
-                  f'النص التاني: {r_.h2_rate_pct}% (×{r_.h2_lift}) يلقط {r_.h2_recall_pct}% | '
+        L_.append(f'   الاستنتاج: نسبة الطفرة {r_.h1_rate_pct}% (×{r_.h1_lift}) يلقط {r_.h1_recall_pct}% منها | '
+                  f'الاختبار: {r_.h2_rate_pct}% (×{r_.h2_lift}) يلقط {r_.h2_recall_pct}% | '
                   f'طلع +50%: {r_.h2_fwd50_pct}% | أيام سهم: {r_.h2_days}')
-    L_.append(f'\nالخطوة المختارة (أحسن على النص التاني): {best_step}')
-    L_.append('\n--- تداول: أحسن ١٠ (خطوة × خروج) مرتبين بالنص الأضعف ---')
+    L_.append(f'\nالخطوة الأحسن على فترة الاختبار: {best_step}')
+    L_.append('\n--- تداول: أحسن ١٠ (خطوة × خروج) مرتبين بالفترة الأضعف ---')
     if len(TRok):
         L_.append(TRok.sort_values('min_half', ascending=False).head(10).to_string(index=False))
-        L_.append(f'\nأحسن اختيار على النص الأول بس: خطوة {int(pick.step)} | هدف +{pick.target}% | وقف {pick.stop} | '
-                  f'{pick.max_days} يوم  -> النص الأول {pick.h1_mean}% | النص التاني {pick.h2_mean}% في الصفقة')
-        L_.append(f'عدد التوليفات الكسبانة في النصين: {int((TRok.min_half > 0).sum())} من {len(TRok)}')
+        L_.append(f'\nأحسن اختيار على فترة الاستنتاج بس: خطوة {int(pick.step)} | هدف +{pick.target}% | وقف {pick.stop} | '
+                  f'{pick.max_days} يوم  -> الاستنتاج {pick.h1_mean}% | الاختبار {pick.h2_mean}% في الصفقة')
+        L_.append(f'عدد التوليفات الكسبانة في الفترتين: {int((TRok.min_half > 0).sum())} من {len(TRok)}')
     else:
         L_.append('لا صفقات كفاية')
     L_.append('\n--- للمقارنة: كل الأسهم الكبيرة السائلة من غير أي شروط (خطوة 0) ---')
