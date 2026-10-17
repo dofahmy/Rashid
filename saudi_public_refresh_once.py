@@ -52,6 +52,7 @@ def main():
                     c['symbol']=symbol
                     c['feed_symbol']=symbol  # Required NOT NULL by the shared market_candles_1d schema.
                     c['source']='yahoo_chart_saudi'
+                    c['retrieved_at']=datetime.now(timezone.utc)  # Required NOT NULL timestamp in shared DB.
                     vals={k:v for k,v in c.items() if k in existing_cols}
                     if 'symbol' not in vals or 'session_date' not in vals or 'c' not in vals:raise RuntimeError('Required DB columns absent')
                     upd={k:v for k,v in vals.items() if k not in ('symbol','session_date')}
