@@ -4,7 +4,7 @@
 <div class="panel">
 <p class="muted">
 يبحث في جميع عوامل Squaring من 2 إلى {{system_number}} (شاملًا) ويعرض آخر Cluster لكل سهم ولكل عامل عند نفس المستوى السعري تقريبًا وفي مسافة زمنية متقاربة.
-النتائج مرتبة من أحدث تاريخ للأقدم.
+النتائج تبدأ مرتبة من أحدث تاريخ للأقدم، ويمكن إعادة ترتيبها من رؤوس الأعمدة.
 </p>
 
 <form method="get" action="{{url_for('egx_seven_screener')}}" class="filters">
@@ -45,11 +45,83 @@
 </div>
 
 <div class="panel tablewrap">
-<h2>آخر الأسهم عند Repeat Price + Time — الأنظمة من 2 إلى {{system_number}}</h2>
-<table class="sortable-egx"><thead><tr><th>السهم</th><th>تاريخ الإشارة</th><th>Repeat Price</th><th>MATCH</th><th>أعلى سعر بعد Repeat</th><th>الصعود من Repeat لأعلى سعر %</th><th>المدة حتى أعلى سعر</th><th>Gap</th><th>Touches</th></tr></thead><tbody>
-{% for r in result.rows %}<tr><td><strong>{{r.symbol}}</strong></td><td>{{r.latest_repeat_date if r.latest_repeat_date is not none else '—'}}</td><td>{{r.repeat_price}}</td><td>{{'✅ MATCH' if r.breakout_rule_status=='MATCH' else ('— NO_DATA' if r.breakout_rule_status=='NO_DATA' else '❌')}}</td><td>{{'%.4f'|format(r.repeat_peak_high) if r.repeat_peak_high is not none else '—'}}</td><td>{{'%+.2f%%'|format((r.repeat_peak_high / r.repeat_price - 1) * 100) if r.repeat_peak_high is not none and r.repeat_price is not none and r.repeat_price|float > 0 else '—'}}</td><td>{{r.repeat_peak_bars if r.repeat_peak_bars is not none else '—'}} جلسة</td><td>{{r.max_session_gap}}</td><td>{{r.touches}}</td></tr>
-{% else %}<tr><td colspan="9">لا توجد نتائج للفلاتر المختارة.</td></tr>{% endfor %}
+<h2>آخر الأسهم عند Repeat Price + Time — الأنظمة من 2 إلى {{system_number}} (مع عامل Squaring لكل إشارة)</h2>
+<p class="muted" style="margin-bottom:10px">اضغطي على اسم أي عمود للترتيب تصاعديًا أو تنازليًا. الأسهم المتكررة قد تظهر أكثر من مرة بعوامل Squaring مختلفة. الترتيب يغيّر العرض فقط، ولا يغيّر نتائج Screening أو MATCH.</p>
+<style>
+  #egx-repeat-results th[data-sort-type] {cursor:pointer;user-select:none;white-space:nowrap}
+  #egx-repeat-results th[data-sort-type]:hover {background:#dcefeb}
+  #egx-repeat-results th[data-sort-type]:focus-visible {outline:2px solid #15847d;outline-offset:-2px}
+  #egx-repeat-results th .sort-arrow {font-size:.8em;opacity:.65;padding-inline:4px}
+</style>
+<table class="sortable-egx" id="egx-repeat-results">
+<thead><tr>
+<th scope="col" tabindex="0" role="button" aria-sort="none" data-sort-type="text">السهم <span class="sort-arrow">↕</span></th>
+<th scope="col" tabindex="0" role="button" aria-sort="descending" data-sort-type="date">تاريخ الإشارة <span class="sort-arrow">↓</span></th>
+<th scope="col" tabindex="0" role="button" aria-sort="none" data-sort-type="number">Squaring Factor <span class="sort-arrow">↕</span></th>
+<th scope="col" tabindex="0" role="button" aria-sort="none" data-sort-type="number">Repeat Price <span class="sort-arrow">↕</span></th>
+<th scope="col" tabindex="0" role="button" aria-sort="none" data-sort-type="match">MATCH <span class="sort-arrow">↕</span></th>
+<th scope="col" tabindex="0" role="button" aria-sort="none" data-sort-type="number">أعلى سعر بعد Repeat <span class="sort-arrow">↕</span></th>
+<th scope="col" tabindex="0" role="button" aria-sort="none" data-sort-type="number">الصعود من Repeat لأعلى سعر % <span class="sort-arrow">↕</span></th>
+<th scope="col" tabindex="0" role="button" aria-sort="none" data-sort-type="number">المدة حتى أعلى سعر <span class="sort-arrow">↕</span></th>
+<th scope="col" tabindex="0" role="button" aria-sort="none" data-sort-type="number">Gap <span class="sort-arrow">↕</span></th>
+<th scope="col" tabindex="0" role="button" aria-sort="none" data-sort-type="number">Touches <span class="sort-arrow">↕</span></th>
+</tr></thead><tbody>
+{% for r in result.rows %}
+{% set gain = ((r.repeat_peak_high / r.repeat_price - 1) * 100) if r.repeat_peak_high is not none and r.repeat_price is not none and r.repeat_price|float > 0 else none %}
+<tr>
+<td data-sort-value="{{r.symbol}}"><strong>{{r.symbol}}</strong></td>
+<td data-sort-value="{{r.latest_repeat_date if r.latest_repeat_date is not none else ''}}">{{r.latest_repeat_date if r.latest_repeat_date is not none else '—'}}</td>
+<td data-sort-value="{{r.squaring_factor if r.squaring_factor is not none else ''}}"><strong>{{r.squaring_factor if r.squaring_factor is not none else '—'}}</strong></td>
+<td data-sort-value="{{r.repeat_price if r.repeat_price is not none else ''}}">{{r.repeat_price if r.repeat_price is not none else '—'}}</td>
+<td data-sort-value="{{2 if r.breakout_rule_status=='MATCH' else (1 if r.breakout_rule_status=='NO_DATA' else 0)}}">{{'✅ MATCH' if r.breakout_rule_status=='MATCH' else ('— NO_DATA' if r.breakout_rule_status=='NO_DATA' else '❌')}}</td>
+<td data-sort-value="{{r.repeat_peak_high if r.repeat_peak_high is not none else ''}}">{{'%.4f'|format(r.repeat_peak_high) if r.repeat_peak_high is not none else '—'}}</td>
+<td data-sort-value="{{gain if gain is not none else ''}}">{{'%+.2f%%'|format(gain) if gain is not none else '—'}}</td>
+<td data-sort-value="{{r.repeat_peak_bars if r.repeat_peak_bars is not none else ''}}">{{r.repeat_peak_bars if r.repeat_peak_bars is not none else '—'}} جلسة</td>
+<td data-sort-value="{{r.max_session_gap if r.max_session_gap is not none else ''}}">{{r.max_session_gap if r.max_session_gap is not none else '—'}}</td>
+<td data-sort-value="{{r.touches if r.touches is not none else ''}}">{{r.touches if r.touches is not none else '—'}}</td>
+</tr>
+{% else %}<tr><td colspan="10">لا توجد نتائج للفلاتر المختارة.</td></tr>{% endfor %}
 </tbody></table>
+<script>
+(function () {
+  const table = document.getElementById('egx-repeat-results');
+  if (!table || !table.tBodies.length) return;
+  const headers = Array.from(table.tHead.rows[0].cells);
+  let activeColumn = 1, direction = -1;
+  const originalOrder = new Map(Array.from(table.tBodies[0].rows).map((tr,i) => [tr,i]));
+  function sortBy(index) {
+    const header = headers[index];
+    if (!header || !header.dataset.sortType) return;
+    direction = activeColumn === index ? -direction : (header.dataset.sortType === 'text' ? 1 : -1);
+    activeColumn = index;
+    const type = header.dataset.sortType;
+    const rows = Array.from(table.tBodies[0].rows).filter(tr => tr.cells.length === headers.length);
+    rows.sort((a,b) => {
+      const x = (a.cells[index].dataset.sortValue || '').trim();
+      const y = (b.cells[index].dataset.sortValue || '').trim();
+      if (!x && !y) return originalOrder.get(a)-originalOrder.get(b);
+      if (!x) return 1;
+      if (!y) return -1;
+      let cmp;
+      if (type === 'text' || type === 'date') cmp = x.localeCompare(y, undefined, {numeric:true});
+      else cmp = Number(x)-Number(y);
+      return cmp ? cmp * direction : originalOrder.get(a)-originalOrder.get(b);
+    });
+    const body = table.tBodies[0];
+    rows.forEach(tr=>body.appendChild(tr));
+    headers.forEach((th,i) => {
+      th.setAttribute('aria-sort', i === index ? (direction === 1 ? 'ascending' : 'descending') : 'none');
+      const arrow=th.querySelector('.sort-arrow');
+      if (arrow) arrow.textContent=i === index ? (direction === 1 ? '↑' : '↓') : '↕';
+    });
+  }
+  headers.forEach((th,i) => {
+    if (!th.dataset.sortType) return;
+    th.addEventListener('click',()=>sortBy(i));
+    th.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();sortBy(i)}});
+  });
+})();
+</script>
 </div>
 {% endif %}
 {% endblock %}
