@@ -252,7 +252,7 @@ def _chart_payload(price_df,signal_mask,value_col):
     return {'points':points,'markers':markers,'min':mn,'max':mx}
 
 
-def repeat_price_time_screener(price_tolerance_pct=1.0, max_gap_sessions=20, recent_days=None, system_number=7):
+def repeat_price_time_screener(price_tolerance_pct=1.0, max_gap_sessions=20, recent_days=None, system_number=7, factor_min=2):
     """
     Screen the whole EGX universe for the LATEST repeated same-stock Double-7
     price/time cluster.
@@ -264,9 +264,11 @@ def repeat_price_time_screener(price_tolerance_pct=1.0, max_gap_sessions=20, rec
       recent_days calendar days from the latest market date in the database.
     """
     system_number=int(system_number)
+    factor_min=int(factor_min)
     if not 2 <= system_number <= 1000: raise ValueError("system_number must be between 2 and 1000")
+    if not 2 <= factor_min <= system_number: raise ValueError("factor_min must be between 2 and system_number")
     frames=_load_stocks()
-    # The entered value is an inclusive upper bound: factors 2..N.
+    # Scan only the inclusive user-selected factor range.
     rows=[]
 
     latest_market_date=None
@@ -279,7 +281,7 @@ def repeat_price_time_screener(price_tolerance_pct=1.0, max_gap_sessions=20, rec
             latest_market_date=mx if latest_market_date is None or mx>latest_market_date else latest_market_date
 
     for sym,df in frames.items():
-      for squaring_factor in range(2, system_number + 1):
+      for squaring_factor in range(factor_min, system_number + 1):
         single,_=_single(df,True,system_number=squaring_factor)
         levels=_repeat_double7_levels(
             single,
@@ -360,7 +362,7 @@ def repeat_price_time_screener(price_tolerance_pct=1.0, max_gap_sessions=20, rec
 
     return {
         'system_number':system_number,
-        'factor_min':2,
+        'factor_min':factor_min,
         'factor_max':system_number,
         'rows':rows,
         'count':len(rows),
