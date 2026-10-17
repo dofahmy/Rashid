@@ -1,7 +1,7 @@
 import os, secrets, csv, io, math, time, re
 from functools import wraps
 from datetime import timedelta, datetime, timezone
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 from flask import Flask, render_template, request, session, redirect, url_for, abort, Response, flash
 from sqlalchemy import select, func, or_, case, delete, update
 from werkzeug.security import check_password_hash
@@ -29,7 +29,7 @@ def create_app(db=None,test_config=None):
         if request.path!='/health': r.headers['Cache-Control']='no-store'
         # Attach a consistent right sidebar to existing HTML pages without replacing base.html.
         # Only known registered GET routes become links; no broken Saudi URLs are invented.
-        if r.status_code==200 and r.mimetype=='text/html' and session.get('admin'):
+        if r.status_code==200 and r.mimetype=='text/html' and session.get('admin') and request.endpoint not in {'egx_seven_screener'}:
             try:
                 from markupsafe import escape
                 from flask import current_app
@@ -531,6 +531,21 @@ def create_app(db=None,test_config=None):
             error=f'{type(exc).__name__}: {exc}'
         return render_template('seven_day_stocks.html',day=day,rows=rows,error=error,kind=request.args.get('kind','double'))
 
+    @app.post('/egx-seven/screener/refresh')
+    @auth
+    def egx_seven_screener_refresh():
+        import subprocess,sys
+        from monitor.egx_live import set_refresh_status
+        set_refresh_status(DB,{'status':'queued','started_at_utc':datetime.now(timezone.utc).isoformat(),'message':'تم طلب التحديث.'})
+        subprocess.Popen([sys.executable,'-m','monitor.egx_refresh_once'],cwd='/app',stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True)
+        next_params=request.form.get('next_params','').strip()
+        base=url_for('egx_seven_screener')
+        if next_params:
+            sep='&' if '?' in base else '?'
+            return redirect(f"{base}{sep}{next_params}&refresh_requested=1")
+        return redirect(url_for('egx_seven_screener',refresh_requested=1))
+
+
     @app.get('/egx-seven/screener')
     @auth
     def egx_seven_screener():
@@ -607,6 +622,11 @@ def create_app(db=None,test_config=None):
             result['rows']=[r for r in result['rows'] if r.get('breakout_rule_match')]
             result['count']=len(result['rows'])
 
+        params=request.args.to_dict(flat=True)
+        params.pop('refresh_requested',None)
+        refresh_requested=request.args.get('refresh_requested','0')=='1'
+        refresh_query_string=urlencode(params)
+
         return render_template(
             'seven_screener.html',
             result=result,
@@ -619,6 +639,8 @@ def create_app(db=None,test_config=None):
             price_tolerance_pct=price_tolerance_pct,
             max_gap_sessions=max_gap_sessions,
             recent_days=recent_days if recent_days is not None else 'all',
+            refresh_requested=refresh_requested,
+            refresh_query_string=refresh_query_string,
         )
 
 
