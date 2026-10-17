@@ -19,13 +19,13 @@ def _load_saudi_stocks():
         sym=col('symbol','ticker','sym')
         date=col('session_date','date')
         close=col('adj_c','adj_close','c','close')
-        opn=col('o','open'); high=col('h','high'); low=col('l','low'); vol=col('v','volume')
+        opn=col('o','open'); high=col('h','high'); low=col('l','low'); vol=col('v','volume'); raw_close=col('c','close')
         if sym is None or date is None or close is None:
             raise RuntimeError('Saudi source columns missing in market_candles_1d')
         q=select(sym).where(sym.ilike('%.SR')).distinct().order_by(sym)
         symbols=[x[0] for x in session.execute(q) if x[0]]
         selected=[date,close]; names=['date','close']
-        for name,c in [('open',opn),('high',high),('low',low),('volume',vol)]:
+        for name,c in [('open',opn),('high',high),('low',low),('volume',vol),('actual_close',raw_close)]:
             if c is not None: selected.append(c);names.append(name)
         for symbol in symbols:
             raw=session.execute(select(*selected).where(sym==symbol).order_by(date)).all()
@@ -33,7 +33,7 @@ def _load_saudi_stocks():
             df=pd.DataFrame(raw,columns=names)
             df['date']=pd.to_datetime(df['date'],errors='coerce')
             df['close']=pd.to_numeric(df['close'],errors='coerce')
-            for name in ('open','high','low','volume'):
+            for name in ('open','high','low','volume','actual_close'):
                 df[name]=pd.to_numeric(df[name],errors='coerce') if name in df else np.nan
             df=df.dropna(subset=['date','close']).sort_values('date').drop_duplicates('date',keep='last').reset_index(drop=True)
             if len(df)>=60: frames[str(symbol).upper()]=df
@@ -50,5 +50,28 @@ def repeat_price_time_screener(**kwargs):
         result=_engine.repeat_price_time_screener(**kwargs)
     finally:
         _engine._load_stocks=original
-    result['universe_count']=len(loaded)
+    # Saudi-only entry-day filter: positive real candle and higher volume.
+    # latest_repeat_date is the second/latest touch, not the first touch.
+    eligible = {}
+    for symbol, frame in loaded.items():
+        f = frame.sort_values('date').reset_index(drop=True)
+        by_date = {}
+        for i in range(1, len(f)):
+            today, yesterday = f.iloc[i], f.iloc[i - 1]
+            close = today['actual_close'] if pd.notna(today['actual_close']) else today['close']
+            opn = today['open']
+            vt, vy = today['volume'], yesterday['volume']
+            valid = (pd.notna(close) and pd.notna(opn) and pd.notna(vt)
+                     and pd.notna(vy) and float(close) > float(opn)
+                     and float(vt) > float(vy))
+            by_date[pd.Timestamp(today['date']).date().isoformat()] = bool(valid)
+        eligible[symbol] = by_date
+    result = dict(result)
+    result['rows'] = [
+        row for row in result.get('rows', [])
+        if eligible.get(str(row.get('symbol', '')).upper(), {}).get(
+            str(row.get('latest_repeat_date', '')), False)
+    ]
+    result['count'] = len(result['rows'])
+    result['universe_count'] = len(loaded)
     return result
