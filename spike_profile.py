@@ -284,26 +284,45 @@ def main():
     S2 = S[S.h2_spikes >= 5]
     best_step = int(S2.loc[S2.h2_lift.idxmax(), 'step']) if len(S2) else 0
 
-    # ---------- rebuild chosen rules on the full daily grid + trade test + live ----------
-    sel = eligible.copy()
-    for f, op, thr in chosen[:best_step]:
-        sel &= (F[f] >= thr) if op == '>=' else (F[f] <= thr)
-    sel_eval = sel & (pd.Series(dates, index=dates) <= last_full).values[:, None]
+    # ---------- trade test for EVERY step x exit (spike rate != profit) ----------
+    in_range = (pd.Series(dates, index=dates) <= last_full).values[:, None]
+    Ov, Hv, Lv, Cv, SPv = O.values, Hh.values, L.values, C.values, split.values
     trades_rows = []
-    for (Tg, Sg, Hd) in [(50, 15, 21), (100, 20, 21), (30, 10, 21), (50, 10, 10)]:
-        tr_ = []
-        for j in np.flatnonzero(sel_eval.values.any(axis=0)):
-            for s_, e_, x_, ret in sim(sel_eval.values[:, j], O.values[:, j], Hh.values[:, j], L.values[:, j],
-                                       C.values[:, j], split.values[:, j], Tg, Sg, Hd):
-                tr_.append((dates[s_], ret - a.cost))
-        t = pd.DataFrame(tr_, columns=['signal_date', 'ret'])
-        if t.empty: continue
-        h1, h2 = t[t.signal_date < cut], t[t.signal_date >= cut]
-        trades_rows.append({'target': Tg, 'stop': Sg, 'max_days': Hd, 'trades': len(t),
-                            'win_pct': round((t.ret > 0).mean() * 100, 1), 'mean_trade': round(t.ret.mean(), 2),
-                            'h1_trades': len(h1), 'h1_mean': round(h1.ret.mean(), 2),
-                            'h2_trades': len(h2), 'h2_mean': round(h2.ret.mean(), 2)})
+    sel = eligible.copy()
+    step_masks = {0: sel.copy()}
+    for k, (f, op, thr) in enumerate(chosen, 1):
+        sel = sel & ((F[f] >= thr) if op == '>=' else (F[f] <= thr))
+        step_masks[k] = sel.copy()
+    exits = [(Tg, Sg, Hd) for Tg in (50, 100, 200) for Sg in (15, 25, 40, 99) for Hd in (21, 42)]
+    for k in range(1, len(chosen) + 1):
+        sv = (step_masks[k] & in_range).values
+        js = np.flatnonzero(sv.any(axis=0))
+        for (Tg, Sg, Hd) in exits:
+            tr_ = []
+            for j in js:
+                for s_, e_, x_, ret in sim(sv[:, j], Ov[:, j], Hv[:, j], Lv[:, j], Cv[:, j], SPv[:, j], Tg, Sg, Hd):
+                    tr_.append((dates[s_], ret - a.cost))
+            t = pd.DataFrame(tr_, columns=['signal_date', 'ret'])
+            if len(t) < 30: continue
+            t['month'] = t.signal_date.dt.to_period('M')
+            m = t.groupby('month').ret.mean()
+            h1, h2 = t[t.signal_date < cut], t[t.signal_date >= cut]
+            trades_rows.append({'step': k, 'target': Tg, 'stop': 'none' if Sg == 99 else Sg, 'max_days': Hd,
+                                'trades': len(t), 'win_pct': round((t.ret > 0).mean() * 100, 1),
+                                'mean_trade': round(t.ret.mean(), 2), 'median_trade': round(t.ret.median(), 2),
+                                'months_pos': f'{int((m > 0).sum())}/{len(m)}', 'worst_month': round(m.min(), 1),
+                                'h1_trades': len(h1), 'h1_mean': round(h1.ret.mean(), 2),
+                                'h2_trades': len(h2), 'h2_mean': round(h2.ret.mean(), 2)})
+        print(f'  trade test step {k} done', flush=True)
     TR = pd.DataFrame(trades_rows); TR.to_csv(out / 'rule_trades.csv', index=False)
+    TRok = TR[(TR.h1_trades >= 40) & (TR.h2_trades >= 40)].copy()
+    if len(TRok):
+        TRok['min_half'] = TRok[['h1_mean', 'h2_mean']].min(axis=1)
+        pick = TRok.sort_values('h1_mean', ascending=False).iloc[0]       # chosen on FIRST half only
+        trade_step = int(pick.step)
+    else:
+        pick, trade_step = None, best_step
+    sel = step_masks[trade_step]
 
     lv = sel.loc[last_full]
     live = pd.DataFrame({'symbol': cols[lv.values]})
@@ -327,9 +346,15 @@ def main():
                   f'النص التاني: {r_.h2_rate_pct}% (×{r_.h2_lift}) يلقط {r_.h2_recall_pct}% | '
                   f'طلع +50%: {r_.h2_fwd50_pct}% | أيام سهم: {r_.h2_days}')
     L_.append(f'\nالخطوة المختارة (أحسن على النص التاني): {best_step}')
-    L_.append('\n--- تداول بالشروط المختارة (شراء افتتاح اليوم التالي) ---')
-    L_.append(TR.to_string(index=False) if len(TR) else 'لا صفقات')
-    L_.append(f'\nإشارات {last_full.date()} (شراء افتتاح اليوم التالي): ' + (', '.join(live.symbol) or 'لا يوجد'))
+    L_.append('\n--- تداول: أحسن ١٠ (خطوة × خروج) مرتبين بالنص الأضعف ---')
+    if len(TRok):
+        L_.append(TRok.sort_values('min_half', ascending=False).head(10).to_string(index=False))
+        L_.append(f'\nأحسن اختيار على النص الأول بس: خطوة {int(pick.step)} | هدف +{pick.target}% | وقف {pick.stop} | '
+                  f'{pick.max_days} يوم  -> النص الأول {pick.h1_mean}% | النص التاني {pick.h2_mean}% في الصفقة')
+        L_.append(f'عدد التوليفات الكسبانة في النصين: {int((TRok.min_half > 0).sum())} من {len(TRok)}')
+    else:
+        L_.append('لا صفقات كفاية')
+    L_.append(f'\nإشارات {last_full.date()} (شراء افتتاح اليوم التالي، شروط خطوة ' + str(trade_step) + '): ' + (', '.join(live.symbol) or 'لا يوجد'))
     txt = '\n'.join(L_)
     (out / 'rule_steps.txt').write_text(txt)
     print('\n' + txt)
