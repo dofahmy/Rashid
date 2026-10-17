@@ -182,7 +182,12 @@ def main():
     match[bm] = False
     sig_new = match & ~match.shift(1, fill_value=False)
     sig_surge = match & surge.ge(a.surge) & ~surge.shift(1).ge(a.surge)
-    SIG = {'state': match, 'new': sig_new, 'surge': sig_surge}
+    ds = pd.Series(dates, index=dates)
+    is_month_end = ds.groupby(dates.to_period('M')).transform('max').eq(ds)
+    is_week_end = ds.groupby(dates.to_period('W')).transform('max').eq(ds)
+    SIG = {'state': match, 'state_cd20': match, 'new': sig_new, 'surge': sig_surge,
+           'month_end': match.mul(is_month_end.values, axis=0),
+           'week_end': match.mul(is_week_end.values, axis=0)}
     print('match stock-days', int(match.values.sum()), '| new', int(sig_new.values.sum()),
           '| surge', int(sig_surge.values.sum()), '| last complete day', last_full.date(), flush=True)
 
@@ -204,16 +209,16 @@ def main():
     cut = sig_dates[len(sig_dates) // 2]
 
     rows, best_trades = [], {}
-    grid = list(itertools.product(SIG, [20, 30, 50], [8, 10, 15], [5, 10, 20]))
+    grid = list(itertools.product(SIG, [20, 30, 50], [8, 10, 15], [5, 10, 21]))
     for i, (ename, T, S, H) in enumerate(grid, 1):
         sig = SIG[ename].values
-        cd = a.cooldown if ename == 'state' else 0
+        cd = {'state': a.cooldown, 'state_cd20': 20}.get(ename, 0)
         tr = []
         for j in np.flatnonzero(sig.any(axis=0)):
             for s, e, x, ret in sim_symbol(sig[:, j], O[:, j], Hh[:, j], L[:, j], Cc[:, j], SP[:, j], T, S, H, cd):
                 tr.append((cols[j], dates[s], dates[e], dates[x], ret - a.cost))
         t = pd.DataFrame(tr, columns=['symbol', 'signal_date', 'entry_date', 'exit_date', 'ret'])
-        if len(t) < a.min_trades:
+        if len(t) < (30 if ename == 'surge' else a.min_trades):
             continue
         t['month'] = t.entry_date.dt.to_period('M').astype(str)
         m = t.groupby('month').ret.mean()
@@ -242,6 +247,10 @@ def main():
         lines.append(f'===== entry: {e} =====')
         lines.append(g.drop(columns='rank_first_half').to_string(index=False))
         lines.append('')
+    same = G[(G.target == 30) & (G.stop == 10) & (G.max_days == 21)]
+    lines.append('===== same exit as the monthly test (+30% / -10% / 21 days), by entry type =====')
+    lines.append(same.drop(columns='rank_first_half').to_string(index=False))
+    lines.append('')
     both = G[(G.first_half_mean > 0) & (G.second_half_mean > 0)].copy()
     both['min_half'] = both[['first_half_mean', 'second_half_mean']].min(axis=1)
     lines.append('===== positive in BOTH halves, ranked by the weaker half =====')
@@ -251,7 +260,7 @@ def main():
         key = (b.entry, int(b.target), int(b.stop), int(b.max_days))
         best_trades[key].to_csv(out / 'daily_trades_best.csv', index=False)
         lines.append(f'\nBest robust combination: entry={key[0]} target=+{key[1]}% stop=-{key[2]}% max_days={key[3]}')
-        sel = live[live['new'] if key[0] == 'new' else live['surge_signal'] if key[0] == 'surge' else live['match']]
+        sel = live[live['new'] if key[0] == 'new' else live['surge_signal'] if key[0] == 'surge' else live['match']]  # month/week_end: use on those days only
         lines.append(f'Signals on {t_.date()} for that entry type (buy at next open): '
                      + (', '.join(sel.symbol.head(30)) or 'none'))
     txt = '\n'.join(lines)
