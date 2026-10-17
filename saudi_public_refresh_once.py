@@ -50,6 +50,7 @@ def main():
                 existing_cols={r[0] for r in conn.execute(text("SELECT column_name FROM information_schema.columns WHERE table_name='market_candles_1d'"))}
                 for c in candles:
                     c['symbol']=symbol
+                    c['feed_symbol']=symbol  # Required NOT NULL by the shared market_candles_1d schema.
                     c['source']='yahoo_chart_saudi'
                     vals={k:v for k,v in c.items() if k in existing_cols}
                     if 'symbol' not in vals or 'session_date' not in vals or 'c' not in vals:raise RuntimeError('Required DB columns absent')
