@@ -3,7 +3,7 @@
 
 <div class="panel">
 <p class="muted">
-يبحث في جميع عوامل Squaring من {{factor_min}} إلى {{system_number}} (شاملًا) ويعرض آخر Cluster لكل سهم ولكل عامل عند نفس المستوى السعري تقريبًا وفي مسافة زمنية متقاربة.
+يبحث في عوامل Squaring من {{factor_min}} إلى {{system_number}} (شاملًا)، بنوع {{'الفردية فقط' if factor_parity=='odd' else ('الزوجية فقط' if factor_parity=='even' else 'الفردية والزوجية')}}، ويعرض آخر Cluster لكل سهم ولكل عامل عند نفس المستوى السعري تقريبًا وفي مسافة زمنية متقاربة.
 النتائج تبدأ مرتبة من أحدث تاريخ للأقدم، ويمكن إعادة ترتيبها من رؤوس الأعمدة.
 </p>
 
@@ -12,6 +12,12 @@
 <input type="number" name="factor_min" min="2" max="1000" step="1" required value="{{factor_min|default(2)}}" style="max-width:110px">
 <label>إلى</label>
 <input type="number" name="system_number" min="2" max="1000" step="1" required value="{{system_number|default(7)}}" style="max-width:110px">
+<label>نوع أرقام Squaring داخل النطاق</label>
+<select name="factor_parity" aria-label="Odd Even Both Squaring Factors">
+<option value="both" {{'selected' if factor_parity=='both' else ''}}>Both — فردي وزوجي</option>
+<option value="odd" {{'selected' if factor_parity=='odd' else ''}}>Odd — فردي فقط</option>
+<option value="even" {{'selected' if factor_parity=='even' else ''}}>Even — زوجي فقط</option>
+</select>
 <label>تقارب السعر %</label>
 <input type="number" name="price_tolerance_pct" step="0.1" min="0" max="20" value="{{price_tolerance_pct}}">
 
@@ -49,7 +55,7 @@
 </div>
 
 <div class="panel tablewrap">
-<h2>آخر الأسهم عند Repeat Price + Time — الأنظمة من {{factor_min}} إلى {{system_number}} (مع عامل Squaring لكل إشارة)</h2>
+<h2>آخر الأسهم عند Repeat Price + Time — الأنظمة من {{factor_min}} إلى {{system_number}} — {{'Odd' if factor_parity=='odd' else ('Even' if factor_parity=='even' else 'Both')}} (مع عامل Squaring لكل إشارة)</h2>
 <p class="muted" style="margin-bottom:10px">اضغطي على اسم أي عمود للترتيب تصاعديًا أو تنازليًا. الأسهم المتكررة قد تظهر أكثر من مرة بعوامل Squaring مختلفة. الترتيب يغيّر العرض فقط، ولا يغيّر نتائج Screening أو MATCH.</p>
 <style>
   #egx-repeat-results th[data-sort-type] {cursor:pointer;user-select:none;white-space:nowrap}
