@@ -179,6 +179,11 @@ def main():
     ap.add_argument('--volume-col', default='v')
     a = ap.parse_args()
     out = Path(a.out); out.mkdir(parents=True, exist_ok=True)
+    if not Path(a.fundamentals).exists():
+        raise SystemExit(f'fundamentals file not found: {Path(a.fundamentals).resolve()}\n'
+                         'Run build_fund_csv.py first (it creates fund.csv), then run this script again.')
+    fund = load_fundamentals(a.fundamentals)
+    print('fundamentals', len(fund), 'rows,', fund.symbol.nunique(), 'symbols', flush=True)
 
     start = (pd.Timestamp(a.start_month + '-01') - pd.Timedelta(days=220)).strftime('%Y-%m-%d')
     engine = create_engine(os.environ['DATABASE_URL'])
@@ -208,7 +213,12 @@ def main():
 
     # As-of = last trading day strictly before each month; plus a LIVE row at the last date.
     months = pd.period_range(a.start_month, a.end_month, freq='M').astype(str)
-    last = close.index.max()
+    cnt = close.notna().sum(axis=1)
+    full_days = cnt[cnt >= 0.8 * cnt.tail(30).median()]
+    last = full_days.index.max()
+    if last != close.index.max():
+        print(f'NOTE: last DB date {close.index.max().date()} has data for only '
+              f'{int(cnt.iloc[-1])} symbols; live screen uses {last.date()} ({int(cnt[last])} symbols)', flush=True)
     live_month = (last + pd.offsets.MonthBegin(1)).strftime('%Y-%m')
     asof_dates = []
     for mth in months:
@@ -219,11 +229,13 @@ def main():
     feats = month_end_features(W, asof_dates, basket_in_db, a)
     feats['live'] = feats['asof'].eq(last) & feats.month.eq(live_month)
 
-    fund = load_fundamentals(a.fundamentals)
     feats = asof_join(feats, fund)
     feats['turnover_pct'] = feats.med_dv20 / feats.mcap * 100
     ld = feats['listing_date'] if 'listing_date' in feats.columns else pd.Series(pd.NaT, index=feats.index)
-    listing = ld.fillna(feats.symbol.map(first_date))
+    db_start = first_date.min()
+    fd = feats.symbol.map(first_date)
+    fd = fd.where(fd > db_start + pd.Timedelta(days=30))     # first candle at DB start = unknown, not 'new'
+    listing = ld.fillna(fd)
     feats['listing_year'] = pd.to_datetime(listing).dt.year
     feats['listing_known'] = ld.notna()
     feats['in_basket'] = feats.symbol.isin(basket_in_db)
@@ -239,9 +251,14 @@ def main():
     feats['c_beta'] = feats.beta_basket.ge(feats.thr_beta_basket)
     feats['c_vol'] = feats.vol60.ge(feats.thr_vol60)
     feats['c_cap'] = feats.mcap.between(a.cap_min, a.cap_max)
-    feats['c_listing'] = feats.listing_year.ge(a.min_listing_year)
+    listing_info = feats.listing_year.notna().mean()
+    use_listing = listing_info >= 0.5
+    if not use_listing:
+        print(f'NOTE: listing year known for only {listing_info:.0%} of rows (DB history starts '
+              f'{db_start.date()}); listing criterion DISABLED', flush=True)
+    feats['c_listing'] = feats.listing_year.ge(a.min_listing_year) if use_listing else True
     feats['c_surge'] = feats.surge.ge(a.surge)
-    crit = ['c_turnover', 'c_beta', 'c_vol', 'c_cap', 'c_listing']
+    crit = ['c_turnover', 'c_beta', 'c_vol', 'c_cap'] + (['c_listing'] if use_listing else [])
     feats['n_criteria'] = feats[crit].sum(axis=1)
     feats['full_match'] = feats[crit].all(axis=1)
     feats['exploded'] = feats.month_max_pct.ge(a.target)
@@ -249,6 +266,13 @@ def main():
     feats.to_csv(out / 'features_all.csv', index=False)
     live = feats[feats.live & feats.eligible & feats.full_match].sort_values('turnover_pct', ascending=False)
     live.to_csv(out / 'live_candidates.csv', index=False)
+    lv = feats[feats.live]
+    live_diag = {'symbols_at_live_date': int(len(lv)), 'eligible': int(lv.eligible.sum())}
+    for c_ in crit + ['c_surge']:
+        live_diag[c_] = int((lv.eligible & lv[c_].fillna(False).astype(bool)).sum())
+    live_diag['match_without_cap'] = int((lv.eligible & lv[[c for c in crit if c != 'c_cap']].all(axis=1)).sum())
+    lv[lv.eligible & lv[[c for c in crit if c != 'c_cap']].all(axis=1)] \
+        .sort_values('turnover_pct', ascending=False).to_csv(out / 'live_candidates_no_cap.csv', index=False)
 
     hist = feats[~feats.live & feats.eligible & feats.month_max_pct.notna()]
     test = hist[~hist.in_basket]          # basket was picked with hindsight -> exclude from scoring
@@ -257,8 +281,9 @@ def main():
 
     masks = {c: test[c] for c in crit + ['c_surge']}
     masks['full_match'] = test.full_match
+    masks['match_without_cap'] = test[[c for c in crit if c != 'c_cap']].all(axis=1)
     masks['full_match_and_surge'] = test.full_match & test.c_surge
-    masks['4_of_5'] = test.n_criteria.ge(4)
+    masks['all_but_one'] = test.n_criteria.ge(len(crit) - 1)
     for name in list(masks):
         masks[name] = masks[name].fillna(False).astype(bool)
     summary = lift_table(test, masks, 'exploded')
@@ -282,6 +307,8 @@ def main():
     summary['mcap_coverage_pct'] = round(float(test.mcap.notna().mean()), 3)
     summary['split_excluded_stock_months'] = int((~feats.live & feats.split_window).sum())
     summary['live_asof'] = str(last.date()); summary['live_candidates'] = int(len(live))
+    summary['live_diagnostics'] = live_diag
+    summary['criteria_used'] = crit
     summary['notes'] = ('Basket members excluded from scoring. Thresholds = basket quantile at each '
                         'month-end. Outcome = max high in month vs prior month close.')
     (out / 'summary.json').write_text(json.dumps(summary, indent=2, default=str))
