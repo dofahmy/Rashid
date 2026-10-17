@@ -8,6 +8,7 @@ from datetime import datetime, timezone, timedelta
 import numpy as np
 import pandas as pd
 from sqlalchemy import select, update, insert
+from sqlalchemy.sql.sqltypes import String
 from core import database
 from monitor.gann_analysis import _daily_table
 
@@ -83,7 +84,11 @@ def refresh_daily_data(days_back=14):
                 for _,r in x.iterrows():
                     d=pd.Timestamp(r["date"]).date();close=_scalar(r["close"])
                     if close is None or close<=0:continue
-                    vals={cs.name:sym,cd.name:d,cc.name:close}
+                    # The existing market_candles_1d.session_date is VARCHAR(10),
+                    # so the SQL bind must be an ISO date string, not a Python date.
+                    # Keep native date objects for databases with an actual DATE column.
+                    db_date = d.isoformat() if isinstance(cd.type, String) else d
+                    vals={cs.name:sym,cd.name:db_date,cc.name:close}
                     if cts is not None:vals[cts.name]=int(pd.Timestamp(d,tz="UTC").timestamp())
                     if co is not None:vals[co.name]=_scalar(r["open"]) or close
                     if ch is not None:vals[ch.name]=_scalar(r["high"]) or close
@@ -94,11 +99,11 @@ def refresh_daily_data(days_back=14):
                     if csource is not None:vals[csource.name]="YAHOO_EGX_PAGE_REFRESH"
                     if cretrieved is not None:vals[cretrieved.name]=now_utc
                     if cmeta is not None:vals[cmeta.name]=json.dumps({"refresh":"backend_button","source":"yfinance"},ensure_ascii=False)
-                    exists=s.scalar(select(cs).where(cs==sym,cd==d).limit(1))
+                    exists=s.scalar(select(cs).where(cs==sym,cd==db_date).limit(1))
                     if exists is None:s.execute(insert(t).values(**vals))
                     else:
                         upd={k:v for k,v in vals.items() if k not in (cs.name,cd.name)}
-                        s.execute(update(t).where(cs==sym,cd==d).values(**upd))
+                        s.execute(update(t).where(cs==sym,cd==db_date).values(**upd))
                     updated_rows+=1;touched=True
                 updated_symbols+=int(touched)
         print(f"EGX data refresh {min(off+25,len(syms))}/{len(syms)} symbols_updated={updated_symbols} rows={updated_rows}",flush=True)
