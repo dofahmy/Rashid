@@ -62,6 +62,9 @@ def main():
     ap.add_argument('--min-liquidity', type=float, default=5e6)
     ap.add_argument('--min-price', type=float, default=5.0)
     ap.add_argument('--min-k', type=int, default=3, help='smallest number of conditions in a combination')
+    ap.add_argument('--hold', type=int, default=42, help='holding period in trading days (no stop, no target)')
+    ap.add_argument('--cost', type=float, default=1.0)
+    ap.add_argument('--open-col', default='o')
     ap.add_argument('--high-col', default='h'); ap.add_argument('--low-col', default='l')
     ap.add_argument('--close-col', default='c'); ap.add_argument('--volume-col', default='v')
     a = ap.parse_args()
@@ -69,20 +72,20 @@ def main():
     cut = pd.Timestamp(a.test_start)
 
     eng = create_engine(os.environ['DATABASE_URL'])
-    q = text(f'''SELECT symbol, session_date AS date, {a.high_col} AS h, {a.low_col} AS l,
+    q = text(f'''SELECT symbol, session_date AS date, {a.open_col} AS o, {a.high_col} AS h, {a.low_col} AS l,
                  {a.close_col} AS c, {a.volume_col} AS v FROM market_candles_1d''')
     with eng.connect() as cn:
         d = pd.concat(pd.read_sql(q, cn, chunksize=500_000), ignore_index=True)
     d = d[~d.symbol.astype(str).str.endswith('.CA')]
     d['date'] = pd.to_datetime(d.date)
-    for k in 'hlcv':
+    for k in 'ohlcv':
         d[k] = pd.to_numeric(d[k], errors='coerce')
     d = d.drop_duplicates(['symbol', 'date'])
     q90 = (d.c * d.v).groupby(d.symbol).quantile(0.9)
     d = d[d.symbol.isin(q90[q90 >= a.min_liquidity].index)]
-    P = {k: d.pivot(index='date', columns='symbol', values=k) for k in 'hlcv'}
+    P = {k: d.pivot(index='date', columns='symbol', values=k) for k in 'ohlcv'}
     C = P['c']; dates, cols = C.index, C.columns
-    H, L, V = (P[k].reindex(index=dates, columns=cols) for k in 'hlv')
+    O, H, L, V = (P[k].reindex(index=dates, columns=cols) for k in 'ohlv')
     cnt = C.notna().sum(axis=1)
     last_full = cnt[cnt >= 0.8 * cnt.tail(30).median()].index.max()
     pos_last = dates.get_loc(last_full)
@@ -133,6 +136,21 @@ def main():
     scorable = rows_ok & ~split_ahead
     is_test = (dates >= cut)[:, None]
     B = base.values
+    # hold-for-N-days return: buy next open, sell at the close of the N-th trading day, minus cost
+    Hn = a.hold
+    entry = O.shift(-1).values; exitp = C.shift(-Hn).values
+    retN = (exitp / entry - 1) * 100 - a.cost
+    split_holdN = split.astype(float)[::-1].rolling(Hn, min_periods=1).max()[::-1].shift(-1).fillna(1).astype(bool).values
+    okN = (np.arange(len(dates)) <= pos_last - Hn)[:, None] & ~split_holdN & np.isfinite(retN)
+
+    def hold_stats(mask):
+        x = retN[mask & okN]
+        if len(x) == 0:
+            return dict(n=0, mean=np.nan, median=np.nan, win=np.nan, up50=np.nan, dn50=np.nan, best=np.nan, worst=np.nan)
+        return dict(n=len(x), mean=round(float(x.mean()), 2), median=round(float(np.median(x)), 2),
+                    win=round(float((x > 0).mean() * 100), 1), up50=round(float((x >= 50).mean() * 100), 1),
+                    dn50=round(float((x <= -50).mean() * 100), 1), best=round(float(x.max()), 1),
+                    worst=round(float(x.min()), 1))
 
     res, hit_rows = [], []
     combos = [c for k in range(a.min_k, 7) for c in itertools.combinations(range(1, 7), k)]
@@ -162,8 +180,12 @@ def main():
                 for x, y in zip(ii, jj):
                     hit_rows.append({'combo': row['combo'], 'signal_date': dates[x].date(), 'symbol': cols[y],
                                      'days_to_100': int(d100[x, y]), 'period': 'test' if dates[x] >= cut else 'train'})
+        for name, part in (('all', np.ones_like(is_test)), ('train', ~is_test), ('test', is_test)):
+            for k_, v_ in hold_stats(new & part).items():
+                row[f'hold_{name}_{k_}'] = v_
         res.append(row)
     R = pd.DataFrame(res)
+    bench = {nm: hold_stats(B & pt) for nm, pt in (('all', np.ones_like(is_test)), ('train', ~is_test), ('test', is_test))}
     # baseline: base + cond 7 only
     nb = B & scorable                       # every base stock-day (a random day in a random big stock)
     base_rate = (nb & (d100 > 0)).sum() / max(1, nb.sum()) * 100
@@ -182,6 +204,16 @@ def main():
         lines.append(f'{x.combo:12} | {x.distinct_stocks:>5} | {x.all_signals:>6} | {x.all_hits100:>4} | {x.all_rate100_pct}% | '
                      f'{x.median_days_to_100} | {x.all_hits50:>4} | {x.all_rate50_pct}% | '
                      f'{x.test_signals} / {x.test_hits100} / {x.test_rate100_pct}% / ×{x.test_lift}')
+    R2 = R.sort_values('hold_test_mean', ascending=False)
+    lines += ['', f'===== الأداء بعد {Hn} يوم تداول لكل الإشارات (شراء افتتاح اليوم التالي، بيع إغلاق اليوم {Hn}، من غير وقف ولا هدف، بعد تكلفة {a.cost:g}%) =====',
+              f'المرجع: أي سهم كبير في أي يوم -> كل الفترة: متوسط {bench["all"]["mean"]}% وسيط {bench["all"]["median"]}% كسبان {bench["all"]["win"]}% | '
+              f'٢٠٢٦: متوسط {bench["test"]["mean"]}% وسيط {bench["test"]["median"]}% كسبان {bench["test"]["win"]}%',
+              'التوليفة | صفقات | متوسط | وسيط | كسبان% | طلع+50% | نزل-50% | أحسن | أسوأ || قبل ٢٠٢٦: متوسط | ٢٠٢٦: صفقات / متوسط / وسيط / كسبان% / الفرق عن السوق']
+    for x in R2.itertuples():
+        lines.append(f'{x.combo:12} | {x.hold_all_n:>5} | {x.hold_all_mean}% | {x.hold_all_median}% | {x.hold_all_win}% | '
+                     f'{x.hold_all_up50}% | {x.hold_all_dn50}% | {x.hold_all_best}% | {x.hold_all_worst}% || '
+                     f'{x.hold_train_mean}% | {x.hold_test_n} / {x.hold_test_mean}% / {x.hold_test_median}% / {x.hold_test_win}% / '
+                     f'{round(x.hold_test_mean - bench["test"]["mean"], 2) if pd.notna(x.hold_test_mean) else "nan"}%')
     lines.append(f'\nالتفاصيل: {out/"combo_results.csv"} | كل طفرة باسم السهم وتاريخها: {out/"combo_hits.csv"}')
     txt = '\n'.join(lines)
     (out / 'combo_report.txt').write_text(txt)
