@@ -560,6 +560,13 @@ def create_app(db=None,test_config=None):
         if factor_min > system_number:
             factor_min=system_number
 
+        # Evaluation horizon only; does NOT change screening eligibility or MATCH.
+        try:
+            return_sessions=int(request.args.get('return_sessions','220'))
+        except (ValueError,TypeError):
+            return_sessions=220
+        return_sessions=max(1,min(return_sessions,3000))
+
         recent_raw=request.args.get('recent_days','90').strip()
         if recent_raw.lower() in ('','all','none'):
             recent_days=None
@@ -583,6 +590,7 @@ def create_app(db=None,test_config=None):
                 recent_days=recent_days,
                 system_number=system_number,
                 factor_min=factor_min,
+                return_sessions=return_sessions,
             )
         except Exception as exc:
             app.logger.exception('EGX Seven repeat screener failed')
@@ -600,6 +608,7 @@ def create_app(db=None,test_config=None):
             result=result,
             system_number=system_number,
             factor_min=factor_min,
+            return_sessions=return_sessions,
             rule_only=rule_only, rule_match_count=rule_match_count,
             error=error,
             price_tolerance_pct=price_tolerance_pct,
