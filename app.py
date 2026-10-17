@@ -559,6 +559,9 @@ def create_app(db=None,test_config=None):
         factor_min=max(2,min(factor_min,1000))
         if factor_min > system_number:
             factor_min=system_number
+        factor_parity=request.args.get('factor_parity','both').strip().lower()
+        if factor_parity not in ('both','odd','even'):
+            factor_parity='both'
 
         # Evaluation horizon only; does NOT change screening eligibility or MATCH.
         try:
@@ -590,6 +593,7 @@ def create_app(db=None,test_config=None):
                 recent_days=recent_days,
                 system_number=system_number,
                 factor_min=factor_min,
+                factor_parity=factor_parity,
                 return_sessions=return_sessions,
             )
         except Exception as exc:
@@ -608,6 +612,7 @@ def create_app(db=None,test_config=None):
             result=result,
             system_number=system_number,
             factor_min=factor_min,
+            factor_parity=factor_parity,
             return_sessions=return_sessions,
             rule_only=rule_only, rule_match_count=rule_match_count,
             error=error,
