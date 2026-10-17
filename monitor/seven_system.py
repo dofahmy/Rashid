@@ -253,7 +253,7 @@ def _chart_payload(price_df,signal_mask,value_col):
     return {'points':points,'markers':markers,'min':mn,'max':mx}
 
 
-def repeat_price_time_screener(price_tolerance_pct=1.0, max_gap_sessions=20, recent_days=None, system_number=7, factor_min=2, return_sessions=220):
+def repeat_price_time_screener(price_tolerance_pct=1.0, max_gap_sessions=20, recent_days=None, system_number=7, factor_min=2, return_sessions=220, factor_parity="both"):
     """
     Screen the whole EGX universe for the LATEST repeated same-stock Double-7
     price/time cluster.
@@ -270,6 +270,9 @@ def repeat_price_time_screener(price_tolerance_pct=1.0, max_gap_sessions=20, rec
     if not 1 <= return_sessions <= 3000: raise ValueError("return_sessions must be between 1 and 3000")
     if not 2 <= system_number <= 1000: raise ValueError("system_number must be between 2 and 1000")
     if not 2 <= factor_min <= system_number: raise ValueError("factor_min must be between 2 and system_number")
+    factor_parity=str(factor_parity).lower().strip()
+    if factor_parity not in ("both", "odd", "even"):
+        raise ValueError("factor_parity must be both, odd or even")
     frames=_load_stocks()
     # Scan only the inclusive user-selected factor range.
     rows=[]
@@ -285,6 +288,10 @@ def repeat_price_time_screener(price_tolerance_pct=1.0, max_gap_sessions=20, rec
 
     for sym,df in frames.items():
       for squaring_factor in range(factor_min, system_number + 1):
+        if factor_parity == "odd" and squaring_factor % 2 == 0:
+            continue
+        if factor_parity == "even" and squaring_factor % 2 != 0:
+            continue
         single,_=_single(df,True,system_number=squaring_factor)
         levels=_repeat_double7_levels(
             single,
@@ -381,6 +388,7 @@ def repeat_price_time_screener(price_tolerance_pct=1.0, max_gap_sessions=20, rec
 
     return {
         'system_number':system_number,
+        'factor_parity':factor_parity,
         'factor_min':factor_min,
         'factor_max':system_number,
         'return_sessions':return_sessions,
