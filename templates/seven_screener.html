@@ -18,6 +18,8 @@
 <label>أقصى Gap بالجلسات</label>
 <input type="number" name="max_gap_sessions" min="1" max="252" value="{{max_gap_sessions}}">
 
+<label>احسب العائد بعد عدد جلسات</label>
+<input type="number" name="return_sessions" min="1" max="3000" step="1" required value="{{return_sessions|default(220)}}" style="max-width:120px" title="للحساب والعرض فقط؛ لا يغير الفلترة أو MATCH">
 <label>أحدث من</label>
 <select name="recent_days">
 <option value="30" {{'selected' if recent_days==30 else ''}}>30 يوم</option>
@@ -64,6 +66,7 @@
 <th scope="col" tabindex="0" role="button" aria-sort="none" data-sort-type="match">MATCH <span class="sort-arrow">↕</span></th>
 <th scope="col" tabindex="0" role="button" aria-sort="none" data-sort-type="number">أعلى سعر بعد Repeat <span class="sort-arrow">↕</span></th>
 <th scope="col" tabindex="0" role="button" aria-sort="none" data-sort-type="number">الصعود من Repeat لأعلى سعر % <span class="sort-arrow">↕</span></th>
+<th scope="col" tabindex="0" role="button" aria-sort="none" data-sort-type="number">العائد بعد {{return_sessions}} جلسة % <span class="sort-arrow">↕</span></th>
 <th scope="col" tabindex="0" role="button" aria-sort="none" data-sort-type="number">المدة حتى أعلى سعر <span class="sort-arrow">↕</span></th>
 <th scope="col" tabindex="0" role="button" aria-sort="none" data-sort-type="number">Gap <span class="sort-arrow">↕</span></th>
 <th scope="col" tabindex="0" role="button" aria-sort="none" data-sort-type="number">Touches <span class="sort-arrow">↕</span></th>
@@ -78,11 +81,12 @@
 <td data-sort-value="{{2 if r.breakout_rule_status=='MATCH' else (1 if r.breakout_rule_status=='NO_DATA' else 0)}}">{{'✅ MATCH' if r.breakout_rule_status=='MATCH' else ('— NO_DATA' if r.breakout_rule_status=='NO_DATA' else '❌')}}</td>
 <td data-sort-value="{{r.repeat_peak_high if r.repeat_peak_high is not none else ''}}">{{'%.4f'|format(r.repeat_peak_high) if r.repeat_peak_high is not none else '—'}}</td>
 <td data-sort-value="{{gain if gain is not none else ''}}">{{'%+.2f%%'|format(gain) if gain is not none else '—'}}</td>
+<td data-sort-value="{{r.horizon_return_pct if r.horizon_return_pct is not none else ''}}">{{'%+.2f%%'|format(r.horizon_return_pct) if r.horizon_return_pct is not none else ('لم تكتمل (' ~ r.sessions_observed_after_repeat ~ '/' ~ return_sessions ~ ')')}}</td>
 <td data-sort-value="{{r.repeat_peak_bars if r.repeat_peak_bars is not none else ''}}">{{r.repeat_peak_bars if r.repeat_peak_bars is not none else '—'}} جلسة</td>
 <td data-sort-value="{{r.max_session_gap if r.max_session_gap is not none else ''}}">{{r.max_session_gap if r.max_session_gap is not none else '—'}}</td>
 <td data-sort-value="{{r.touches if r.touches is not none else ''}}">{{r.touches if r.touches is not none else '—'}}</td>
 </tr>
-{% else %}<tr><td colspan="10">لا توجد نتائج للفلاتر المختارة.</td></tr>{% endfor %}
+{% else %}<tr><td colspan="11">لا توجد نتائج للفلاتر المختارة.</td></tr>{% endfor %}
 </tbody></table>
 <script>
 (function () {
