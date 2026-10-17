@@ -42,6 +42,9 @@ def main():
     ap.add_argument('--fundamentals', default='/data/fund.csv')
     ap.add_argument('--out', default='/data/spike_profile')
     ap.add_argument('--months', type=int, default=2)
+    ap.add_argument('--since', help='start date YYYY-MM-DD (overrides --months)')
+    ap.add_argument('--cost', type=float, default=1.0)
+    ap.add_argument('--quiet', action='store_true', help='do not print the day-by-day table')
     ap.add_argument('--min-cap', type=float, default=1e9)
     ap.add_argument('--min-liquidity', type=float, default=5e6)
     ap.add_argument('--min-price', type=float, default=5.0)
@@ -58,7 +61,7 @@ def main():
     eng = create_engine(os.environ['DATABASE_URL'])
     with eng.connect() as cn:
         last_db = pd.to_datetime(pd.read_sql(text('SELECT MAX(session_date) AS d FROM market_candles_1d'), cn).d[0])
-        start_sig = last_db - pd.DateOffset(months=a.months)
+        start_sig = pd.Timestamp(a.since) if a.since else last_db - pd.DateOffset(months=a.months)
         load_from = (start_sig - pd.Timedelta(days=270)).strftime('%Y-%m-%d')
         q = text(f'''SELECT symbol, session_date AS date, {a.open_col} AS o, {a.high_col} AS h,
                      {a.low_col} AS l, {a.close_col} AS c, {a.volume_col} AS v
@@ -103,6 +106,7 @@ def main():
     days = [t for t in full if t >= start_sig]
     rows, det = [], []
     pos = {t: i for i, t in enumerate(dates)}
+    busy_until = {}                      # symbol -> index of exit day (no re-buy while holding)
     for t in days:
         syms = cols[rule.loc[t].values]; nsyms = cols[new.loc[t].values]
         rows.append({'date': t.date(), 'passing': len(syms), 'new': len(nsyms),
@@ -113,6 +117,7 @@ def main():
                 det.append({'signal_date': t.date(), 'symbol': s, 'status': 'buy at next open'}); continue
             j = cols.get_loc(s); e = i + 1; o0 = O.iat[e, j]
             if not np.isfinite(o0): continue
+            if busy_until.get(s, -1) >= e: continue      # already holding this stock
             last = min(e + a.max_days - 1, pos[last_full])
             hs = H.iloc[e:last + 1, j].values
             hit = np.flatnonzero(hs >= o0 * (1 + a.target / 100))
@@ -122,6 +127,7 @@ def main():
                 status, ret, xd = f'closed after {a.max_days} days', (C.iat[last, j] / o0 - 1) * 100, dates[last].date()
             else:
                 status, ret, xd = 'still open', (C.iat[pos[last_full], j] / o0 - 1) * 100, None
+            busy_until[s] = pos[pd.Timestamp(xd)] if xd is not None else 10**9
             det.append({'signal_date': t.date(), 'symbol': s, 'entry_date': dates[e].date(),
                         'entry_open': round(o0, 2), 'best_gain_pct': round((np.nanmax(hs) / o0 - 1) * 100, 1),
                         'worst_pct': round((np.nanmin(L.iloc[e:last + 1, j].values) / o0 - 1) * 100, 1),
@@ -130,14 +136,34 @@ def main():
     R.to_csv(out / 'daily_counts.csv', index=False); D.to_csv(out / 'signals_detail.csv', index=False)
 
     print(f'آخر يوم كامل في البيانات: {last_full.date()}  (آخر تاريخ في القاعدة {last_db.date()})\n')
-    print('التاريخ      | عدّى الشروط | جديد | الأسهم الجديدة')
-    for x in R.itertuples():
-        print(f'{x.date} | {x.passing:>10} | {x.new:>4} | {x.new_symbols}')
+    if not a.quiet:
+        print('التاريخ      | عدّى الشروط | جديد | الأسهم الجديدة')
+        for x in R.itertuples():
+            print(f'{x.date} | {x.passing:>10} | {x.new:>4} | {x.new_symbols}')
     if len(D) and 'return_pct' in D:
         dd = D.dropna(subset=['return_pct'])
         print(f'\nإشارات جديدة: {len(D)} | متوسط أحسن صعود {dd.best_gain_pct.mean():.1f}% | '
               f'متوسط أسوأ نزول {dd.worst_pct.mean():.1f}% | متوسط العائد لحد دلوقتي {dd.return_pct.mean():.1f}% | '
               f'كسبانة {(dd.return_pct > 0).mean() * 100:.0f}% | وصلت +{a.target:g}%: {(dd.status.str.startswith("hit")).sum()}')
+    if len(D) and 'return_pct' in D:
+        c = D[D.status.notna() & (D.status != 'still open') & (D.status != 'buy at next open')].copy()
+        c['net'] = c.return_pct - a.cost
+        c['month'] = pd.to_datetime(c.signal_date).dt.to_period('M').astype(str)
+        R['month'] = pd.to_datetime(R.date).dt.to_period('M').astype(str)
+        sig_per_day = R.groupby('month').agg(avg_passing=('passing', 'mean'), avg_new=('new', 'mean'))
+        m = c.groupby('month').agg(closed=('net', 'size'), mean_net=('net', 'mean'), median_net=('net', 'median'),
+                                   win_pct=('net', lambda x: (x > 0).mean() * 100),
+                                   hit_target=('status', lambda x: x.str.startswith('hit').sum()),
+                                   worst=('net', 'min'), best=('net', 'max'))
+        m = sig_per_day.join(m, how='left').round(1)
+        print(f'\n--- شهر بشهر (الصفقات اللي خلصت فقط، بعد تكلفة {a.cost:g}%) ---')
+        print('الشهر    | متوسط الأسهم/يوم | جديد/يوم | خلصت | متوسط | الوسيط | كسبانة% | وصلت الهدف | أسوأ | أحسن')
+        for k, x in m.iterrows():
+            print(f'{k} | {x.avg_passing:>15} | {x.avg_new:>8} | {x.closed if pd.notna(x.closed) else 0:>5} | '
+                  f'{x.mean_net} | {x.median_net} | {x.win_pct} | {x.hit_target} | {x.worst} | {x.best}')
+        print(f'\nكل الصفقات اللي خلصت: {len(c)} | متوسط بعد التكلفة {c.net.mean():.1f}% | '
+              f'كسبانة {(c.net > 0).mean() * 100:.0f}% | وصلت الهدف {c.status.str.startswith("hit").sum()} | '
+              f'أسوأ صفقة {c.net.min():.1f}%')
     print(f'\nالتفاصيل: {out / "signals_detail.csv"}')
 
 
