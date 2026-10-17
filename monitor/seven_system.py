@@ -6,7 +6,6 @@ from core import database
 from monitor.gann_analysis import _daily_table, _load_egx_panel
 from monitor.seven_forward_20d import forward_20d
 from monitor.seven_breakout_rule import classify_repeat
-from monitor.seven_exit_targets import repeat_exit_targets
 
 PRICE_SCALE=100
 
@@ -89,17 +88,15 @@ def _market(frames):
         ))
     return pd.DataFrame(rows),{}
 
-def _single(df,volume=True,system_number=7):
-    system_number=int(system_number)
-    if not 2 <= system_number <= 1000: raise ValueError("system_number must be between 2 and 1000")
+def _single(df,volume=True):
     x=df.copy().sort_values('date').reset_index(drop=True)
     x['raw_close']=x['close'].astype(float)
     x['price_units']=x.close.map(_units)
 
-    pa=next((i for i,v in enumerate(x.price_units) if v is not None and v%system_number==0),None)
+    pa=next((i for i,v in enumerate(x.price_units) if v is not None and v%7==0),None)
     va=None
     if volume:
-        va=next((i for i,v in enumerate(x.volume) if pd.notna(v) and int(round(float(v)))%system_number==0),None)
+        va=next((i for i,v in enumerate(x.volume) if pd.notna(v) and int(round(float(v)))%7==0),None)
 
     x['price_value']=np.nan;x['price_remainder']=np.nan;x['price_signal7']=False
     x['volume_value']=np.nan;x['volume_remainder']=np.nan;x['volume_signal7']=False
@@ -107,14 +104,14 @@ def _single(df,volume=True,system_number=7):
     if pa is not None:
         c=x.loc[pa:,'price_units'].fillna(0).astype('int64').cumsum()
         x.loc[pa:,'price_value']=c.to_numpy()/100
-        x.loc[pa:,'price_remainder']=(c%system_number).to_numpy()
-        x.loc[pa:,'price_signal7']=(c%system_number==0).to_numpy()
+        x.loc[pa:,'price_remainder']=(c%7).to_numpy()
+        x.loc[pa:,'price_signal7']=(c%7==0).to_numpy()
 
     if volume and va is not None:
         c=x.loc[va:,'volume'].fillna(0).round().astype('int64').cumsum()
         x.loc[va:,'volume_value']=c.to_numpy()
-        x.loc[va:,'volume_remainder']=(c%system_number).to_numpy()
-        x.loc[va:,'volume_signal7']=(c%system_number==0).to_numpy()
+        x.loc[va:,'volume_remainder']=(c%7).to_numpy()
+        x.loc[va:,'volume_signal7']=(c%7==0).to_numpy()
 
     meta={
         'price_anchor_date':pd.Timestamp(x.iloc[pa].date).date().isoformat() if pa is not None else None,
@@ -252,7 +249,7 @@ def _chart_payload(price_df,signal_mask,value_col):
     return {'points':points,'markers':markers,'min':mn,'max':mx}
 
 
-def repeat_price_time_screener(price_tolerance_pct=1.0, max_gap_sessions=20, recent_days=None, system_number=7):
+def repeat_price_time_screener(price_tolerance_pct=1.0, max_gap_sessions=20, recent_days=None):
     """
     Screen the whole EGX universe for the LATEST repeated same-stock Double-7
     price/time cluster.
@@ -263,10 +260,7 @@ def repeat_price_time_screener(price_tolerance_pct=1.0, max_gap_sessions=20, rec
       if set, keep only stocks whose latest qualifying cluster ended within
       recent_days calendar days from the latest market date in the database.
     """
-    system_number=int(system_number)
-    if not 2 <= system_number <= 1000: raise ValueError("system_number must be between 2 and 1000")
     frames=_load_stocks()
-    # The entered value is an inclusive upper bound: factors 2..N.
     rows=[]
 
     latest_market_date=None
@@ -279,8 +273,7 @@ def repeat_price_time_screener(price_tolerance_pct=1.0, max_gap_sessions=20, rec
             latest_market_date=mx if latest_market_date is None or mx>latest_market_date else latest_market_date
 
     for sym,df in frames.items():
-      for squaring_factor in range(2, system_number + 1):
-        single,_=_single(df,True,system_number=squaring_factor)
+        single,_=_single(df,True)
         levels=_repeat_double7_levels(
             single,
             price_tolerance_pct=price_tolerance_pct,
@@ -307,24 +300,8 @@ def repeat_price_time_screener(price_tolerance_pct=1.0, max_gap_sessions=20, rec
             current_close=float(df.iloc[-1]['close'])
             current_date=pd.Timestamp(df.iloc[-1]['date']).date().isoformat()
 
-        # Highest traded High after Repeat (exclude the signal candle itself).
-        after=df[pd.to_datetime(df['date']) > end_date].copy()
-        if not after.empty:
-            if 'high' in after.columns and after['high'].notna().any():
-                highs=pd.to_numeric(after['high'],errors='coerce')
-            else:
-                highs=pd.to_numeric(after['close'],errors='coerce')
-            peak_pos=highs.idxmax() if highs.notna().any() else None
-            peak_high=float(highs.loc[peak_pos]) if peak_pos is not None else None
-            peak_bars=int(after.index.get_loc(peak_pos))+1 if peak_pos is not None else None
-        else:
-            peak_high=None;peak_bars=None
-
         rows.append({
             'symbol':sym,
-            'squaring_factor':squaring_factor,
-            'repeat_peak_high':peak_high,
-            'repeat_peak_bars':peak_bars,
             'latest_repeat_date':latest['end_date'],
             'first_repeat_date':latest['start_date'],
             'repeat_price':latest['avg_price'],
@@ -338,7 +315,6 @@ def repeat_price_time_screener(price_tolerance_pct=1.0, max_gap_sessions=20, rec
             'days_ago':age,
             **classify_repeat(df, latest['end_date'], latest['max_session_gap'], latest['touches']),
             **forward_20d(df,latest['end_date'],latest['avg_price']),
-            **repeat_exit_targets(df,latest['end_date'],latest['avg_price']),
             'current_close':round(current_close,4) if current_close is not None else None,
             'current_date':current_date,
             'current_vs_repeat_pct':(
@@ -352,16 +328,12 @@ def repeat_price_time_screener(price_tolerance_pct=1.0, max_gap_sessions=20, rec
         key=lambda r:(
             pd.Timestamp(r['latest_repeat_date']),
             int(r['touches']),
-            -int(r['squaring_factor']),
             -float(r['price_spread_pct'] or 0),
         ),
         reverse=True
     )
 
     return {
-        'system_number':system_number,
-        'factor_min':2,
-        'factor_max':system_number,
         'rows':rows,
         'count':len(rows),
         'latest_market_date':latest_market_date.date().isoformat() if latest_market_date is not None else None,
