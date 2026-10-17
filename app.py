@@ -546,11 +546,19 @@ def create_app(db=None,test_config=None):
         except Exception:
             max_gap_sessions=20
 
+        # Inclusive range; keep the old system_number query parameter as the upper bound.
         try:
-            system_number=int(request.args.get('system_number','7'))
+            system_number=int(request.args.get('system_number', request.args.get('factor_max','7')))
         except (ValueError,TypeError):
             system_number=7
         system_number=max(2,min(system_number,1000))
+        try:
+            factor_min=int(request.args.get('factor_min','2'))
+        except (ValueError,TypeError):
+            factor_min=2
+        factor_min=max(2,min(factor_min,1000))
+        if factor_min > system_number:
+            factor_min=system_number
 
         recent_raw=request.args.get('recent_days','90').strip()
         if recent_raw.lower() in ('','all','none'):
@@ -574,6 +582,7 @@ def create_app(db=None,test_config=None):
                 max_gap_sessions=max_gap_sessions,
                 recent_days=recent_days,
                 system_number=system_number,
+                factor_min=factor_min,
             )
         except Exception as exc:
             app.logger.exception('EGX Seven repeat screener failed')
@@ -590,6 +599,7 @@ def create_app(db=None,test_config=None):
             'seven_screener.html',
             result=result,
             system_number=system_number,
+            factor_min=factor_min,
             rule_only=rule_only, rule_match_count=rule_match_count,
             error=error,
             price_tolerance_pct=price_tolerance_pct,
