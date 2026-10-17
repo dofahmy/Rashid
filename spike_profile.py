@@ -96,6 +96,7 @@ def main():
     ap.add_argument('--min-lift-gain', type=float, default=0.10, help='stop when lift improves less than 10%%')
     ap.add_argument('--max-steps', type=int, default=8)
     ap.add_argument('--cost', type=float, default=1.0)
+    ap.add_argument('--use-step', type=int, help='force this rule step for live signals (e.g. 2)')
     ap.add_argument('--open-col', default='o'); ap.add_argument('--high-col', default='h')
     ap.add_argument('--low-col', default='l'); ap.add_argument('--close-col', default='c')
     ap.add_argument('--volume-col', default='v')
@@ -294,10 +295,10 @@ def main():
         sel = sel & ((F[f] >= thr) if op == '>=' else (F[f] <= thr))
         step_masks[k] = sel.copy()
     exits = [(Tg, Sg, Hd) for Tg in (50, 100, 200) for Sg in (15, 25, 40, 99) for Hd in (21, 42)]
-    for k in range(1, len(chosen) + 1):
+    for k in range(0, len(chosen) + 1):
         sv = (step_masks[k] & in_range).values
         js = np.flatnonzero(sv.any(axis=0))
-        for (Tg, Sg, Hd) in exits:
+        for (Tg, Sg, Hd) in (exits if k > 0 else [(100, 99, 42), (200, 99, 42), (50, 40, 42)]):
             tr_ = []
             for j in js:
                 for s_, e_, x_, ret in sim(sv[:, j], Ov[:, j], Hv[:, j], Lv[:, j], Cv[:, j], SPv[:, j], Tg, Sg, Hd):
@@ -315,6 +316,8 @@ def main():
                                 'h2_trades': len(h2), 'h2_mean': round(h2.ret.mean(), 2)})
         print(f'  trade test step {k} done', flush=True)
     TR = pd.DataFrame(trades_rows); TR.to_csv(out / 'rule_trades.csv', index=False)
+    BENCH = TR[TR.step == 0]
+    TR = TR[TR.step > 0]
     TRok = TR[(TR.h1_trades >= 40) & (TR.h2_trades >= 40)].copy()
     if len(TRok):
         TRok['min_half'] = TRok[['h1_mean', 'h2_mean']].min(axis=1)
@@ -322,6 +325,8 @@ def main():
         trade_step = int(pick.step)
     else:
         pick, trade_step = None, best_step
+    if a.use_step is not None:
+        trade_step = a.use_step
     sel = step_masks[trade_step]
 
     lv = sel.loc[last_full]
@@ -354,6 +359,8 @@ def main():
         L_.append(f'عدد التوليفات الكسبانة في النصين: {int((TRok.min_half > 0).sum())} من {len(TRok)}')
     else:
         L_.append('لا صفقات كفاية')
+    L_.append('\n--- للمقارنة: كل الأسهم الكبيرة السائلة من غير أي شروط (خطوة 0) ---')
+    L_.append(BENCH.to_string(index=False) if len(BENCH) else 'لا يوجد')
     L_.append(f'\nإشارات {last_full.date()} (شراء افتتاح اليوم التالي، شروط خطوة ' + str(trade_step) + '): ' + (', '.join(live.symbol) or 'لا يوجد'))
     txt = '\n'.join(L_)
     (out / 'rule_steps.txt').write_text(txt)
