@@ -252,7 +252,7 @@ def _chart_payload(price_df,signal_mask,value_col):
     return {'points':points,'markers':markers,'min':mn,'max':mx}
 
 
-def repeat_price_time_screener(price_tolerance_pct=1.0, max_gap_sessions=20, recent_days=None, system_number=7, factor_min=2):
+def repeat_price_time_screener(price_tolerance_pct=1.0, max_gap_sessions=20, recent_days=None, system_number=7, factor_min=2, return_sessions=220):
     """
     Screen the whole EGX universe for the LATEST repeated same-stock Double-7
     price/time cluster.
@@ -265,6 +265,8 @@ def repeat_price_time_screener(price_tolerance_pct=1.0, max_gap_sessions=20, rec
     """
     system_number=int(system_number)
     factor_min=int(factor_min)
+    return_sessions=int(return_sessions)
+    if not 1 <= return_sessions <= 3000: raise ValueError("return_sessions must be between 1 and 3000")
     if not 2 <= system_number <= 1000: raise ValueError("system_number must be between 2 and 1000")
     if not 2 <= factor_min <= system_number: raise ValueError("factor_min must be between 2 and system_number")
     frames=_load_stocks()
@@ -322,8 +324,24 @@ def repeat_price_time_screener(price_tolerance_pct=1.0, max_gap_sessions=20, rec
         else:
             peak_high=None;peak_bars=None
 
+        # Display-only fixed-horizon return, never used for filtering or MATCH.
+        # #1 is the first trading session AFTER the signal/second touch.
+        horizon_close=None
+        horizon_return_pct=None
+        sessions_observed_after_repeat=len(after)
+        if sessions_observed_after_repeat >= return_sessions:
+            close_series=pd.to_numeric(after['close'],errors='coerce')
+            candidate=close_series.iloc[return_sessions-1]
+            if pd.notna(candidate) and math.isfinite(float(candidate)):
+                horizon_close=float(candidate)
+                if latest['avg_price'] is not None and float(latest['avg_price'])>0:
+                    horizon_return_pct=round((horizon_close/float(latest['avg_price'])-1.0)*100.0,2)
+
         rows.append({
             'symbol':sym,
+            'horizon_return_pct':horizon_return_pct,
+            'horizon_close':horizon_close,
+            'sessions_observed_after_repeat':sessions_observed_after_repeat,
             'squaring_factor':squaring_factor,
             'repeat_peak_high':peak_high,
             'repeat_peak_bars':peak_bars,
@@ -364,6 +382,7 @@ def repeat_price_time_screener(price_tolerance_pct=1.0, max_gap_sessions=20, rec
         'system_number':system_number,
         'factor_min':factor_min,
         'factor_max':system_number,
+        'return_sessions':return_sessions,
         'rows':rows,
         'count':len(rows),
         'latest_market_date':latest_market_date.date().isoformat() if latest_market_date is not None else None,
