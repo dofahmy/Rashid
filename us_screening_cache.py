@@ -61,7 +61,7 @@ def filtered(snapshot, params, rule_only):
         if recent is not None and market_date:
             age=(date.fromisoformat(market_date)-date.fromisoformat(original['latest_repeat_date'])).days
             if age>int(recent):continue
-        row={k:v for k,v in original.items() if k!='_forward_closes'}
+        row={k:v for k,v in original.items() if k not in ('_forward_closes','_forward_highs')}
         closes=original.get('_forward_closes',[])
         n=int(params['return_sessions'])
         row['sessions_observed_after_repeat']=len(closes)
@@ -70,16 +70,17 @@ def filtered(snapshot, params, rule_only):
         if len(closes)>=n and closes[n-1] is not None and float(row['repeat_price'])>0:
             row['horizon_close']=closes[n-1]
             row['horizon_return_pct']=round((closes[n-1]/float(row['repeat_price'])-1)*100,2)
-        # First subsequent SESSION whose closing price reaches the user target.
-        # Uses the saved forward closes only: no expensive repeat recomputation.
+        # First subsequent SESSION whose daily HIGH reaches the target.
+        # No Repeat recomputation. Existing snapshots require one-time High backfill.
         target_pct=float(params.get('target_return_pct',3.0))
         repeat_price=float(row['repeat_price'])
         row['target_return_pct']=target_pct
         row['target_hit_sessions']=None
         if repeat_price > 0:
-            target_close=repeat_price*(1+target_pct/100.0)
-            for pos, close_value in enumerate(closes,1):
-                if close_value is not None and float(close_value)>=target_close - 1e-10:
+            target_high=repeat_price*(1+target_pct/100.0)
+            highs=original.get('_forward_highs',[])
+            for pos, high_value in enumerate(highs,1):
+                if high_value is not None and float(high_value)>=target_high - 1e-10:
                     row['target_hit_sessions']=pos
                     break
         rows.append(row)

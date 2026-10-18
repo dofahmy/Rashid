@@ -11,7 +11,12 @@ from monitor import seven_system as engine
 
 LOCK = threading.Lock()
 MIN_DOLLAR_VOLUME = 5_000_000.0
-US_TICKER = re.compile(r'^[A-Z]{1,5}(?:[.-][A-Z]{1,2})?$')
+US_TICKER = re.compile(r'^[A-Z]{1,5}(?:[.-][A-Z])?$')
+
+# Exclude foreign-market suffixes; a single-letter suffix can represent a US share class.
+def is_us_symbol(value):
+    ticker = str(value or '').strip().upper()
+    return bool(US_TICKER.fullmatch(ticker)) and not ticker.endswith(('.CA', '.SR'))
 
 
 def load_us_stocks(progress=None):
@@ -27,7 +32,7 @@ def load_us_stocks(progress=None):
         if any(x is None for x in (symbol,date,adj,raw,opening,high,low,volume)):
             raise RuntimeError('Required OHLCV market_candles_1d columns missing')
         syms=[r[0] for r in session.execute(select(symbol).distinct()).all()]
-        syms=sorted(set(str(s).upper() for s in syms if s and US_TICKER.fullmatch(str(s).upper())))
+        syms=sorted(set(str(s).upper() for s in syms if s and is_us_symbol(s)))
         if progress: progress('loading', 0, len(syms))
         # Use adjusted close for consistency with the original Egypt engine;
         # unadjusted close is mandatory for candle and dollar-value eligibility.
@@ -89,7 +94,7 @@ def repeat_price_time_screener(progress=None, **kwargs):
         if progress and (index % 20 == 0 or index == len(loaded)): progress('filtering', index, len(loaded))
     result=dict(result)
     result['rows']=[row for row in result.get('rows',[])
-                    if eligible.get(str(row.get('symbol','')).upper(),{}).get(str(row.get('latest_repeat_date','')),False)]
+                    if is_us_symbol(row.get('symbol')) and eligible.get(str(row.get('symbol','')).upper(),{}).get(str(row.get('latest_repeat_date','')),False)]
     result['count']=len(result['rows'])
     # Preserve future actual (unadjusted) closes so the viewer can calculate
     # any horizon without rerunning the expensive factor scan.
@@ -100,5 +105,7 @@ def repeat_price_time_screener(progress=None, **kwargs):
         after = df.loc[dates > pd.Timestamp(row['latest_repeat_date'])]
         row['_forward_closes'] = [float(v) if pd.notna(v) and np.isfinite(v) else None
                                    for v in after['close'].iloc[:3000]]
+        row['_forward_highs'] = [float(v) if pd.notna(v) and np.isfinite(v) else None
+                                  for v in after['high'].iloc[:3000]]
     result['universe_count']=len(loaded)
     return result
