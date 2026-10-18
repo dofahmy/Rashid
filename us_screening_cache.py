@@ -19,7 +19,21 @@ def available_snapshot(params):
     for path in CACHE_ROOT.glob('snapshot_*.json'):
         try:
             obj=json.loads(path.read_text())
-            if obj.get('cache_version') != CACHE_VERSION: continue
+            version=obj.get('cache_version')
+            if version != CACHE_VERSION:
+                # Recover old, unversioned snapshots ONLY if every stored ticker is
+                # a valid US ticker, and the required future-closes data is present.
+                # Do not use older mixed-market snapshots or incompatible versions.
+                if version is not None: continue
+                from us_seven_engine import is_us_symbol
+                rows=obj.get('result',{}).get('rows',[])
+                if not all(is_us_symbol(row.get('symbol')) and isinstance(row.get('_forward_closes'),list) for row in rows):
+                    continue
+                if 'params' not in obj or 'result' not in obj: continue
+                obj['cache_version']=CACHE_VERSION
+                # Persist the safe recovered snapshot so future loads are cheap.
+                from us_screening_job import atomic_json
+                atomic_json(path,obj)
             p=obj['params']
             if (float(p['price_tolerance_pct'])==float(params['price_tolerance_pct'])
                 and int(p['max_gap_sessions'])==int(params['max_gap_sessions'])

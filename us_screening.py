@@ -102,15 +102,26 @@ def screening():
                 if jobfile.exists(): job=json.loads(jobfile.read_text(encoding='utf8'))
             except Exception:
                 job=None
+            # A deliberate retry clears only the selected job status, not snapshots.
+            if request.args.get('retry') == '1':
+                try: jobfile.unlink(missing_ok=True)
+                except OSError: pass
+                job=None
             try:
                 snapshot=available_snapshot(args)
                 if snapshot:
                     raw_result=filtered(snapshot,args,False)
                     match_count=sum(bool(r.get('breakout_rule_match')) for r in raw_result['rows'])
                     result=filtered(snapshot,args,rule_only)
-                elif job and job.get('status') in ('queued','running') and time.time()-job.get('started_at',0)<3600:
+                elif job and job.get('status') in ('queued','running') and time.time()-job.get('updated_at',job.get('started_at',0))<900:
                     pending=True
                     progress_data=job
+                elif job and job.get('status')=='failed':
+                    error='آخر فحص فشل: '+str(job.get('error','خطأ غير معروف'))[:280]
+                elif job and job.get('status')=='done':
+                    error='الفحص انتهى لكن ملف النتائج غير موجود أو غير متوافق. راجعي US job Logs.'
+                elif job and job.get('status') in ('queued','running'):
+                    error='مهمة البحث توقفت عن تحديث تقدمها لأكثر من 15 دقيقة. راجعي Logs قبل إعادة المحاولة.'
                 else:
                     # Prevent simultaneous full-universe scans, even for different filters.
                     active=False
