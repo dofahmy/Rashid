@@ -75,7 +75,11 @@
   <script>setTimeout(function(){window.location.reload()},10000);</script>
   {% endif %}
   {% if error %}
-  <div class="panel warning">{{ error }}</div>
+  <div class="panel warning">{{ error }}
+    {% if request.args.get('run') == '1' %}
+      <a href="{{ request.full_path }}{{ '&' if '?' in request.full_path else '?' }}retry=1" style="display:inline-block;margin-right:10px">إعادة المحاولة يدويًا</a>
+    {% endif %}
+  </div>
   {% endif %}
 
   <div class="panel">
