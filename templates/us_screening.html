@@ -52,6 +52,10 @@
   {% elif refresh_message == 'failed' %}
   <div class="panel warning">تعذر بدء التحديث حاليًا.</div>
   {% endif %}
+  {% if pending %}
+  <div class="notice">البحث جارٍ في الخلفية. الصفحة هتتحدث تلقائيًا كل 10 ثوانٍ حتى تظهر النتائج.</div>
+  <script>setTimeout(function(){window.location.reload()},10000);</script>
+  {% endif %}
   {% if error %}
   <div class="panel warning">{{ error }}</div>
   {% endif %}
