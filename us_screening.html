@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>نتائج الأسهم الأمريكية</title>
+  <style>
+    body{margin:0;background:#eef2f5;font-family:Tahoma,Arial,sans-serif;color:#15314b}
+    .wrap{max-width:1280px;margin:24px auto;padding:0 18px}
+    .panel{background:#fff;border:1px solid #d8e1e8;border-radius:16px;padding:18px;box-shadow:0 1px 2px #00000008;margin-bottom:16px}
+    h1,h2{margin:0 0 14px 0;color:#15314b}
+    h1{font-size:38px;text-align:center}
+    h2{font-size:28px;text-align:center}
+    .topbar{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:10px}
+    .title{font-size:18px;font-weight:700}
+    .filters{display:grid;grid-template-columns:repeat(12,minmax(0,1fr));gap:10px;align-items:end}
+    .field{display:flex;flex-direction:column;gap:6px}
+    .field label{font-size:13px;color:#456170;font-weight:700}
+    .field input,.field select{height:44px;border:1px solid #cfd8df;border-radius:10px;padding:0 12px;background:#fff;font-size:16px;color:#10283d;box-sizing:border-box;width:100%}
+    .span-1{grid-column:span 1}.span-2{grid-column:span 2}.span-3{grid-column:span 3}.span-4{grid-column:span 4}
+    .actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+    .btn{height:44px;border:none;border-radius:10px;padding:0 18px;font-size:16px;font-weight:700;cursor:pointer}
+    .btn-primary{background:#16838c;color:#fff}
+    .btn-secondary{background:#10283d;color:#fff}
+    .checkline{display:flex;align-items:center;gap:8px;height:44px;font-size:14px;color:#233f55;font-weight:700}
+    .notice{background:#edf8ee;border:1px solid #cde7d1;color:#22683c;border-radius:12px;padding:12px 14px;margin-bottom:16px}
+    .warning{background:#fff1f1;border:1px solid #f1c9c9;color:#902e2e}
+    .cards{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+    .card{background:#fff;border:1px solid #d8e1e8;border-radius:16px;padding:16px;text-align:center}
+    .card .label{font-size:14px;color:#6b7d8b;margin-bottom:8px}
+    .card .value{font-size:28px;font-weight:800;color:#10283d}
+    .tablewrap{overflow:auto}
+    table{width:100%;border-collapse:collapse;min-width:1100px;background:#fff}
+    th,td{padding:12px 10px;border-bottom:1px solid #e5edf2;text-align:right;font-size:14px;white-space:nowrap}
+    th{background:#f8fbfd;color:#5a7183;font-weight:700}
+    #egx-repeat-results th[data-sort-type]{cursor:pointer;user-select:none}
+    #egx-repeat-results th[data-sort-type]:hover{background:#dcefeb}
+    #egx-repeat-results th[data-sort-type]:focus-visible{outline:2px solid #15847d;outline-offset:-2px}
+    .sort-arrow{font-size:.8em;opacity:.65;padding-inline:4px}
+    .muted{color:#7b8d99;font-size:12px}
+    .ok{color:#1c7d37;font-weight:700}.bad{color:#a13232;font-weight:700}.neutral{color:#556f80;font-weight:700}
+    @media (max-width:1100px){.filters{grid-template-columns:repeat(6,minmax(0,1fr))}.cards{grid-template-columns:repeat(2,minmax(0,1fr))}}
+    @media (max-width:700px){.wrap{padding:0 10px}.filters{grid-template-columns:repeat(2,minmax(0,1fr))}.span-1,.span-2,.span-3,.span-4{grid-column:span 2}.cards{grid-template-columns:1fr}h1{font-size:28px}h2{font-size:22px}}
+  </style>
+</head>
+<body>
+<div class="wrap">
+  {% if refresh_message == 'started' %}
+  <div class="notice">تم إرسال طلب تحديث البيانات. قد يستغرق عدة دقائق قبل ظهور النتائج الجديدة.</div>
+  {% elif refresh_message == 'wait' %}
+  <div class="notice">تم طلب التحديث مؤخرًا. يمكن تحديث البيانات مرة واحدة كل 30 دقيقة.</div>
+  {% elif refresh_message == 'failed' %}
+  <div class="panel warning">تعذر بدء التحديث حاليًا.</div>
+  {% endif %}
+  {% if pending %}
+  <div class="notice">البحث جارٍ في الخلفية. الصفحة هتتحدث تلقائيًا كل 10 ثوانٍ حتى تظهر النتائج.</div>
+  <script>setTimeout(function(){window.location.reload()},10000);</script>
+  {% endif %}
+  {% if error %}
+  <div class="panel warning">{{ error }}</div>
+  {% endif %}
+
+  <div class="panel">
+    <div class="topbar">
+      <div class="title">نتائج الأسهم الأمريكية</div>
+      <form method="post" action="{{ url_for('refresh') }}">
+        <button type="submit" class="btn btn-secondary">تحديث البيانات</button>
+      </form>
+    </div>
+
+    <form method="get" action="{{ url_for('screening') }}" class="filters">
+      <input type="hidden" name="run" value="1">
+      <div class="field span-1">
+        <label>من</label>
+        <input type="number" name="factor_min" min="2" max="1000" step="1" required value="{{ factor_min|default(2) }}">
+      </div>
+      <div class="field span-1">
+        <label>إلى</label>
+        <input type="number" name="system_number" min="2" max="1000" step="1" required value="{{ system_number|default(7) }}">
+      </div>
+      <div class="field span-2">
+        <label>نوع الأرقام</label>
+        <select name="factor_parity" aria-label="نوع الأرقام">
+          <option value="both" {{ 'selected' if factor_parity=='both' else '' }}>الكل</option>
+          <option value="odd" {{ 'selected' if factor_parity=='odd' else '' }}>فردي فقط</option>
+          <option value="even" {{ 'selected' if factor_parity=='even' else '' }}>زوجي فقط</option>
+        </select>
+      </div>
+      <div class="field span-1">
+        <label>تقارب السعر %</label>
+        <input type="number" name="price_tolerance_pct" step="0.1" min="0" max="20" value="{{ price_tolerance_pct }}">
+      </div>
+      <div class="field span-1">
+        <label>أقصى Gap</label>
+        <input type="number" name="max_gap_sessions" min="1" max="252" value="{{ max_gap_sessions }}">
+      </div>
+      <div class="field span-2">
+        <label>العائد بعد عدد جلسات</label>
+        <input type="number" name="return_sessions" min="1" max="3000" step="1" required value="{{ return_sessions|default(220) }}">
+      </div>
+      <div class="field span-2">
+        <label>أحدث من</label>
+        <select name="recent_days">
+          <option value="30" {{ 'selected' if recent_days==30 else '' }}>30 يوم</option>
+          <option value="60" {{ 'selected' if recent_days==60 else '' }}>60 يوم</option>
+          <option value="90" {{ 'selected' if recent_days==90 else '' }}>90 يوم</option>
+          <option value="180" {{ 'selected' if recent_days==180 else '' }}>180 يوم</option>
+          <option value="365" {{ 'selected' if recent_days==365 else '' }}>سنة</option>
+          <option value="all" {{ 'selected' if recent_days=='all' else '' }}>كل التاريخ</option>
+        </select>
+      </div>
+      <div class="field span-2">
+        <label>&nbsp;</label>
+        <div class="checkline"><input type="checkbox" name="rule_only" value="1" {{ 'checked' if rule_only else '' }}> المطابق فقط</div>
+      </div>
+      <div class="field span-2">
+        <label>&nbsp;</label>
+        <button type="submit" class="btn btn-primary">اعمل Screening</button>
+      </div>
+    </form>
+  </div>
+
+  {% if result %}
+  <div class="cards">
+    <div class="card"><div class="label">عدد الإشارات</div><div class="value">{{ result.count }}</div></div>
+    <div class="card"><div class="label">الأسهم المحمّلة</div><div class="value">{{ result.universe_count }}</div></div>
+    <div class="card"><div class="label">آخر جلسة في الداتا</div><div class="value">{{ result.latest_market_date or '—' }}</div></div>
+    <div class="card"><div class="label">تقارب السعر</div><div class="value">{{ result.price_tolerance_pct }}%</div></div>
+    <div class="card"><div class="label">أقصى Gap</div><div class="value">{{ result.max_gap_sessions }} جلسة</div></div>
+  </div>
+
+  <div class="panel tablewrap" style="margin-top:16px">
+    <h2>آخر النتائج</h2>
+    <table class="sortable-egx" id="egx-repeat-results">
+      <thead><tr>
+        <th scope="col" tabindex="0" role="button" aria-sort="none" data-sort-type="text">الكود <span class="sort-arrow">↕</span></th>
+        <th scope="col" tabindex="0" role="button" aria-sort="descending" data-sort-type="date">تاريخ البداية <span class="sort-arrow">↓</span></th>
+        <th scope="col" tabindex="0" role="button" aria-sort="none" data-sort-type="number">الفئة <span class="sort-arrow">↕</span></th>
+        <th scope="col" tabindex="0" role="button" aria-sort="none" data-sort-type="number">سعر الإشارة <span class="sort-arrow">↕</span></th>
+        <th scope="col" tabindex="0" role="button" aria-sort="none" data-sort-type="match">النتيجة <span class="sort-arrow">↕</span></th>
+        <th scope="col" tabindex="0" role="button" aria-sort="none" data-sort-type="number">أعلى سعر <span class="sort-arrow">↕</span></th>
+        <th scope="col" tabindex="0" role="button" aria-sort="none" data-sort-type="number">أعلى مكسب % <span class="sort-arrow">↕</span></th>
+        <th scope="col" tabindex="0" role="button" aria-sort="none" data-sort-type="number">عائد المتابعة % <span class="sort-arrow">↕</span></th>
+        <th scope="col" tabindex="0" role="button" aria-sort="none" data-sort-type="number">مدة الوصول <span class="sort-arrow">↕</span></th>
+        <th scope="col" tabindex="0" role="button" aria-sort="none" data-sort-type="number">الفاصل <span class="sort-arrow">↕</span></th>
+        <th scope="col" tabindex="0" role="button" aria-sort="none" data-sort-type="number">مرات التكرار <span class="sort-arrow">↕</span></th>
+      </tr></thead>
+      <tbody>
+      {% for r in result.rows %}
+      {% set gain = ((r.repeat_peak_high / r.repeat_price - 1) * 100) if r.repeat_peak_high is not none and r.repeat_price is not none and r.repeat_price|float > 0 else none %}
+      <tr>
+        <td data-sort-value="{{ r.symbol }}"><strong>{{ r.symbol }}</strong></td>
+        <td data-sort-value="{{ r.latest_repeat_date if r.latest_repeat_date is not none else '' }}">{{ r.latest_repeat_date if r.latest_repeat_date is not none else '—' }}</td>
+        <td data-sort-value="{{ r.squaring_factor if r.squaring_factor is not none else '' }}"><strong>{{ r.squaring_factor if r.squaring_factor is not none else '—' }}</strong></td>
+        <td data-sort-value="{{ r.repeat_price if r.repeat_price is not none else '' }}">{{ r.repeat_price if r.repeat_price is not none else '—' }}</td>
+        <td data-sort-value="{{ 2 if r.breakout_rule_status=='MATCH' else (1 if r.breakout_rule_status=='NO_DATA' else 0) }}">
+          {% if r.breakout_rule_status=='MATCH' %}<span class="ok">مطابق</span>{% elif r.breakout_rule_status=='NO_DATA' %}<span class="neutral">بيانات غير كافية</span>{% else %}<span class="bad">غير مطابق</span>{% endif %}
+        </td>
+        <td data-sort-value="{{ r.repeat_peak_high if r.repeat_peak_high is not none else '' }}">{{ '%.4f'|format(r.repeat_peak_high) if r.repeat_peak_high is not none else '—' }}</td>
+        <td data-sort-value="{{ gain if gain is not none else '' }}">{{ '%+.2f%%'|format(gain) if gain is not none else '—' }}</td>
+        <td data-sort-value="{{ r.horizon_return_pct if r.horizon_return_pct is not none else '' }}">{{ '%+.2f%%'|format(r.horizon_return_pct) if r.horizon_return_pct is not none else ('لم تكتمل (' ~ r.sessions_observed_after_repeat ~ '/' ~ return_sessions ~ ')') }}</td>
+        <td data-sort-value="{{ r.repeat_peak_bars if r.repeat_peak_bars is not none else '' }}">{{ r.repeat_peak_bars if r.repeat_peak_bars is not none else '—' }} جلسة</td>
+        <td data-sort-value="{{ r.max_session_gap if r.max_session_gap is not none else '' }}">{{ r.max_session_gap if r.max_session_gap is not none else '—' }}</td>
+        <td data-sort-value="{{ r.touches if r.touches is not none else '' }}">{{ r.touches if r.touches is not none else '—' }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="11">لا توجد نتائج للفلاتر المختارة.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+</div>
+<script>
+(function () {
+  const table = document.getElementById('egx-repeat-results');
+  if (!table || !table.tBodies.length) return;
+  const headers = Array.from(table.tHead.rows[0].cells);
+  let activeColumn = 1, direction = -1;
+  const originalOrder = new Map(Array.from(table.tBodies[0].rows).map((tr,i) => [tr,i]));
+  function sortBy(index) {
+    const header = headers[index];
+    if (!header || !header.dataset.sortType) return;
+    direction = activeColumn === index ? -direction : (header.dataset.sortType === 'text' ? 1 : -1);
+    activeColumn = index;
+    const type = header.dataset.sortType;
+    const rows = Array.from(table.tBodies[0].rows).filter(tr => tr.cells.length === headers.length);
+    rows.sort((a,b) => {
+      const x = (a.cells[index].dataset.sortValue || '').trim();
+      const y = (b.cells[index].dataset.sortValue || '').trim();
+      if (!x && !y) return originalOrder.get(a)-originalOrder.get(b);
+      if (!x) return 1;
+      if (!y) return -1;
+      let cmp;
+      if (type === 'text' || type === 'date') cmp = x.localeCompare(y, undefined, {numeric:true});
+      else cmp = Number(x)-Number(y);
+      return cmp ? cmp * direction : originalOrder.get(a)-originalOrder.get(b);
+    });
+    const body = table.tBodies[0];
+    rows.forEach(tr=>body.appendChild(tr));
+    headers.forEach((th,i) => {
+      th.setAttribute('aria-sort', i === index ? (direction === 1 ? 'ascending' : 'descending') : 'none');
+      const arrow=th.querySelector('.sort-arrow');
+      if (arrow) arrow.textContent=i === index ? (direction === 1 ? '↑' : '↓') : '↕';
+    });
+  }
+  headers.forEach((th,i) => {
+    if (!th.dataset.sortType) return;
+    th.addEventListener('click',()=>sortBy(i));
+    th.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();sortBy(i)}});
+  });
+})();
+</script>
+</body>
+</html>
