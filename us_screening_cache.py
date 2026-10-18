@@ -3,9 +3,11 @@ import hashlib, json, os, time
 from pathlib import Path
 
 CACHE_ROOT=Path(os.environ.get('US_SCREENING_CACHE_DIR', '/data/us_screening_cache'))
+CACHE_VERSION='us-only-v2'
 
 def key_for(params):
     core={k:params[k] for k in ('factor_min','system_number','price_tolerance_pct','max_gap_sessions')}
+    core['cache_version']=CACHE_VERSION
     return hashlib.sha256(json.dumps(core,sort_keys=True).encode()).hexdigest()[:32]
 
 def snapshot_path(params): return CACHE_ROOT / ('snapshot_'+key_for(params)+'.json')
@@ -17,6 +19,7 @@ def available_snapshot(params):
     for path in CACHE_ROOT.glob('snapshot_*.json'):
         try:
             obj=json.loads(path.read_text())
+            if obj.get('cache_version') != CACHE_VERSION: continue
             p=obj['params']
             if (float(p['price_tolerance_pct'])==float(params['price_tolerance_pct'])
                 and int(p['max_gap_sessions'])==int(params['max_gap_sessions'])
@@ -31,7 +34,9 @@ def filtered(snapshot, params, rule_only):
     rows=[]
     market_date=snapshot['result'].get('latest_market_date')
     from datetime import date
+    from us_seven_engine import is_us_symbol
     for original in snapshot['result'].get('rows',[]):
+        if not is_us_symbol(original.get('symbol')): continue
         f=int(original['squaring_factor'])
         if not int(params['factor_min']) <= f <= int(params['system_number']):continue
         parity=params.get('factor_parity','both')
@@ -51,6 +56,18 @@ def filtered(snapshot, params, rule_only):
         if len(closes)>=n and closes[n-1] is not None and float(row['repeat_price'])>0:
             row['horizon_close']=closes[n-1]
             row['horizon_return_pct']=round((closes[n-1]/float(row['repeat_price'])-1)*100,2)
+        # First subsequent SESSION whose closing price reaches the user target.
+        # Uses the saved forward closes only: no expensive repeat recomputation.
+        target_pct=float(params.get('target_return_pct',3.0))
+        repeat_price=float(row['repeat_price'])
+        row['target_return_pct']=target_pct
+        row['target_hit_sessions']=None
+        if repeat_price > 0:
+            target_close=repeat_price*(1+target_pct/100.0)
+            for pos, close_value in enumerate(closes,1):
+                if close_value is not None and float(close_value)>=target_close - 1e-10:
+                    row['target_hit_sessions']=pos
+                    break
         rows.append(row)
     result={k:v for k,v in snapshot['result'].items() if k!='rows'}
     result.update(rows=rows,count=len(rows),return_sessions=int(params['return_sessions']),

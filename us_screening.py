@@ -76,13 +76,14 @@ def screening():
     tol = _num('price_tolerance_pct', 1.0, 0, 20, float)
     gap = _num('max_gap_sessions', 17, 1, 252)
     horizon = _num('return_sessions', 60, 1, 3000)
+    target_return_pct = _num('target_return_pct', 3.0, 0.01, 10000.0, float)
     recent_raw = request.args.get('recent_days','all').strip().lower()
     recent = None if recent_raw in ('all','none','') else _num('recent_days',90,1,3650)
     rule_only = request.args.get('rule_only','1') == '1'
 
     args = dict(factor_min=fmin, system_number=fmax, factor_parity=parity,
                 price_tolerance_pct=tol, max_gap_sessions=gap,
-                return_sessions=horizon, recent_days=recent)
+                return_sessions=horizon, target_return_pct=target_return_pct, recent_days=recent)
     result = None; error = None; match_count = None; pending = False; progress_data = None
     if request.args.get('run') == '1':
         if fmax - fmin > 49:
@@ -137,7 +138,7 @@ def screening():
     return render_template('us_screening.html', result=result, error=error,
                            factor_min=fmin,system_number=fmax,factor_parity=parity,
                            price_tolerance_pct=tol,max_gap_sessions=gap,
-                           return_sessions=horizon,recent_days=recent if recent is not None else 'all',
+                           return_sessions=horizon,target_return_pct=target_return_pct,recent_days=recent if recent is not None else 'all',
                            rule_only=rule_only, rule_match_count=match_count,
                            refresh_message=request.args.get('update',''), pending=pending, progress_data=progress_data)
 
