@@ -53,7 +53,25 @@
   <div class="panel warning">تعذر بدء التحديث حاليًا.</div>
   {% endif %}
   {% if pending %}
-  <div class="notice">البحث جارٍ في الخلفية. الصفحة هتتحدث تلقائيًا كل 10 ثوانٍ حتى تظهر النتائج.</div>
+  <div class="notice" style="padding:18px">
+    <strong>حالة البحث:</strong>
+    {% if progress_data and progress_data.phase == 'scanning' %}
+      فحص الإشارات: {{ progress_data.completed }} من {{ progress_data.total }} عملية
+    {% elif progress_data and progress_data.phase == 'loading' %}
+      تحميل بيانات الأسهم: {{ progress_data.completed }} من {{ progress_data.total if progress_data.total else '...' }} سهم
+    {% elif progress_data and progress_data.phase == 'filtering' %}
+      تطبيق شروط التداول: {{ progress_data.completed }} من {{ progress_data.total }} سهم
+    {% else %}
+      انتظار بدء المهمة...
+    {% endif %}
+    {% if progress_data and progress_data.total|default(0) > 0 %}
+    <div style="background:#d8e9df;border-radius:10px;height:14px;margin-top:12px;overflow:hidden" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="{{ (100 * progress_data.completed / progress_data.total)|round|int }}">
+      <div style="background:#16838c;height:100%;width:{{ (100 * progress_data.completed / progress_data.total)|round(1) }}%;transition:width .4s"></div>
+    </div>
+    <div style="margin-top:5px;font-size:13px">{{ (100 * progress_data.completed / progress_data.total)|round(1) }}% من المرحلة الحالية</div>
+    {% endif %}
+    <small>الصفحة بتتحدث تلقائيًا كل 10 ثوانٍ.</small>
+  </div>
   <script>setTimeout(function(){window.location.reload()},10000);</script>
   {% endif %}
   {% if error %}
