@@ -11,6 +11,7 @@ import json
 import uuid
 from pathlib import Path
 from us_screening_job import JOBS, atomic_json
+from us_screening_cache import available_snapshot, filtered, CACHE_ROOT
 from collections import defaultdict, deque
 from datetime import datetime, timezone
 from flask import Flask, abort, render_template, request, redirect, url_for, Response
@@ -92,7 +93,7 @@ def screening():
             # Fast GET: start a separate process; never perform the long database
             # scan or Repeat computation inside the web request.
             import hashlib
-            fingerprint = hashlib.sha256(json.dumps(args,sort_keys=True).encode()).hexdigest()[:32]
+            fingerprint = hashlib.sha256(json.dumps({k:args[k] for k in ('factor_min','system_number','price_tolerance_pct','max_gap_sessions')},sort_keys=True).encode()).hexdigest()[:32]
             JOBS.mkdir(parents=True,exist_ok=True)
             jobfile=JOBS/(fingerprint+'.json')
             job=None
@@ -101,11 +102,11 @@ def screening():
             except Exception:
                 job=None
             try:
-                if job and job.get('status')=='done' and time.time()-job.get('finished_at',0)<300:
-                    raw_result=job['result']
+                snapshot=available_snapshot(args)
+                if snapshot:
+                    raw_result=filtered(snapshot,args,False)
                     match_count=sum(bool(r.get('breakout_rule_match')) for r in raw_result['rows'])
-                    rows=[r for r in raw_result['rows'] if r.get('breakout_rule_match')] if rule_only else raw_result['rows']
-                    result=dict(raw_result,rows=rows,count=len(rows))
+                    result=filtered(snapshot,args,rule_only)
                 elif job and job.get('status') in ('queued','running') and time.time()-job.get('started_at',0)<3600:
                     pending=True
                     progress_data=job
@@ -163,6 +164,10 @@ def refresh():
                          cwd=os.getcwd(),stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL,start_new_session=True)
         with _cache_lock: _cache.clear()
+        # Expire derived calculations: new candles can change the latest cluster.
+        for snapshot in CACHE_ROOT.glob('snapshot_*.json'):
+            try: snapshot.unlink()
+            except OSError: pass
         return redirect(url_for('screening', update='started'), code=303)
     except Exception:
         app.logger.exception('Public refresh failed')

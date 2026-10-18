@@ -91,5 +91,14 @@ def repeat_price_time_screener(progress=None, **kwargs):
     result['rows']=[row for row in result.get('rows',[])
                     if eligible.get(str(row.get('symbol','')).upper(),{}).get(str(row.get('latest_repeat_date','')),False)]
     result['count']=len(result['rows'])
+    # Preserve future actual (unadjusted) closes so the viewer can calculate
+    # any horizon without rerunning the expensive factor scan.
+    for row in result['rows']:
+        df = loaded.get(str(row['symbol']).upper())
+        if df is None: continue
+        dates = pd.to_datetime(df['date'])
+        after = df.loc[dates > pd.Timestamp(row['latest_repeat_date'])]
+        row['_forward_closes'] = [float(v) if pd.notna(v) and np.isfinite(v) else None
+                                   for v in after['close'].iloc[:3000]]
     result['universe_count']=len(loaded)
     return result
