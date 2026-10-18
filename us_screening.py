@@ -82,7 +82,7 @@ def screening():
     args = dict(factor_min=fmin, system_number=fmax, factor_parity=parity,
                 price_tolerance_pct=tol, max_gap_sessions=gap,
                 return_sessions=horizon, recent_days=recent)
-    result = None; error = None; match_count = None; pending = False
+    result = None; error = None; match_count = None; pending = False; progress_data = None
     if request.args.get('run') == '1':
         if fmax - fmin > 49:
             error = 'اختاري نطاقًا لا يزيد عن 50 رقمًا في المرة الواحدة.'
@@ -108,6 +108,7 @@ def screening():
                     result=dict(raw_result,rows=rows,count=len(rows))
                 elif job and job.get('status') in ('queued','running') and time.time()-job.get('started_at',0)<3600:
                     pending=True
+                    progress_data=job
                 else:
                     # Prevent simultaneous full-universe scans, even for different filters.
                     active=False
@@ -127,6 +128,7 @@ def screening():
                                              cwd=os.getcwd(),stdin=subprocess.DEVNULL,
                                              stdout=logfile,stderr=subprocess.STDOUT,start_new_session=True)
                         pending=True
+                        progress_data=dict(phase='queued',completed=0,total=0,started_at=time.time())
             except Exception:
                 app.logger.exception('US job scheduling failed')
                 error='تعذر تشغيل البحث حاليًا. راجعي سجلات الخدمة.'
@@ -136,7 +138,7 @@ def screening():
                            price_tolerance_pct=tol,max_gap_sessions=gap,
                            return_sessions=horizon,recent_days=recent if recent is not None else 'all',
                            rule_only=rule_only, rule_match_count=match_count,
-                           refresh_message=request.args.get('update',''), pending=pending)
+                           refresh_message=request.args.get('update',''), pending=pending, progress_data=progress_data)
 
 @app.post('/refresh')
 def refresh():

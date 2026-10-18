@@ -18,10 +18,15 @@ def main(jobid):
     jobfile = JOBS / (jobid + '.json')
     data = json.loads(jobfile.read_text(encoding='utf8'))
     params = data['params']
-    atomic_json(jobfile, dict(status='running', started_at=time.time(), params=params))
+    started=time.time()
+    def progress(phase, completed, total):
+        atomic_json(jobfile, dict(status='running', started_at=started,
+             updated_at=time.time(), params=params, phase=phase,
+             completed=int(completed), total=int(total)))
+    progress('loading', 0, 0)
     try:
         from us_seven_engine import repeat_price_time_screener
-        result = repeat_price_time_screener(**params)
+        result = repeat_price_time_screener(progress=progress, **params)
         atomic_json(jobfile, dict(status='done', finished_at=time.time(), result=result, params=params))
     except BaseException as err:
         traceback.print_exc()
