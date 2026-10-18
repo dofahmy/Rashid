@@ -7,6 +7,10 @@ import time
 import subprocess
 import sys
 import threading
+import json
+import uuid
+from pathlib import Path
+from us_screening_job import JOBS, atomic_json
 from collections import defaultdict, deque
 from datetime import datetime, timezone
 from flask import Flask, abort, render_template, request, redirect, url_for, Response
@@ -23,7 +27,7 @@ _guard = threading.Lock()
 _cache = {}
 _cache_lock = threading.Lock()
 CACHE_TTL_SECONDS = 300
-SEARCH_LIMIT_PER_MINUTE = 6
+SEARCH_LIMIT_PER_MINUTE = 60
 REFRESH_COOLDOWN_MINUTES = 30
 
 @app.after_request
@@ -78,41 +82,61 @@ def screening():
     args = dict(factor_min=fmin, system_number=fmax, factor_parity=parity,
                 price_tolerance_pct=tol, max_gap_sessions=gap,
                 return_sessions=horizon, recent_days=recent)
-    result = None; error = None; match_count = None
-    # No computation on initial load; only user-requested screening.
+    result = None; error = None; match_count = None; pending = False
     if request.args.get('run') == '1':
         if fmax - fmin > 49:
             error = 'اختاري نطاقًا لا يزيد عن 50 رقمًا في المرة الواحدة.'
         elif not _rate_limit(('search',_public_ip()), SEARCH_LIMIT_PER_MINUTE):
             error = 'طلبات كثيرة. انتظري دقيقة ثم أعيدي المحاولة.'
         else:
-            cache_key = tuple(sorted(args.items(), key=lambda pair: pair[0]))
+            # Fast GET: start a separate process; never perform the long database
+            # scan or Repeat computation inside the web request.
+            import hashlib
+            fingerprint = hashlib.sha256(json.dumps(args,sort_keys=True).encode()).hexdigest()[:32]
+            JOBS.mkdir(parents=True,exist_ok=True)
+            jobfile=JOBS/(fingerprint+'.json')
+            job=None
             try:
-                with _cache_lock:
-                    cached = _cache.get(cache_key)
-                    if cached and time.monotonic()-cached[0] < CACHE_TTL_SECONDS:
-                        raw_result = cached[1]
-                    else:
-                        raw_result = None
-                if raw_result is None:
-                    from us_seven_engine import repeat_price_time_screener
-                    raw_result = repeat_price_time_screener(**args)
-                    with _cache_lock:
-                        _cache.clear()
-                        _cache[cache_key]=(time.monotonic(),raw_result)
-                match_count = sum(bool(row.get('breakout_rule_match')) for row in raw_result['rows'])
-                shown_rows = [row for row in raw_result['rows'] if row.get('breakout_rule_match')] if rule_only else raw_result['rows']
-                result = dict(raw_result, rows=shown_rows, count=len(shown_rows))
+                if jobfile.exists(): job=json.loads(jobfile.read_text(encoding='utf8'))
             except Exception:
-                app.logger.exception('US public screening failed')
-                error = 'تعذر تحميل النتائج حاليًا. جربي مرة أخرى لاحقًا.'
+                job=None
+            try:
+                if job and job.get('status')=='done' and time.time()-job.get('finished_at',0)<300:
+                    raw_result=job['result']
+                    match_count=sum(bool(r.get('breakout_rule_match')) for r in raw_result['rows'])
+                    rows=[r for r in raw_result['rows'] if r.get('breakout_rule_match')] if rule_only else raw_result['rows']
+                    result=dict(raw_result,rows=rows,count=len(rows))
+                elif job and job.get('status') in ('queued','running') and time.time()-job.get('started_at',0)<3600:
+                    pending=True
+                else:
+                    # Prevent simultaneous full-universe scans, even for different filters.
+                    active=False
+                    for path in JOBS.glob('*.json'):
+                        try:
+                            item=json.loads(path.read_text(encoding='utf8'))
+                            if item.get('status') in ('queued','running') and time.time()-item.get('started_at',0)<3600:
+                                active=True;break
+                        except Exception: pass
+                    if active:
+                        error='يوجد بحث آخر قيد التنفيذ. انتظري انتهاءه ثم أعيدي المحاولة.'
+                    else:
+                        atomic_json(jobfile, dict(status='queued',started_at=time.time(),params=args))
+                        log_path=JOBS/(fingerprint+'.log')
+                        with open(log_path,'ab') as logfile:
+                            subprocess.Popen([sys.executable,'-m','us_screening_job',fingerprint],
+                                             cwd=os.getcwd(),stdin=subprocess.DEVNULL,
+                                             stdout=logfile,stderr=subprocess.STDOUT,start_new_session=True)
+                        pending=True
+            except Exception:
+                app.logger.exception('US job scheduling failed')
+                error='تعذر تشغيل البحث حاليًا. راجعي سجلات الخدمة.'
 
     return render_template('us_screening.html', result=result, error=error,
                            factor_min=fmin,system_number=fmax,factor_parity=parity,
                            price_tolerance_pct=tol,max_gap_sessions=gap,
                            return_sessions=horizon,recent_days=recent if recent is not None else 'all',
                            rule_only=rule_only, rule_match_count=match_count,
-                           refresh_message=request.args.get('update',''))
+                           refresh_message=request.args.get('update',''), pending=pending)
 
 @app.post('/refresh')
 def refresh():
