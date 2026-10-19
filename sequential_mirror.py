@@ -89,7 +89,7 @@ def main():
         for feature in FEATURES:
             cal=market_2024[feature].dropna().to_numpy(dtype=float)
             if len(cal)<50 or not np.isfinite(float(exemplar[feature])):continue
-            cal.sort()
+            cal=np.sort(cal)  # NumPy may return a read-only view from pandas
             candidate=anchors[feature].to_numpy(dtype=float)
             ref_value=float(exemplar[feature])
             ref_rank=np.searchsorted(cal,ref_value,side='right')/len(cal)
