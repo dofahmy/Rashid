@@ -1,0 +1,161 @@
+#!/usr/bin/env python3
+"""Greedy zero-winning-case-loss indicator filters, YDKG previous-day reference.
+Input only prior output (135 cases), not the entire market. Retains ALL original winning cases.
+Research / in-sample, not a validated predictive rule.
+"""
+import argparse, json, os
+from pathlib import Path
+import numpy as np
+import pandas as pd
+from sqlalchemy import create_engine, text, bindparam
+
+FEATURES=['ret5','ret10','ret20','ret60','ret120','volatility20','rvol20',
+ 'dollar_volume20','rsi14','dist_ma20','dist_ma50','dist_ma120',
+ 'distance_high60_pct','range20_pct','up_days20_pct','daily_candle_pct']
+# ATR14% is already the fixed first filter, so not re-tested.
+
+def feature_at(d,i):
+    if i<120:return None
+    a=d.iloc[:i+1]
+    c=a.c.to_numpy(float);h=a.h.to_numpy(float);l=a.l.to_numpy(float)
+    v=a.v.to_numpy(float);o=a.o.to_numpy(float)
+    if not np.all(np.isfinite(c[-121:])) or np.any(c[-121:]<=0):return None
+    dif=np.diff(c);g=np.maximum(dif[-14:],0).mean();loss=np.maximum(-dif[-14:],0).mean()
+    rsi=100. if loss==0 and g>0 else 50. if loss==0 else 100-100/(1+g/loss)
+    prev=np.r_[c[0],c[:-1]]
+    tr=np.maximum.reduce((h-l,abs(h-prev),abs(l-prev)))
+    logret=np.diff(np.log(c[-21:]))
+    def div(x,y):return x/y if np.isfinite(y) and y!=0 else np.nan
+    return {
+     'ret5':(c[-1]/c[-6]-1)*100,'ret10':(c[-1]/c[-11]-1)*100,
+     'ret20':(c[-1]/c[-21]-1)*100,'ret60':(c[-1]/c[-61]-1)*100,
+     'ret120':(c[-1]/c[-121]-1)*100,
+     'volatility20':np.std(logret,ddof=1)*np.sqrt(252)*100,
+     'rvol20':div(v[-1],np.nanmean(v[-21:-1])),
+     'dollar_volume20':np.nanmedian(c[-20:]*v[-20:]),
+     'rsi14':rsi,
+     'dist_ma20':(c[-1]/c[-20:].mean()-1)*100,
+     'dist_ma50':(c[-1]/c[-50:].mean()-1)*100,
+     'dist_ma120':(c[-1]/c[-120:].mean()-1)*100,
+     'distance_high60_pct':(c[-1]/h[-60:].max()-1)*100,
+     'range20_pct':(h[-20:].max()/l[-20:].min()-1)*100,
+     'up_days20_pct':np.mean(np.diff(c[-21:])>0)*100,
+     'daily_candle_pct':(c[-1]/o[-1]-1)*100 if o[-1]>0 else np.nan,
+    }
+
+def main():
+    p=argparse.ArgumentParser()
+    p.add_argument('--matches',default='/data/ydkg_atr_rounded/YDKG_ATR_previous_rounded_30sessions.csv')
+    p.add_argument('--database-url',default=os.environ.get('DATABASE_URL'))
+    p.add_argument('--out',default='/data/ydkg_zero_loss')
+    p.add_argument('--min-decimals',type=int,default=0)
+    p.add_argument('--max-decimals',type=int,default=8)
+    p.add_argument('--reference',default='YDKG')
+    p.add_argument('--reference-date',default='2025-08-22')
+    a=p.parse_args()
+    if not a.database_url: p.error('DATABASE_URL missing')
+    if a.min_decimals<0 or a.max_decimals<a.min_decimals:p.error('Invalid decimal range')
+    out=Path(a.out);out.mkdir(parents=True,exist_ok=True)
+    base=pd.read_csv(a.matches,low_memory=False)
+    needed={'symbol','signal_date','prev_date','hit100_within30'}
+    if not needed.issubset(base):p.error('Missing columns: '+str(needed-set(base.columns)))
+    base=base.copy().reset_index(drop=True)
+    base['symbol']=base.symbol.astype(str).str.upper().str.strip()
+    base['signal_date']=base.signal_date.astype(str).str[:10]
+    base['prev_date']=base.prev_date.astype(str).str[:10]
+    base=base[(base.symbol!=a.reference)&(base.match_previous.astype(str).str.lower()=='true')].reset_index(drop=True)
+    base['winner']=base.hit100_within30.astype(str).str.lower().isin(['true','1','1.0'])
+    if base.empty:p.error('No previous ATR matches')
+    symbols=sorted(set(base.symbol)|{a.reference})
+    engine=create_engine(a.database_url.replace('postgres://','postgresql://',1))
+    query=text('SELECT symbol,session_date AS date,o,h,l,c,v FROM market_candles_1d '
+               'WHERE symbol IN :symbols ORDER BY symbol,session_date').bindparams(bindparam('symbols',expanding=True))
+    lookup={}
+    with engine.connect() as conn:
+        for ix in range(0,len(symbols),100):
+            block=pd.read_sql(query,conn,params={'symbols':symbols[ix:ix+100]})
+            if block.empty:continue
+            block['date']=block.date.astype(str).str[:10]
+            for col in 'ohlcv':block[col]=pd.to_numeric(block[col],errors='coerce')
+            block=block.dropna(subset=['date','o','h','l','c','v'])
+            block=block[(block.o>0)&(block.c>0)&(block.l>0)&(block.v>=0)&
+                        (block.h>=block[['o','c','l']].max(axis=1))&
+                        (block.l<=block[['o','c','h']].min(axis=1))]
+            for symbol,g in block.groupby('symbol',sort=False):
+                g=g.sort_values('date').drop_duplicates('date',keep='last').reset_index(drop=True)
+                lookup[symbol]=g
+    engine.dispose()
+    ref=lookup.get(a.reference)
+    if ref is None:raise RuntimeError('Reference bars missing')
+    ri=np.where(ref.date.to_numpy()==a.reference_date)[0]
+    if not len(ri) or ri[0]<121:raise RuntimeError('Reference day or previous 120 bars missing')
+    ref_feats=feature_at(ref,int(ri[0]-1))
+    if ref_feats is None:raise RuntimeError('Reference feature calculation failed')
+    columns={f:np.full(len(base),np.nan) for f in FEATURES}
+    missing=[]
+    for i,r in base.iterrows():
+        bars=lookup.get(r.symbol)
+        if bars is None:missing.append((r.symbol,r.signal_date,'symbol missing'));continue
+        bi=np.where(bars.date.to_numpy()==r.prev_date)[0]
+        if not len(bi):missing.append((r.symbol,r.signal_date,'prev date missing'));continue
+        feat=feature_at(bars,int(bi[0]))
+        if feat is None:missing.append((r.symbol,r.signal_date,'insufficient history'));continue
+        for f in FEATURES: columns[f][i]=float(feat[f])
+    # No successful case may be removed. Missing winner data disallows making claims.
+    active=np.ones(len(base),dtype=bool); winners=base.winner.to_numpy(bool)
+    if any(not np.isfinite(columns[f][winners]).all() for f in FEATURES):
+        missing_features=[f for f in FEATURES if not np.isfinite(columns[f][winners]).all()]
+        print('NOTICE: some winners lack features:',missing_features,flush=True)
+    candidates=[];stages=[];remaining=set(FEATURES)
+    original_w=int(winners.sum());original_stocks=int(base.loc[winners,'symbol'].nunique())
+    for stage in range(1,len(FEATURES)+1):
+        possibilities=[]
+        for f in sorted(remaining):
+            vals=columns[f];refv=float(ref_feats[f]);best=None
+            if not np.isfinite(refv):continue
+            for dp in range(a.max_decimals,a.min_decimals-1,-1):
+                mask=np.isfinite(vals)&(np.round(vals,dp)==np.round(refv,dp))
+                kept=active&mask
+                if int((kept&winners).sum()) != original_w:continue
+                removed=int(active.sum()-kept.sum())
+                candidates.append({'stage':stage,'feature':f,'decimals':dp,'reference_value':refv,
+                     'matches_remaining':int(kept.sum()),'winners_retained':int((kept&winners).sum()),
+                     'losers_removed':removed,'eligible':removed>0})
+                if removed>0:
+                    proposal=(removed,dp,f,mask)
+                    if best is None or proposal[:2]>best[:2]:best=proposal
+            if best is not None:possibilities.append(best)
+        if not possibilities:break
+        # first maximize failed cases removed, then keep most decimal places
+        possibilities.sort(key=lambda t:(-t[0],-t[1],t[2]))
+        removed,dp,f,mask=possibilities[0]
+        active &= mask;remaining.remove(f)
+        row={'stage':stage,'indicator':f,'reference_prev_day_value':float(ref_feats[f]),
+             'round_to_decimals':dp,'reference_rounded':round(float(ref_feats[f]),dp),
+             'cases_remaining':int(active.sum()),'winning_cases':int((active&winners).sum()),
+             'winning_distinct_stocks':int(base.loc[active&winners,'symbol'].nunique()),
+             'failed_cases_remaining':int((active&~winners).sum()),
+             'failed_cases_removed_this_stage':removed,
+             'precision_pct':round(100*int((active&winners).sum())/int(active.sum()),4)}
+        stages.append(row)
+        print('STAGE',stage,f,'DECIMALS',dp,'CASES',row['cases_remaining'],
+              'WINNERS',row['winning_cases'],'FAILED REMOVED',removed,flush=True)
+        base.loc[active].to_csv(out/f'YDKG_stage_{stage:02d}_remaining.csv',index=False)
+    pd.DataFrame(stages,columns=['stage','indicator','reference_prev_day_value','round_to_decimals','reference_rounded',
+         'cases_remaining','winning_cases','winning_distinct_stocks','failed_cases_remaining',
+         'failed_cases_removed_this_stage','precision_pct']).to_csv(out/'YDKG_zero_loss_stages.csv',index=False)
+    pd.DataFrame(candidates,columns=['stage','feature','decimals','reference_value','matches_remaining',
+           'winners_retained','losers_removed','eligible']).to_csv(out/'YDKG_all_indicator_trials.csv',index=False)
+    base.loc[active].to_csv(out/'YDKG_final_remaining.csv',index=False)
+    pd.DataFrame(missing,columns=['symbol','signal_date','reason']).to_csv(out/'missing_features.csv',index=False)
+    report={'reference':a.reference,'time_of_indicators':'previous trading session before each candidate signal',
+     'baseline_cases':len(base),'baseline_unique_stocks':int(base.symbol.nunique()),
+     'baseline_winning_cases':original_w,'baseline_unique_winners':original_stocks,
+     'filters_added':len(stages),'final_cases':int(active.sum()),
+     'final_winning_cases':int((active&winners).sum()),
+     'final_unique_winners':int(base.loc[active&winners,'symbol'].nunique()),
+     'final_failed_cases':int((active&~winners).sum()),
+     'caution':'In-sample preservation of all known winners is a selection constraint, not proof of predictive ability. Check splits, execution, and independent data. Precision rounding is numeric equality, not percentile range.'}
+    (out/'report.json').write_text(json.dumps(report,indent=2,ensure_ascii=False))
+    print(json.dumps(report,indent=2,ensure_ascii=False),flush=True)
+if __name__=='__main__':main()
