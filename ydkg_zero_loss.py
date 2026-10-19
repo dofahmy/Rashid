@@ -15,33 +15,41 @@ FEATURES=['ret5','ret10','ret20','ret60','ret120','volatility20','rvol20',
 # ATR14% is already the fixed first filter, so not re-tested.
 
 def feature_at(d,i):
-    if i<120:return None
+    """Evaluate each feature only when ITS required lookback is available."""
     a=d.iloc[:i+1]
-    c=a.c.to_numpy(float);h=a.h.to_numpy(float);l=a.l.to_numpy(float)
-    v=a.v.to_numpy(float);o=a.o.to_numpy(float)
-    if not np.all(np.isfinite(c[-121:])) or np.any(c[-121:]<=0):return None
-    dif=np.diff(c);g=np.maximum(dif[-14:],0).mean();loss=np.maximum(-dif[-14:],0).mean()
-    rsi=100. if loss==0 and g>0 else 50. if loss==0 else 100-100/(1+g/loss)
-    prev=np.r_[c[0],c[:-1]]
-    tr=np.maximum.reduce((h-l,abs(h-prev),abs(l-prev)))
-    logret=np.diff(np.log(c[-21:]))
-    def div(x,y):return x/y if np.isfinite(y) and y!=0 else np.nan
-    return {
-     'ret5':(c[-1]/c[-6]-1)*100,'ret10':(c[-1]/c[-11]-1)*100,
-     'ret20':(c[-1]/c[-21]-1)*100,'ret60':(c[-1]/c[-61]-1)*100,
-     'ret120':(c[-1]/c[-121]-1)*100,
-     'volatility20':np.std(logret,ddof=1)*np.sqrt(252)*100,
-     'rvol20':div(v[-1],np.nanmean(v[-21:-1])),
-     'dollar_volume20':np.nanmedian(c[-20:]*v[-20:]),
-     'rsi14':rsi,
-     'dist_ma20':(c[-1]/c[-20:].mean()-1)*100,
-     'dist_ma50':(c[-1]/c[-50:].mean()-1)*100,
-     'dist_ma120':(c[-1]/c[-120:].mean()-1)*100,
-     'distance_high60_pct':(c[-1]/h[-60:].max()-1)*100,
-     'range20_pct':(h[-20:].max()/l[-20:].min()-1)*100,
-     'up_days20_pct':np.mean(np.diff(c[-21:])>0)*100,
-     'daily_candle_pct':(c[-1]/o[-1]-1)*100 if o[-1]>0 else np.nan,
-    }
+    c=a.c.to_numpy(float); h=a.h.to_numpy(float); l=a.l.to_numpy(float)
+    v=a.v.to_numpy(float); o=a.o.to_numpy(float)
+    def div(x,y): return x/y if np.isfinite(y) and y != 0 else np.nan
+    def valid(n):
+        return len(c)>=n and np.all(np.isfinite(c[-n:])) and np.all(c[-n:]>0)
+    def output(value):
+        try:
+            value=float(value)
+            return value if np.isfinite(value) else np.nan
+        except (ValueError,TypeError,ZeroDivisionError):return np.nan
+    f={x:np.nan for x in FEATURES}
+    for n in (5,10,20,60,120):
+        if valid(n+1): f['ret'+str(n)]=output((c[-1]/c[-n-1]-1)*100)
+    if valid(21):
+        logret=np.diff(np.log(c[-21:]))
+        f['volatility20']=output(np.std(logret,ddof=1)*np.sqrt(252)*100)
+        f['up_days20_pct']=output(np.mean(np.diff(c[-21:])>0)*100)
+    if len(v)>=21 and np.all(np.isfinite(v[-21:])):
+        f['rvol20']=output(div(v[-1],np.nanmean(v[-21:-1])))
+    if valid(20) and np.all(np.isfinite(v[-20:])):
+        f['dollar_volume20']=output(np.nanmedian(c[-20:]*v[-20:]))
+    if valid(15):
+        dif=np.diff(c[-15:]);gain=np.maximum(dif,0).mean();loss=np.maximum(-dif,0).mean()
+        f['rsi14']=output(100. if loss==0 and gain>0 else 50. if loss==0 else 100-100/(1+gain/loss))
+    for n in (20,50,120):
+        if valid(n): f['dist_ma'+str(n)]=output((c[-1]/c[-n:].mean()-1)*100)
+    if valid(60) and np.all(np.isfinite(h[-60:])) and np.max(h[-60:])>0:
+        f['distance_high60_pct']=output((c[-1]/h[-60:].max()-1)*100)
+    if valid(20) and np.all(np.isfinite(h[-20:])) and np.all(np.isfinite(l[-20:])) and np.min(l[-20:])>0:
+        f['range20_pct']=output((h[-20:].max()/l[-20:].min()-1)*100)
+    if len(c) and np.isfinite(c[-1]) and np.isfinite(o[-1]) and o[-1]>0:
+        f['daily_candle_pct']=output((c[-1]/o[-1]-1)*100)
+    return f
 
 def main():
     p=argparse.ArgumentParser()
@@ -99,13 +107,22 @@ def main():
         bi=np.where(bars.date.to_numpy()==r.prev_date)[0]
         if not len(bi):missing.append((r.symbol,r.signal_date,'prev date missing'));continue
         feat=feature_at(bars,int(bi[0]))
-        if feat is None:missing.append((r.symbol,r.signal_date,'insufficient history'));continue
+        if feat is None:missing.append((r.symbol,r.signal_date,'feature calculation unavailable'));continue
         for f in FEATURES: columns[f][i]=float(feat[f])
     # No successful case may be removed. Missing winner data disallows making claims.
     active=np.ones(len(base),dtype=bool); winners=base.winner.to_numpy(bool)
     if any(not np.isfinite(columns[f][winners]).all() for f in FEATURES):
         missing_features=[f for f in FEATURES if not np.isfinite(columns[f][winners]).all()]
         print('NOTICE: some winners lack features:',missing_features,flush=True)
+    feature_audit=[]
+    for f in FEATURES:
+        vv=columns[f]; rv=float(ref_feats[f]); ok=np.isfinite(vv)
+        feature_audit.append({'indicator':f,'reference_value':rv,
+             'winner_values_available':int((ok&winners).sum()),'winner_values_missing':int((~ok&winners).sum()),
+             'loser_values_available':int((ok&~winners).sum()),
+             'winner_min':float(np.min(vv[ok&winners])) if (ok&winners).any() else None,
+             'winner_max':float(np.max(vv[ok&winners])) if (ok&winners).any() else None})
+    pd.DataFrame(feature_audit).to_csv(out/'YDKG_feature_coverage_audit.csv',index=False)
     candidates=[];stages=[];remaining=set(FEATURES)
     original_w=int(winners.sum());original_stocks=int(base.loc[winners,'symbol'].nunique())
     for stage in range(1,len(FEATURES)+1):
@@ -148,10 +165,10 @@ def main():
            'winners_retained','losers_removed','eligible']).to_csv(out/'YDKG_all_indicator_trials.csv',index=False)
     base.loc[active].to_csv(out/'YDKG_final_remaining.csv',index=False)
     pd.DataFrame(missing,columns=['symbol','signal_date','reason']).to_csv(out/'missing_features.csv',index=False)
-    report={'reference':a.reference,'time_of_indicators':'previous trading session before each candidate signal',
+    report={'feature_coverage_audit':'YDKG_feature_coverage_audit.csv', 'reference':a.reference,'time_of_indicators':'previous trading session before each candidate signal',
      'baseline_cases':len(base),'baseline_unique_stocks':int(base.symbol.nunique()),
      'baseline_winning_cases':original_w,'baseline_unique_winners':original_stocks,
-     'filters_added':len(stages),'final_cases':int(active.sum()),
+     'filters_added':len(stages),'no_zero_loss_filter_found':len(stages)==0,'final_cases':int(active.sum()),
      'final_winning_cases':int((active&winners).sum()),
      'final_unique_winners':int(base.loc[active&winners,'symbol'].nunique()),
      'final_failed_cases':int((active&~winners).sum()),
