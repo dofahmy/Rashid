@@ -23,15 +23,27 @@ def main():
     p.add_argument('--database-url',required=True)
     p.add_argument('--out',default='/data/seven_relative_sp500')
     p.add_argument('--benchmark',default='auto',help='Index ticker available in DB, or auto. SPY proxy is clearly labeled.')
+    p.add_argument('--benchmark-csv',default=None,help='Local CSV with date,c for the exact S&P 500 daily closes; read-only, no DB write.')
     p.add_argument('--include-signal-day',action='store_true',help='Additional diagnostic only; never include in pre-signal features.')
     a=p.parse_args();out=Path(a.out);out.mkdir(parents=True,exist_ok=True)
     engine=create_engine(a.database_url.replace('postgres://','postgresql://',1))
     with engine.connect() as conn:
         choices=BENCHMARK_CHOICES if a.benchmark=='auto' else [a.benchmark]
         attempted=[];bench=None;bench_name=None
-        for candidate in choices:
-            d=read_one(conn,candidate);attempted.append({'symbol':candidate,'rows':int(len(d))})
-            if len(d)>=260:bench=d;bench_name=candidate;break
+        if a.benchmark_csv:
+            file=Path(a.benchmark_csv)
+            if not file.is_file():raise FileNotFoundError(f'Benchmark file missing: {file}')
+            d=pd.read_csv(file)
+            if not {'date','c'}.issubset(d.columns):raise ValueError('Benchmark CSV must contain date,c columns')
+            d['date']=pd.to_datetime(d.date,errors='coerce').dt.normalize()
+            d['c']=pd.to_numeric(d.c,errors='coerce')
+            d=d.dropna(subset=['date','c']).loc[lambda x:x.c>0].drop_duplicates('date',keep='last').sort_values('date').reset_index(drop=True)
+            attempted.append({'symbol':'^GSPC_CSV','rows':int(len(d))})
+            if len(d)>=260:bench=d;bench_name='^GSPC_CSV'
+        else:
+            for candidate in choices:
+                d=read_one(conn,candidate);attempted.append({'symbol':candidate,'rows':int(len(d))})
+                if len(d)>=260:bench=d;bench_name=candidate;break
         if bench is None:
             report={'status':'missing_benchmark','attempted':attempted,'message':'No usable S&P500 index/ETF series in market_candles_1d. Supply/import S&P500 benchmark historical daily closes and rerun; cannot calculate valid stock-vs-index relative performance.'}
             (out/'report.json').write_text(json.dumps(report,indent=2,ensure_ascii=False))
