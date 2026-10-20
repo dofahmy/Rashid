@@ -6,13 +6,13 @@ from sqlalchemy.exc import SQLAlchemyError
 
 app = Flask(__name__, template_folder='templates')
 FIELDS = {
- 'rp1':'أداء اليوم مقابل S&P500 (نقطة مئوية)',
+ 'rp1':'أداء اليوم مقابل مؤشر السوق (نقطة مئوية)',
  'rp5':'RS آخر 5 جلسات','rp10':'RS آخر 10 جلسات','rp20':'RS آخر 20 جلسة',
  'rp60':'RS آخر 60 جلسة','rp120':'RS آخر 120 جلسة','rp252':'RS آخر 252 جلسة',
  'avg_rp5':'متوسط التفوق اليومي 5 جلسات','avg_rp10':'متوسط التفوق اليومي 10 جلسات',
  'avg_rp20':'متوسط التفوق اليومي 20 جلسة','avg_rp60':'متوسط التفوق اليومي 60 جلسة',
  'avg_rp120':'متوسط التفوق اليومي 120 جلسة',
- 'stock_day_pct':'تغير السهم في يوم','sp500_day_pct':'تغير المؤشر في يوم',
+ 'stock_day_pct':'تغير السهم في يوم','sp500_day_pct':'تغير مؤشر السوق في يوم',
  'adx14':'ADX14','plus_di14':'+DI14','minus_di14':'-DI14',
  'relative_volume20':'Relative Volume 20','relative_volatility14_60':'Relative Volatility 14/60',
  'close':'الإغلاق'
@@ -29,12 +29,21 @@ def engine():
   _engine=create_engine(url,pool_pre_ping=True,pool_recycle=300)
  return _engine
 
-def table_status():
+def chosen_market():
+ market=request.args.get('market','USA').upper()
+ if market not in ('USA','EG','SA'):raise ValueError('سوق غير معروف')
+ return market
+
+def table_for(market):
+ return 'public.rs_screen_features' if market=='USA' else 'public.rs_market_features'
+
+def table_status(market='USA'):
  try:
   with engine().connect() as cn:
-   exists=cn.execute(text("SELECT to_regclass('public.rs_screen_features') IS NOT NULL")).scalar()
+   table=table_for(market)
+   exists=cn.execute(text('SELECT to_regclass(:table) IS NOT NULL'),{'table':table}).scalar()
    if not exists:return False,None
-   total=cn.execute(text('SELECT COUNT(*) FROM public.rs_screen_features')).scalar()
+   total=cn.execute(text(f'SELECT COUNT(*) FROM {table}'+(' WHERE market=:m' if market!='USA' else '')),{'m':market} if market!='USA' else {}).scalar()
    return total>0,total
  except (SQLAlchemyError,RuntimeError):return False,None
 
@@ -73,12 +82,14 @@ def parse():
 
 def run_query(opts):
  day,start,end,conditions,logic,sort,limit=opts
+ market=chosen_market();table=table_for(market)
  predicates=[]; params={}
+ if market!='USA':predicates.append('market=:market');params['market']=market
  if day:predicates.append('session_date = :day');params['day']=day
  else:
   if start:predicates.append('session_date >= :start');params['start']=start
   if end:predicates.append('session_date <= :end');params['end']=end
-  if not start and not end:predicates.append('session_date = (SELECT MAX(session_date) FROM public.rs_screen_features)')
+  if not start and not end:predicates.append('session_date = (SELECT MAX(session_date) FROM '+table+(' WHERE market=:market' if market!='USA' else '')+')')
  fl=[]
  for i,(field,op,val,val2) in enumerate(conditions):
   # field and operator can only originate from allowlists
@@ -89,26 +100,27 @@ def run_query(opts):
  if fl:predicates.append('('+(f' {logic} ').join(fl)+')')
  where=' AND '.join(predicates) if predicates else 'TRUE'
  with engine().connect() as cn:
-  if cn.execute(text("SELECT to_regclass('public.rs_screen_features')")).scalar() is None:
-   raise ValueError('جدول فحص السوق غير موجود في PostgreSQL. شغلي rs_pg_build.py أول مرة.')
-  total=cn.execute(text(f'SELECT COUNT(*) FROM public.rs_screen_features WHERE {where}'),params).scalar()
-  rows=cn.execute(text(f'SELECT * FROM public.rs_screen_features WHERE {where} ORDER BY {sort} DESC NULLS LAST LIMIT :lim'),{**params,'lim':limit}).mappings().all()
+  if cn.execute(text('SELECT to_regclass(:table)'),{'table':table}).scalar() is None:
+   raise ValueError('جدول فحص السوق غير موجود. ابنِي بيانات السوق المختار أولاً باستخدام rs_multi_build.py لمصر والسعودية.')
+  total=cn.execute(text(f'SELECT COUNT(*) FROM {table} WHERE {where}'),params).scalar()
+  rows=cn.execute(text(f'SELECT * FROM {table} WHERE {where} ORDER BY {sort} DESC NULLS LAST LIMIT :lim'),{**params,'lim':limit}).mappings().all()
   return [dict(x) for x in rows],total
 
 @app.after_request
 def no_cache(resp):resp.headers['Cache-Control']='no-store';return resp
 @app.get('/health')
 def health():
- ready,n=table_status()
+ ready,n=table_status(request.args.get('market','USA').upper())
  return jsonify(ok=True,service='interactive-rs-screening-postgres',features_db_exists=ready,backend='postgres',rows=n)
 @app.get('/')
 @app.get('/screening')
 def screening():
- ready,_=table_status();rows=[];total=0;error=None
+ market=chosen_market()
+ ready,_=table_status(market);rows=[];total=0;error=None
  if request.args.get('run')=='1':
   try:rows,total=run_query(parse())
   except (ValueError,RuntimeError,SQLAlchemyError) as ex:error=str(ex)
- return render_template('rs_dynamic.html',rows=rows,total=total,error=error,fields=FIELDS,ops=OPS,args=request.args,ready=ready,ran=request.args.get('run')=='1')
+ return render_template('rs_dynamic.html',market=market,rows=rows,total=total,error=error,fields=FIELDS,ops=OPS,args=request.args,ready=ready,ran=request.args.get('run')=='1')
 @app.get('/screening.json')
 def screen_json():
  try:
