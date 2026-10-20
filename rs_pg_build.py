@@ -4,7 +4,6 @@ import argparse, os, time
 import numpy as np
 import pandas as pd
 from sqlalchemy import create_engine, text
-from psycopg2.extras import execute_values
 from six_mirror_batch import iter_db, clean, valid_symbol
 from seven_rp_mirrors_90 import features
 from rp_stage2_adx import indicators
@@ -86,20 +85,20 @@ def main():
    row += [num(avgs[w][i]) for w in (5,10,20,60,120)]
    row += [num(ind[k][i]) for k in ('ADX14','PLUS_DI14','MINUS_DI14','RELATIVE_VOLUME20','RELATIVE_VOLATILITY14_60')]
    batch.append(tuple(row))
-  # Commit data and progress atomically for each stock so an interrupted run resumes safely.
-  db=eng.raw_connection()
-  try:
-   with db.cursor() as cur:
-    if batch:
-     sql=f"INSERT INTO public.rs_screen_features ({','.join(COLS)}) VALUES %s ON CONFLICT(symbol,session_date) DO UPDATE SET "+','.join(f'{col}=EXCLUDED.{col}' for col in COLS[2:])
-     execute_values(cur,sql,batch,page_size=1000)
-    cur.execute('''INSERT INTO public.rs_screen_build_progress(symbol,build_start,build_end,rows_written)
-      VALUES(%s,%s,%s,%s) ON CONFLICT(symbol) DO UPDATE SET build_start=EXCLUDED.build_start,
-      build_end=EXCLUDED.build_end,rows_written=EXCLUDED.rows_written,finished_at=NOW()''',(sym,a.start,a.end,len(batch)))
-   db.commit()
-  except Exception:
-   db.rollback();raise
-  finally:db.close()
+  # SQLAlchemy-managed batch insert, compatible with the configured DBAPI driver.
+  value_tokens=','.join(':'+col for col in COLS)
+  sql=text(f"INSERT INTO public.rs_screen_features ({','.join(COLS)}) VALUES ({value_tokens}) "
+      "ON CONFLICT(symbol,session_date) DO UPDATE SET " +
+      ','.join(f'{col}=EXCLUDED.{col}' for col in COLS[2:]))
+  # Features and progress are committed atomically per symbol.
+  with eng.begin() as cn:
+   for start_at in range(0,len(batch),500):
+    chunk=batch[start_at:start_at+500]
+    cn.execute(sql,[dict(zip(COLS,row)) for row in chunk])
+   cn.execute(text("""INSERT INTO public.rs_screen_build_progress(symbol,build_start,build_end,rows_written)
+      VALUES(:symbol,:start,:end,:rows) ON CONFLICT(symbol) DO UPDATE SET build_start=EXCLUDED.build_start,
+      build_end=EXCLUDED.build_end,rows_written=EXCLUDED.rows_written,finished_at=NOW()"""),
+      {'symbol':sym,'start':a.start,'end':a.end,'rows':len(batch)})
   nstocks+=1;written+=len(batch)
   if nstocks%100==0:print('STOCKS',nstocks,'ROWS_THIS_RUN',written,'SKIPPED',skipped,flush=True)
  with eng.connect() as cn:
