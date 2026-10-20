@@ -12,3 +12,4 @@ yfinance>=0.2.54
 lxml>=5.0
 html5lib>=1.1
 scikit-learn
+psycopg2-binary>=2.9,<3
