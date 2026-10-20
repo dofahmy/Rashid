@@ -3,7 +3,7 @@
 The source is not authoritative; validation reports explicitly warn on gaps. Existing
 market_candles_1d and US RS tables are never modified.
 """
-import argparse, datetime as dt, io, json, os, re, sys, urllib.parse
+import argparse, datetime as dt, io, json, os, re, sys, urllib.parse, math
 from pathlib import Path
 import requests
 import pandas as pd
@@ -14,8 +14,8 @@ SOURCES = {
  'SA': ('TASI','https://raw.githubusercontent.com/VickykciV/Stock-Market-Network/main/TASI%20Historical%20Data.csv'),
 }
 HEADERS={'User-Agent':'Mozilla/5.0 (compatible; MarketBenchmarkImporter/1.0)'}
-DATE_KEYS={'date','日期','التاريخ','tarih'}
-CLOSE_KEYS={'price','close','last','收盘','اخر سعر','آخر سعر','السعر','السعر الأخير','closing price'}
+DATE_KEYS={'date','dates','day','trading date','trading_date','datetime','日期','التاريخ','tarih'}
+CLOSE_KEYS={'price','close','last','closing price','closing_price','close price','last price','adj close','adj_close','收盘','اخر سعر','آخر سعر','السعر','السعر الأخير'}
 
 def normalize(k): return re.sub(r'\s+',' ',str(k).strip().lower().lstrip('\ufeff'))
 
@@ -26,25 +26,39 @@ def get_col(df, choices):
     raise ValueError('Missing required column among '+str(list(df.columns)))
 
 def parse_date(val):
-    s=str(val).strip()
-    if not s:return None
-    for fmt in ('%m/%d/%Y','%Y-%m-%d','%d/%m/%Y','%b %d, %Y','%d %b %Y','%d.%m.%Y','%Y/%m/%d'):
+    s=str(val).strip().replace('\u200e','').replace('\u200f','')
+    if not s or s.lower() in ('nan','nat','none'):return None
+    for fmt in ('%m/%d/%Y','%Y-%m-%d','%d/%m/%Y','%b %d, %Y','%B %d, %Y',
+                '%d %b %Y','%d %B %Y','%d-%b-%Y','%d-%B-%Y',
+                '%d.%m.%Y','%Y/%m/%d','%d-%m-%Y','%m-%d-%Y',
+                '%Y-%m-%d %H:%M:%S','%Y-%m-%dT%H:%M:%S'):
         try:return dt.datetime.strptime(s,fmt).date()
         except ValueError:pass
-    return None
+    try:
+        ts=pd.to_datetime(s,errors='coerce',dayfirst=False)
+        return None if pd.isna(ts) else ts.date()
+    except (ValueError,TypeError,OverflowError):return None
 
 def parse_price(val):
-    s=str(val).strip().replace(',','').replace(' ','').replace('\u200f','')
-    if not s or s in ('-','nan','None'):return None
+    s=str(val).strip().replace(',','').replace(' ','').replace('\u200f','').replace('\u200e','')
+    if not s or s.lower() in ('-','nan','none','null'):return None
+    # Volumes may have K/M/B suffixes; closing prices must not.
     try:
         v=float(s)
-        return v if 0 < v < 1e9 else None
+        return v if math.isfinite(v) and 0 < v < 1e9 else None
     except ValueError:return None
 
 def parse_frame(content, label):
-    df=pd.read_csv(io.BytesIO(content), encoding='utf-8-sig',dtype=str)
-    dc=get_col(df,DATE_KEYS)
-    pc=get_col(df,CLOSE_KEYS)
+    try:
+        df=pd.read_csv(io.BytesIO(content),encoding='utf-8-sig',dtype=str,sep=None,engine='python')
+    except Exception as exc:
+        raise ValueError(f'CSV read failed ({label}): {exc}') from exc
+    if df.empty:raise ValueError(f'Empty CSV: {label}')
+    try:
+        dc=get_col(df,DATE_KEYS)
+        pc=get_col(df,CLOSE_KEYS)
+    except ValueError as exc:
+        raise ValueError(f'{exc}; sample_rows={df.head(3).to_dict(orient="records")}') from exc
     parsed={}; invalid=0; conflicting=[]
     for idx,row in df.iterrows():
         d=parse_date(row[dc]); v=parse_price(row[pc])
@@ -52,7 +66,7 @@ def parse_frame(content, label):
         if d in parsed and abs(parsed[d]-v)>0.005:conflicting.append(str(d))
         parsed[d]=v
     if conflicting:raise ValueError(f'Conflicting same-date closes in {label}: {conflicting[:5]}')
-    if not parsed:raise ValueError(f'No valid dates and closes in {label}')
+    if not parsed:raise ValueError(f'No valid dates and closes in {label}; columns={list(df.columns)}; sample_rows={df.head(5).to_dict(orient="records")}')
     return parsed,{'source_rows':len(df),'invalid_rows':invalid,'date_column':dc,'close_column':pc}
 
 def fetch(url):
@@ -74,30 +88,41 @@ def validate(data, last_required, minimum, first_expected):
             'ready_for_screening':usable>=minimum and dates[0]<=first_expected and not long_gaps and -3<=age<=10}
 
 def safe_table_setup(conn):
+    # Existing rs_multi_build.py created this table with symbol, not benchmark.
+    # Do not ALTER or DROP any existing table; adapt inserts to its actual schema.
     conn.execute(text('''CREATE TABLE IF NOT EXISTS public.rs_market_benchmark (
-       market VARCHAR(2) NOT NULL, benchmark VARCHAR(24) NOT NULL, session_date DATE NOT NULL,
-       close DOUBLE PRECISION NOT NULL CHECK (close > 0), source TEXT NOT NULL,
-       retrieved_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-       PRIMARY KEY(market, session_date)
-    )'''))
+       market TEXT NOT NULL, session_date DATE NOT NULL,
+       close DOUBLE PRECISION NOT NULL, symbol TEXT NOT NULL, source TEXT NOT NULL,
+       PRIMARY KEY(market,session_date))'''))
+    info=conn.execute(text('''SELECT column_name, is_nullable, column_default
+       FROM information_schema.columns
+       WHERE table_schema='public' AND table_name='rs_market_benchmark' ''')).fetchall()
+    columns={r[0] for r in info}
+    if not {'market','session_date','close','source'}.issubset(columns):
+        raise RuntimeError('Existing benchmark table has incompatible schema: '+str(sorted(columns)))
+    if 'symbol' in columns:return 'symbol'
+    if 'benchmark' in columns:return 'benchmark'
+    raise RuntimeError('Existing table has neither symbol nor benchmark column')
 
-def import_market(engine, market, data, label):
-    benchmark=SOURCES[market][0]
+def import_market(engine,market,data,label):
+    sym={'EG':'^CASE30','SA':'^TASI.SR'}[market]
     with engine.begin() as conn:
-        safe_table_setup(conn)
-        # Do not overwrite an existing benchmark's conflicting prices without an explicit review.
-        existing=conn.execute(text('''SELECT session_date, close, source FROM public.rs_market_benchmark
-                 WHERE market=:m'''),{'m':market}).fetchall()
+        name_col=safe_table_setup(conn)
+        existing=conn.execute(text('''SELECT session_date,close,source FROM public.rs_market_benchmark
+                         WHERE market=:m'''),{'m':market}).fetchall()
+        # Validate before any data writes, and never silently replace conflicting prices.
         conflicts=[{'date':str(d),'stored':float(v),'incoming':data[d],'stored_source':source}
-                  for d,v,source in existing if d in data and abs(v-data[d])/max(v,1)>0.003]
-        if conflicts:raise ValueError(f'Existing data conflicts >0.3%, no writes made: {conflicts[:8]}')
-        rows=[{'m':market,'b':benchmark,'d':d,'c':close,'s':label} for d,close in sorted(data.items())]
-        stmt=text('''INSERT INTO public.rs_market_benchmark (market,benchmark,session_date,close,source)
-            VALUES (:m,:b,:d,:c,:s) ON CONFLICT (market,session_date) DO NOTHING''')
-        for i in range(0,len(rows),500):conn.execute(stmt,rows[i:i+500])
+                  for d,v,source in existing if d in data and abs(float(v)-data[d])/max(abs(float(v)),1)>0.003]
+        if conflicts:raise ValueError(f'Existing data conflicts >0.3%; no writes: {conflicts[:8]}')
+        rows=[{'m':market,'b':sym,'d':d,'c':close,'s':label} for d,close in sorted(data.items())]
+        stmt=text(f'''INSERT INTO public.rs_market_benchmark(market,{name_col},session_date,close,source)
+                     VALUES (:m,:b,:d,:c,:s)
+                     ON CONFLICT(market,session_date) DO NOTHING''')
+        for i in range(0,len(rows),300):conn.execute(stmt,rows[i:i+300])
         saved=conn.execute(text('''SELECT COUNT(*),MIN(session_date),MAX(session_date)
-                      FROM public.rs_market_benchmark WHERE market=:m'''),{'m':market}).one()
-    return {'stored_rows':saved[0],'stored_first':str(saved[1]),'stored_last':str(saved[2])}
+                  FROM public.rs_market_benchmark WHERE market=:m'''),{'m':market}).one()
+    return {'table_column':name_col,'stored_rows':saved[0],
+            'stored_first':str(saved[1]),'stored_last':str(saved[2])}
 
 def main():
     a=argparse.ArgumentParser()
@@ -139,8 +164,15 @@ def main():
         except Exception as ex:
             results[m]={'status':'ERROR_NO_IMPORT','error':str(ex)}
             print('MARKET_ERROR',m,str(ex),flush=True)
-    Path(args.report).write_text(json.dumps(results,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
-    print('REPORT',args.report)
+    if args.report:
+        report_path=Path(args.report)
+        try:
+            report_path.parent.mkdir(parents=True,exist_ok=True)
+            report_path.write_text(json.dumps(results,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+            print('REPORT',args.report)
+        except OSError as exc:
+            print('REPORT_FILE_WARNING',str(exc),'full report already printed above')
+    print('SUMMARY',json.dumps({m:{'status':v.get('status'),'postgres':v.get('postgres'),'quality':v.get('quality')} for m,v in results.items()},ensure_ascii=False,default=str))
     if any(x['status']=='ERROR_NO_IMPORT' for x in results.values()):sys.exit(1)
     if any(x['status']!='READY' for x in results.values()):sys.exit(2)
 
