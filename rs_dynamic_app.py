@@ -1,10 +1,11 @@
-"""Interactive full-market technical/relative-performance screener over an indexed SQLite feature store."""
-import csv, io, json, os, sqlite3
-from pathlib import Path
+"""USA dynamic screener backed by persistent PostgreSQL data."""
+import csv, io, os, re
 from flask import Flask, render_template, request, jsonify, Response
-app=Flask(__name__,template_folder='templates')
-DB=Path(os.getenv('RS_DYNAMIC_DB','/data/rs_dynamic/market_features.sqlite'))
-FIELDS={
+from sqlalchemy import create_engine, text
+from sqlalchemy.exc import SQLAlchemyError
+
+app = Flask(__name__, template_folder='templates')
+FIELDS = {
  'rp1':'أداء اليوم مقابل S&P500 (نقطة مئوية)',
  'rp5':'RS آخر 5 جلسات','rp10':'RS آخر 10 جلسات','rp20':'RS آخر 20 جلسة',
  'rp60':'RS آخر 60 جلسة','rp120':'RS آخر 120 جلسة','rp252':'RS آخر 252 جلسة',
@@ -14,40 +15,53 @@ FIELDS={
  'stock_day_pct':'تغير السهم في يوم','sp500_day_pct':'تغير المؤشر في يوم',
  'adx14':'ADX14','plus_di14':'+DI14','minus_di14':'-DI14',
  'relative_volume20':'Relative Volume 20','relative_volatility14_60':'Relative Volatility 14/60',
- 'close':'الإغلاق'}
-OPERATORS={'gt':'>','ge':'>=','lt':'<','le':'<=','eq':'=','between':'BETWEEN'}
+ 'close':'الإغلاق'
+}
+OPS={'gt':'>','ge':'>=','lt':'<','le':'<=','eq':'=','between':'BETWEEN'}
 ORDERABLE=set(FIELDS)|{'symbol','session_date'}
+_engine=None
 
-def conn():
- if not DB.is_file():return None
- c=sqlite3.connect(f'file:{DB}?mode=ro',uri=True,timeout=10)
- c.row_factory=sqlite3.Row
- return c
+def engine():
+ global _engine
+ if _engine is None:
+  url=os.getenv('DATABASE_URL')
+  if not url: raise RuntimeError('DATABASE_URL غير موجود')
+  _engine=create_engine(url,pool_pre_ping=True,pool_recycle=300)
+ return _engine
+
+def table_status():
+ try:
+  with engine().connect() as cn:
+   exists=cn.execute(text("SELECT to_regclass('public.rs_screen_features') IS NOT NULL")).scalar()
+   if not exists:return False,None
+   total=cn.execute(text('SELECT COUNT(*) FROM public.rs_screen_features')).scalar()
+   return total>0,total
+ except (SQLAlchemyError,RuntimeError):return False,None
 
 def parse():
+ from datetime import date
  a=request.args
- day=a.get('day','').strip()
- start=a.get('start','').strip();end=a.get('end','').strip()
- if day and (start or end): raise ValueError('اختاري يوم واحد أو فترة، مش الاتنين معًا')
- import datetime
- for v in [day,start,end]:
-  if v:
-   try:datetime.date.fromisoformat(v)
+ day=a.get('day','').strip();start=a.get('start','').strip();end=a.get('end','').strip()
+ if day and (start or end):raise ValueError('اختاري يوم واحد أو فترة، مش الاتنين معًا')
+ for value in (day,start,end):
+  if value:
+   try:date.fromisoformat(value)
    except ValueError:raise ValueError('التاريخ غير صحيح')
  if start and end and start>end:raise ValueError('تاريخ البداية بعد النهاية')
- conditions=[]
- fields=a.getlist('field');ops=a.getlist('op');values=a.getlist('value');values2=a.getlist('value2')
+ fields=a.getlist('field');ops=a.getlist('op');vals=a.getlist('value');vals2=a.getlist('value2')
  if len(fields)>12:raise ValueError('الحد الأقصى 12 شرط')
- for i,f in enumerate(fields):
-  if not f:continue
+ conditions=[]
+ for i,field in enumerate(fields):
+  if not field:continue
   op=ops[i] if i<len(ops) else ''
-  if f not in FIELDS or op not in OPERATORS:raise ValueError('شرط غير معروف')
+  if field not in FIELDS or op not in OPS:raise ValueError('شرط غير معروف')
   try:
-   v=float(values[i]);v2=float(values2[i]) if op=='between' else None
+   val=float(vals[i]); val2=float(vals2[i]) if op=='between' else None
   except (ValueError,IndexError):raise ValueError('أدخلي قيمة رقمية لكل شرط')
-  if not (-1e10<v<1e10) or (v2 is not None and not -1e10<v2<1e10):raise ValueError('قيمة خارج النطاق')
-  if op=='between' and v2<v: raise ValueError('حدود النطاق معكوسة')
-  conditions.append((f,op,v,v2))
+  import math
+  if not math.isfinite(val) or abs(val)>1e10 or (val2 is not None and (not math.isfinite(val2) or abs(val2)>1e10)):raise ValueError('قيمة خارج النطاق')
+  if op=='between' and val2<val:raise ValueError('حدود النطاق معكوسة')
+  conditions.append((field,op,val,val2))
  logic=a.get('logic','AND').upper()
  if logic not in ('AND','OR'):logic='AND'
  sort=a.get('sort','rp1')
@@ -59,52 +73,53 @@ def parse():
 
 def run_query(opts):
  day,start,end,conditions,logic,sort,limit=opts
- c=conn()
- if c is None:raise FileNotFoundError('قاعدة فحص السوق غير موجودة. شغّلي rs_dynamic_build.py مرة أولًا.')
- try:
-  wh=[];params=[]
-  if day:wh.append('session_date=?');params.append(day)
-  else:
-   if start:wh.append('session_date>=?');params.append(start)
-   if end:wh.append('session_date<=?');params.append(end)
-   if not start and not end:
-    latest=c.execute('SELECT max(session_date) FROM screen').fetchone()[0]
-    wh.append('session_date=?');params.append(latest)
-  inner=[];inner_p=[]
-  for field,op,v,v2 in conditions:
-   if op=='between':inner.append(f'({field} BETWEEN ? AND ?)');inner_p.extend([v,v2])
-   else:inner.append(f'({field} {OPERATORS[op]} ?)');inner_p.append(v)
-  if inner:wh.append('('+(' '+logic+' ').join(inner)+')');params+=inner_p
-  where=' AND '.join(wh) if wh else '1=1'
-  count=c.execute('SELECT count(*) FROM screen WHERE '+where,params).fetchone()[0]
-  rows=c.execute(f'SELECT * FROM screen WHERE {where} ORDER BY {sort} DESC LIMIT ?',params+[limit]).fetchall()
-  return [dict(x) for x in rows],count
- finally:c.close()
+ predicates=[]; params={}
+ if day:predicates.append('session_date = :day');params['day']=day
+ else:
+  if start:predicates.append('session_date >= :start');params['start']=start
+  if end:predicates.append('session_date <= :end');params['end']=end
+  if not start and not end:predicates.append('session_date = (SELECT MAX(session_date) FROM public.rs_screen_features)')
+ fl=[]
+ for i,(field,op,val,val2) in enumerate(conditions):
+  # field and operator can only originate from allowlists
+  params[f'v{i}']=val
+  if op=='between':
+   params[f'v2_{i}']=val2;fl.append(f'({field} BETWEEN :v{i} AND :v2_{i})')
+  else:fl.append(f'({field} {OPS[op]} :v{i})')
+ if fl:predicates.append('('+(f' {logic} ').join(fl)+')')
+ where=' AND '.join(predicates) if predicates else 'TRUE'
+ with engine().connect() as cn:
+  if cn.execute(text("SELECT to_regclass('public.rs_screen_features')")).scalar() is None:
+   raise ValueError('جدول فحص السوق غير موجود في PostgreSQL. شغلي rs_pg_build.py أول مرة.')
+  total=cn.execute(text(f'SELECT COUNT(*) FROM public.rs_screen_features WHERE {where}'),params).scalar()
+  rows=cn.execute(text(f'SELECT * FROM public.rs_screen_features WHERE {where} ORDER BY {sort} DESC NULLS LAST LIMIT :lim'),{**params,'lim':limit}).mappings().all()
+  return [dict(x) for x in rows],total
 
 @app.after_request
-def headers(r):r.headers['Cache-Control']='no-store';return r
+def no_cache(resp):resp.headers['Cache-Control']='no-store';return resp
 @app.get('/health')
-def health():return jsonify(ok=True,service='interactive-rs-screening',features_db_exists=DB.is_file())
+def health():
+ ready,n=table_status()
+ return jsonify(ok=True,service='interactive-rs-screening-postgres',features_db_exists=ready,backend='postgres',rows=n)
 @app.get('/')
 @app.get('/screening')
 def screening():
- opts=None;rows=[];total=0;err=None
+ ready,_=table_status();rows=[];total=0;error=None
  if request.args.get('run')=='1':
-  try:opts=parse();rows,total=run_query(opts)
-  except (ValueError,FileNotFoundError,sqlite3.Error) as e:err=str(e)
- return render_template('rs_dynamic.html',rows=rows,total=total,error=err,fields=FIELDS,ops=OPERATORS,args=request.args,ready=DB.is_file(),ran=request.args.get('run')=='1')
+  try:rows,total=run_query(parse())
+  except (ValueError,RuntimeError,SQLAlchemyError) as ex:error=str(ex)
+ return render_template('rs_dynamic.html',rows=rows,total=total,error=error,fields=FIELDS,ops=OPS,args=request.args,ready=ready,ran=request.args.get('run')=='1')
 @app.get('/screening.json')
-def screening_json():
+def screen_json():
  try:
-  rows,total=run_query(parse())
-  return jsonify({'total_matches':total,'shown':len(rows),'rows':rows})
- except (ValueError,FileNotFoundError,sqlite3.Error) as e:return jsonify({'error':str(e)}),400
+  rows,total=run_query(parse());return jsonify(total_matches=total,shown=len(rows),rows=rows)
+ except (ValueError,RuntimeError,SQLAlchemyError) as ex:return jsonify(error=str(ex)),400
 @app.get('/screening.csv')
-def screening_csv():
+def screen_csv():
  try:rows,total=run_query(parse())
- except (ValueError,FileNotFoundError,sqlite3.Error) as e:return jsonify(error=str(e)),400
+ except (ValueError,RuntimeError,SQLAlchemyError) as ex:return jsonify(error=str(ex)),400
  out=io.StringIO()
  if rows:
-  w=csv.DictWriter(out,fieldnames=rows[0].keys());w.writeheader();w.writerows(rows)
+  writer=csv.DictWriter(out,fieldnames=list(rows[0]));writer.writeheader();writer.writerows(rows)
  return Response('\ufeff'+out.getvalue(),mimetype='text/csv',headers={'Content-Disposition':'attachment; filename=screening_results.csv','X-Total-Matches':str(total)})
-if __name__=='__main__':app.run(host='0.0.0.0',port=int(os.getenv('PORT',8080)))
+if __name__=='__main__':app.run(host='0.0.0.0',port=int(os.getenv('PORT','8080')))
