@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Yahoo EGX30/TASI + separate PostgreSQL features for Egyptian/Saudi tickers; never updates US features."""
+"""Build EG/SA stock screening using saved PostgreSQL benchmark closes; does not query Yahoo."""
 import argparse,os,time,datetime,urllib.request,urllib.parse,json
 import pandas as pd,numpy as np
 from sqlalchemy import create_engine,text
@@ -41,21 +41,25 @@ def main():
    if ddl.strip():cn.execute(text(ddl))
  for market in markets:
   symbol,index_name=INDEX[market]
-  try:rows=yahoo(symbol,a.start,a.end)
-  except Exception as exc:
-   print('YAHOO_ERROR',market,symbol,str(exc),flush=True);continue
-  print('INDEX',market,symbol,'ROWS',len(rows),'FIRST',str(rows[0][0]) if rows else None,'LAST',str(rows[-1][0]) if rows else None,flush=True)
-  # Require broad history; do not silently forward fill years of missing benchmark data.
-  if len(rows)<260 or rows[0][0]>datetime.date(2019,1,31):
-   print('INDEX_REJECTED',market,'insufficient coverage for historical RS; no stock rows written',flush=True);continue
-  with eng.begin() as cn:
-   cn.execute(text('INSERT INTO public.rs_market_benchmark(market,session_date,close,symbol,source) VALUES(:market,:date,:close,:symbol,:source) ON CONFLICT(market,session_date) DO UPDATE SET close=EXCLUDED.close,symbol=EXCLUDED.symbol,source=EXCLUDED.source'),[dict(market=market,date=d,close=c,symbol=symbol,source='Yahoo Finance') for d,c in rows])
+  with eng.connect() as cn:
+   exists=cn.execute(text("SELECT to_regclass('public.rs_market_benchmark') IS NOT NULL")).scalar()
+   if not exists:
+    print('INDEX_MISSING',market,'Run import_uploaded_benchmarks.py first',flush=True);continue
+   stats=cn.execute(text('SELECT COUNT(*),MIN(session_date),MAX(session_date) FROM public.rs_market_benchmark WHERE market=:m'),{'m':market}).one()
+  print('INDEX_FROM_POSTGRES',market,'ROWS',stats[0],'FIRST',str(stats[1]),'LAST',str(stats[2]),flush=True)
+  if stats[0]<260:
+   print('INDEX_REJECTED',market,'too few benchmark sessions',flush=True);continue
   with eng.connect() as cn:
    b=cn.execute(text('SELECT session_date,close FROM public.rs_market_benchmark WHERE market=:m ORDER BY session_date'),{'m':market}).fetchall()
    done=set(cn.execute(text('SELECT symbol FROM public.rs_market_build_progress WHERE market=:m AND build_start=:s AND build_end=:e'),{'m':market,'s':a.start,'e':a.end}).scalars()) if not a.refresh else set()
    syms=cn.execute(text("SELECT DISTINCT symbol FROM public.market_candles_1d WHERE ( :m='EG' AND upper(symbol) LIKE '%.CA') OR (:m='SA' AND (upper(symbol) LIKE '%.SA' OR upper(symbol) LIKE '%.SR')) ORDER BY symbol"),{'m':market}).scalars().all()
   bench=pd.DataFrame(b,columns=['date','c']);bench['date']=pd.to_datetime(bench.date)
   bdates=bench.date.to_numpy('datetime64[ns]');bc=bench.c.to_numpy(float)
+  # Mark contiguous benchmark history segments. Never compare returns over >10 calendar-day gaps.
+  bsegment=np.cumsum(np.r_[False,(np.diff(bdates)>np.timedelta64(10,'D'))])
+  gaps=[(str(a)[:10],str(b)[:10]) for a,b in zip(bdates[:-1],bdates[1:]) if b-a>np.timedelta64(10,'D')]
+  print('BENCHMARK_GAPS',market,len(gaps),gaps[:12],flush=True)
+
   print('STOCK_SYMBOLS',market,len(syms),'DONE',len(done),flush=True)
   count=nr=0
   for ticker in syms:
@@ -76,12 +80,15 @@ def main():
    # Invalidate any RP lookback whose index endpoint is unavailable or stale.
    for w in (5,10,20,60,120,252):
     if len(raw)>w:
-     good=valid[w:] & valid[:-w]
+     good=valid[w:] & valid[:-w] & (bsegment[np.maximum(pos[w:],0)] == bsegment[np.maximum(pos[:-w],0)])
      f[w][w:][~good]=np.nan
    stock1=np.full(len(raw),np.nan);idx1=stock1.copy()
    stock1[1:]=np.where(c[:-1]>0,100*(c[1:]/c[:-1]-1),np.nan)
-   idx1[1:]=100*(bval[1:]/bval[:-1]-1)
+   with np.errstate(divide='ignore',invalid='ignore'):
+    idx1[1:]=100*(bval[1:]/bval[:-1]-1)
    idx1[~valid]=np.nan
+   idx1[1:][bsegment[np.maximum(pos[1:],0)]!=bsegment[np.maximum(pos[:-1],0)]]=np.nan
+   idx1[1:][~valid[:-1]]=np.nan
    daily=stock1-idx1
    avgs={w:pd.Series(daily).rolling(w,min_periods=w).mean().to_numpy() for w in (5,10,20,60,120)}
    ind=indicators(raw)
