@@ -38,15 +38,17 @@ def main():
  eng=create_engine(os.environ['DATABASE_URL'])
  # The current inventory has ~210 CA instruments. Fix universe to latest date with broad coverage.
  with eng.connect() as cn:
+  # Use the market screener's complete Egyptian universe, NOT the most recent
+  # raw-candle date (which can contain only a handful of newly refreshed stocks).
   universe=pd.read_sql(text('''
-    SELECT DISTINCT symbol FROM public.market_candles_1d
-    WHERE symbol LIKE '%.CA' AND session_date = (
-       SELECT MAX(session_date) FROM public.market_candles_1d
-       WHERE symbol LIKE '%.CA' AND session_date BETWEEN :start AND :end
+    SELECT DISTINCT symbol FROM public.rs_market_features
+    WHERE market='EG' AND session_date = (
+      SELECT MAX(session_date) FROM public.rs_market_features
+      WHERE market='EG' AND session_date BETWEEN CAST(:start AS DATE) AND CAST(:end AS DATE)
     ) ORDER BY symbol
   '''), cn, params={'start':args.start,'end':args.end})['symbol'].tolist()
-  print('LATEST_DATE_UNIVERSE_SIZE',len(universe),flush=True)
-  if len(universe)<150:raise SystemExit('Too few symbols in latest-date universe')
+  print('EG_SCREENING_UNIVERSE_SIZE',len(universe),flush=True)
+  if len(universe)<150:raise SystemExit('Too few symbols in EG screener universe')
   df=pd.read_sql(text('''
     SELECT symbol, session_date, o, h, l, c, v
     FROM public.market_candles_1d
