@@ -16,7 +16,8 @@ FIELDS = {
  'stock_day_pct':'تغير السهم في يوم','sp500_day_pct':'تغير مؤشر السوق في يوم',
  'adx14':'ADX14','plus_di14':'+DI14','minus_di14':'-DI14',
  'relative_volume20':'Relative Volume 20','relative_volatility14_60':'Relative Volatility 14/60',
- 'close':'الإغلاق'
+ 'close':'الإغلاق',
+ 'daily_traded_value_k_egp':'قيمة التداول اليومية التقديرية (ألف جنيه)'
 }
 OPS={'gt':'>','ge':'>=','lt':'<','le':'<=','eq':'=','between':'BETWEEN'}
 ORDERABLE=set(FIELDS)|{'symbol','session_date'}
@@ -71,6 +72,8 @@ def parse():
   import math
   if not math.isfinite(val) or abs(val)>1e10 or (val2 is not None and (not math.isfinite(val2) or abs(val2)>1e10)):raise ValueError('قيمة خارج النطاق')
   if op=='between' and val2<val:raise ValueError('حدود النطاق معكوسة')
+  if field=='daily_traded_value_k_egp' and chosen_market()!='EG':
+   raise ValueError('فلتر قيمة التداول بالألف جنيه متاح للسوق المصري فقط')
   conditions.append((field,op,val,val2))
  logic=a.get('logic','AND').upper()
  if logic not in ('AND','OR'):logic='AND'
@@ -82,6 +85,7 @@ def parse():
  return day,start,end,conditions,logic,sort,limit
 
 # Benchmark-sensitive metrics; technical indicators remain ticker-specific.
+EG_VALUE_FIELD = 'daily_traded_value_k_egp'
 RS_FIELDS = {k for k in FIELDS if k.startswith('rp') or k.startswith('avg_rp')}
 RS_FIELDS |= {'sp500_day_pct'}
 STOCK_FIELDS = ['close','stock_day_pct','adx14','plus_di14','minus_di14',
@@ -124,7 +128,7 @@ def eg_sources(cn, choice):
   for fld in FIELDS:
    expr.append(f"{override.get(fld,prefix+'.'+fld)} AS {fld}")
   return ', '.join(expr)
- sql30='SELECT g.symbol, g.session_date, '+', '.join(f'g.{k} AS {k}' for k in FIELDS)+" FROM public.rs_market_features g WHERE g.market='EG'"
+ sql30='SELECT g.symbol, g.session_date, '+', '.join((f'(mc.c * mc.v / 1000.0) AS {k}' if k==EG_VALUE_FIELD else f'g.{k} AS {k}') for k in FIELDS)+" FROM public.rs_market_features g LEFT JOIN public.market_candles_1d mc ON mc.symbol=g.symbol AND mc.session_date=g.session_date::text WHERE g.market='EG'"
  # project EGXALL RS values directly from its own table, not recycled EGX30 RS.
  cols=available_egxall_columns(cn) if choice!='EGX30' else set()
  if choice=='EGX30':return {'EGX30':sql30}
@@ -134,6 +138,8 @@ def eg_sources(cn, choice):
    if fld=='sp500_day_pct':
     overrides[fld]=('a.sp500_day_pct' if fld in cols else 'ix.market_return_pct')
    else:overrides[fld]='a.'+fld
+  elif fld==EG_VALUE_FIELD:
+   overrides[fld]='(mc.c * mc.v / 1000.0)'
   elif fld in STOCK_FIELDS:
    if fld in ('close','stock_day_pct') and fld in cols:
     overrides[fld]=f'COALESCE(a.{fld},g.{fld})'
@@ -142,7 +148,8 @@ def eg_sources(cn, choice):
  sqla='SELECT '+', '.join(['a.symbol AS symbol','a.session_date AS session_date']+
       [f'{overrides[k]} AS {k}' for k in FIELDS])+""" FROM public.rs_egxall_features a
  LEFT JOIN public.rs_market_features g ON g.market='EG' AND g.symbol=a.symbol AND g.session_date=a.session_date
- LEFT JOIN public.eg_internal_index_draft ix ON ix.session_date=a.session_date"""
+ LEFT JOIN public.eg_internal_index_draft ix ON ix.session_date=a.session_date
+ LEFT JOIN public.market_candles_1d mc ON mc.symbol=a.symbol AND mc.session_date=a.session_date::text"""
  return {'EGX30':sql30,'EGXALL':sqla} if choice in ('AND','OR') else {'EGXALL':sqla}
 
 
@@ -156,9 +163,9 @@ def run_query(opts):
    if cn.execute(text('SELECT to_regclass(:t)'),{'t':table}).scalar() is None:
     raise ValueError('جدول فحص السوق غير موجود')
    if market!='EG':
-    source=f'SELECT * FROM {table}'+(' WHERE market=:market' if market=='SA' else '')
+    source=f'SELECT t.*, NULL::double precision AS {EG_VALUE_FIELD} FROM {table} t'+(' WHERE t.market=:market' if market=='SA' else '')
     if market=='SA':params['market']='SA'
-   else:source='SELECT symbol, session_date, '+', '.join(FIELDS)+" FROM public.rs_market_features WHERE market='EG'"
+   else:source='SELECT g.symbol, g.session_date, '+', '.join((f'(mc.c * mc.v / 1000.0) AS {k}' if k==EG_VALUE_FIELD else f'g.{k} AS {k}') for k in FIELDS)+" FROM public.rs_market_features g LEFT JOIN public.market_candles_1d mc ON mc.symbol=g.symbol AND mc.session_date=g.session_date::text WHERE g.market='EG'"
    sources={'DEFAULT':source} if market!='EG' else {'EGX30':source}
   else:
    if cn.execute(text("SELECT to_regclass('public.rs_market_features')")).scalar() is None:
