@@ -1,5 +1,6 @@
 """USA dynamic screener backed by persistent PostgreSQL data."""
 import csv, io, os, re
+from datetime import date
 from flask import Flask, render_template, request, jsonify, Response
 from sqlalchemy import create_engine, text, inspect
 from sqlalchemy.exc import SQLAlchemyError
@@ -195,7 +196,32 @@ def run_query(opts):
   total=cn.execute(text(cte+f' SELECT COUNT(*) FROM picked q WHERE {where}'),params).scalar()
   rows=cn.execute(text(cte+f""" SELECT q.* FROM picked q WHERE {where}
    ORDER BY q.{sort} DESC NULLS LAST, q.session_date DESC, q.symbol ASC LIMIT :lim"""),params).mappings().all()
-  return [dict(x) for x in rows],total
+  output=[dict(x) for x in rows]
+  # Optional read-only enrichment. Does not change the existing screening predicates.
+  if market=='EG' and output and cn.execute(text("SELECT to_regclass('public.eg_signal_base_confirmation')")).scalar() is not None:
+   pairs={(r['symbol'],r['session_date']) for r in output}
+   sym_list=sorted({x[0] for x in pairs})
+   dmin=min(x[1] for x in pairs);dmax=max(x[1] for x in pairs)
+   conf_rows=cn.execute(text("""SELECT benchmark,symbol,signal_date,status,
+     confirmation_date,confirmation_close,wait_sessions,confirmed_gain_from_signal_pct
+     FROM public.eg_signal_base_confirmation
+     WHERE symbol = ANY(:symbols) AND signal_date BETWEEN :dmin AND :dmax"""),
+     {'symbols':sym_list,'dmin':dmin,'dmax':dmax}).mappings().all()
+   by_key={}
+   for cr in conf_rows:
+    key=(cr['symbol'],cr['signal_date'])
+    if key in pairs:by_key.setdefault(key,[]).append(cr)
+   for r in output:
+    choices=r.get('matched_benchmarks','')
+    candidates=[x for x in by_key.get((r['symbol'],r['session_date']),[])
+                if x['benchmark'] in choices]
+    candidates.sort(key=lambda x:(x['status']!='CONFIRMED',x['confirmation_date'] or date.max))
+    if candidates:
+     best=candidates[0]
+     r.update(confirmation_status=best['status'],confirmation_date=best['confirmation_date'],
+              confirmation_close=best['confirmation_close'],confirmation_wait_sessions=best['wait_sessions'],
+              confirmation_benchmark=best['benchmark'])
+  return output,total
 
 @app.after_request
 def no_cache(resp):resp.headers['Cache-Control']='no-store';return resp
