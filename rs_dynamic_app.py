@@ -221,6 +221,36 @@ def run_query(opts):
      r.update(confirmation_status=best['status'],confirmation_date=best['confirmation_date'],
               confirmation_close=best['confirmation_close'],confirmation_wait_sessions=best['wait_sessions'],
               confirmation_benchmark=best['benchmark'])
+  # Maximum forward high, measured from ORIGINAL signal close over 252 later stock sessions.
+  # Covers confirmed and unconfirmed EG signals; does not depend on confirmation status.
+  if market=='EG' and output:
+   from collections import defaultdict
+   from bisect import bisect_right
+   symbols=sorted({r['symbol'] for r in output})
+   earliest=min(r['session_date'] for r in output)
+   candles=cn.execute(text("""SELECT symbol,session_date::date AS d,h
+     FROM public.market_candles_1d
+     WHERE symbol = ANY(:symbols) AND session_date::date > :earliest
+     ORDER BY symbol,session_date::date"""),
+     {'symbols':symbols,'earliest':earliest}).mappings()
+   bysym=defaultdict(list)
+   for candle in candles:
+    bysym[candle['symbol']].append((candle['d'],float(candle['h']) if candle['h'] is not None else None))
+   dates_by_symbol={sym:[c[0] for c in series] for sym,series in bysym.items()}
+   for r in output:
+    r['max_gain_1y_pct']=None
+    r['max_gain_1y_sessions']=0
+    r['max_gain_1y_complete']=False
+    entry=r.get('close')
+    if entry is None or float(entry)<=0:continue
+    sym=r['symbol'];series=bysym.get(sym,[])
+    offset=bisect_right(dates_by_symbol.get(sym,[]),r['session_date'])
+    forward=series[offset:offset+252]
+    r['max_gain_1y_sessions']=len(forward)
+    r['max_gain_1y_complete']=len(forward)==252
+    highs=[v for _,v in forward if v is not None]
+    if highs:
+     r['max_gain_1y_pct']=round((max(highs)/float(entry)-1)*100,2)
   return output,total
 
 @app.after_request
