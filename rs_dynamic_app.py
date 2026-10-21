@@ -1,7 +1,7 @@
 """USA dynamic screener backed by persistent PostgreSQL data."""
 import csv, io, os, re
 from flask import Flask, render_template, request, jsonify, Response
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, text, inspect
 from sqlalchemy.exc import SQLAlchemyError
 
 app = Flask(__name__, template_folder='templates')
@@ -80,30 +80,121 @@ def parse():
  limit=max(1,min(2000,limit))
  return day,start,end,conditions,logic,sort,limit
 
-def run_query(opts):
- day,start,end,conditions,logic,sort,limit=opts
- market=chosen_market();table=table_for(market)
- predicates=[]; params={}
- if market!='USA':predicates.append('market=:market');params['market']=market
- if day:predicates.append('session_date = :day');params['day']=day
- else:
-  if start:predicates.append('session_date >= :start');params['start']=start
-  if end:predicates.append('session_date <= :end');params['end']=end
-  if not start and not end:predicates.append('session_date = (SELECT MAX(session_date) FROM '+table+(' WHERE market=:market' if market!='USA' else '')+')')
- fl=[]
+# Benchmark-sensitive metrics; technical indicators remain ticker-specific.
+RS_FIELDS = {k for k in FIELDS if k.startswith('rp') or k.startswith('avg_rp')}
+RS_FIELDS |= {'sp500_day_pct'}
+STOCK_FIELDS = ['close','stock_day_pct','adx14','plus_di14','minus_di14',
+                'relative_volume20','relative_volatility14_60']
+VIEW_FIELDS = ['symbol','session_date'] + list(FIELDS)
+
+
+def benchmark_choice(market):
+ choice=request.args.get('benchmark','EGX30').upper()
+ if market!='EG':return 'DEFAULT'
+ if choice not in ('EGX30','EGXALL','OR','AND'):
+  raise ValueError('المؤشر المرجعي غير معروف')
+ return choice
+
+
+def conditions_sql(conditions,logic,params):
+ parts=[]
  for i,(field,op,val,val2) in enumerate(conditions):
-  # field and operator can only originate from allowlists
   params[f'v{i}']=val
   if op=='between':
-   params[f'v2_{i}']=val2;fl.append(f'({field} BETWEEN :v{i} AND :v2_{i})')
-  else:fl.append(f'({field} {OPS[op]} :v{i})')
- if fl:predicates.append('('+(f' {logic} ').join(fl)+')')
- where=' AND '.join(predicates) if predicates else 'TRUE'
+   params[f'v2_{i}']=val2
+   parts.append(f'(q.{field} BETWEEN :v{i} AND :v2_{i})')
+  else:parts.append(f'(q.{field} {OPS[op]} :v{i})')
+ return '('+(f' {logic} ').join(parts)+')' if parts else 'TRUE'
+
+
+def available_egxall_columns(cn):
+ exists=cn.execute(text("SELECT to_regclass('public.rs_egxall_features')")).scalar()
+ if exists is None:raise ValueError('جدول RS الخاص بـ EGXALL غير موجود؛ شغّلي build_egxall_rs.py --write أولاً')
+ columns={x['name'] for x in inspect(cn).get_columns('rs_egxall_features',schema='public')}
+ required={'symbol','session_date'} | (RS_FIELDS-{'sp500_day_pct'})
+ absent=required-columns
+ if absent:raise ValueError('أعمدة ناقصة في جدول EGXALL: '+', '.join(sorted(absent)))
+ return columns
+
+
+def eg_sources(cn, choice):
+ def projection(prefix,override={}):
+  expr=['symbol','session_date']
+  for fld in FIELDS:
+   expr.append(f"{override.get(fld,prefix+'.'+fld)} AS {fld}")
+  return ', '.join(expr)
+ sql30='SELECT g.symbol, g.session_date, '+', '.join(f'g.{k} AS {k}' for k in FIELDS)+" FROM public.rs_market_features g WHERE g.market='EG'"
+ # project EGXALL RS values directly from its own table, not recycled EGX30 RS.
+ cols=available_egxall_columns(cn) if choice!='EGX30' else set()
+ if choice=='EGX30':return {'EGX30':sql30}
+ overrides={}
+ for fld in FIELDS:
+  if fld in RS_FIELDS:
+   if fld=='sp500_day_pct':
+    overrides[fld]=('a.sp500_day_pct' if fld in cols else 'ix.market_return_pct')
+   else:overrides[fld]='a.'+fld
+  elif fld in STOCK_FIELDS:
+   if fld in ('close','stock_day_pct') and fld in cols:
+    overrides[fld]=f'COALESCE(a.{fld},g.{fld})'
+   else:overrides[fld]='g.'+fld
+ # EGXALL has only exact benchmark dates; technical indicators are shared by symbol-date.
+ sqla='SELECT '+', '.join(['a.symbol AS symbol','a.session_date AS session_date']+
+      [f'{overrides[k]} AS {k}' for k in FIELDS])+""" FROM public.rs_egxall_features a
+ LEFT JOIN public.rs_market_features g ON g.market='EG' AND g.symbol=a.symbol AND g.session_date=a.session_date
+ LEFT JOIN public.eg_internal_index_draft ix ON ix.session_date=a.session_date"""
+ return {'EGX30':sql30,'EGXALL':sqla} if choice in ('AND','OR') else {'EGXALL':sqla}
+
+
+def run_query(opts):
+ day,start,end,conditions,logic,sort,limit=opts
+ market=chosen_market();choice=benchmark_choice(market)
+ params={'lim':limit}
  with engine().connect() as cn:
-  if cn.execute(text('SELECT to_regclass(:table)'),{'table':table}).scalar() is None:
-   raise ValueError('جدول فحص السوق غير موجود. ابنِي بيانات السوق المختار أولاً باستخدام rs_multi_build.py لمصر والسعودية.')
-  total=cn.execute(text(f'SELECT COUNT(*) FROM {table} WHERE {where}'),params).scalar()
-  rows=cn.execute(text(f'SELECT * FROM {table} WHERE {where} ORDER BY {sort} DESC NULLS LAST LIMIT :lim'),{**params,'lim':limit}).mappings().all()
+  if market!='EG' or choice=='EGX30':
+   table=table_for(market)
+   if cn.execute(text('SELECT to_regclass(:t)'),{'t':table}).scalar() is None:
+    raise ValueError('جدول فحص السوق غير موجود')
+   if market!='EG':
+    source=f'SELECT * FROM {table}'+(' WHERE market=:market' if market=='SA' else '')
+    if market=='SA':params['market']='SA'
+   else:source='SELECT symbol, session_date, '+', '.join(FIELDS)+" FROM public.rs_market_features WHERE market='EG'"
+   sources={'DEFAULT':source} if market!='EG' else {'EGX30':source}
+  else:
+   if cn.execute(text("SELECT to_regclass('public.rs_market_features')")).scalar() is None:
+    raise ValueError('جدول مصر الأصلي غير موجود')
+   sources=eg_sources(cn,choice)
+  clauses=[]
+  if day:clauses.append('q.session_date=:day');params['day']=day
+  else:
+   if start:clauses.append('q.session_date>=:start');params['start']=start
+   if end:clauses.append('q.session_date<=:end');params['end']=end
+  filt=conditions_sql(conditions,logic,params)
+  arms=[]
+  for name,src in sources.items():
+   label=name if name!='DEFAULT' else ('USA' if market=='USA' else 'TASI')
+   arms.append(f"SELECT q.*, '{label}'::text AS source_benchmark FROM ({src}) q WHERE {filt}")
+  combined=' UNION ALL '.join(arms)
+  # Filter first, then combine. Thus all conditions must pass on a single benchmark.
+  cte='WITH hits AS ('+combined+'), marked AS (SELECT hits.*, '
+  if market=='EG' and choice in ('OR','AND'):
+   cte+="""BOOL_OR(source_benchmark='EGX30') OVER (PARTITION BY symbol,session_date) AS hit30,
+ BOOL_OR(source_benchmark='EGXALL') OVER (PARTITION BY symbol,session_date) AS hitall,
+ ROW_NUMBER() OVER (PARTITION BY symbol,session_date ORDER BY CASE WHEN source_benchmark='EGX30' THEN 0 ELSE 1 END) AS seq
+ FROM hits), picked AS (SELECT *, CASE WHEN hit30 AND hitall THEN 'EGX30 + EGXALL'
+ WHEN hit30 THEN 'EGX30' ELSE 'EGXALL' END AS matched_benchmarks
+ FROM marked WHERE seq=1"""
+   if choice=='AND':cte+=' AND hit30 AND hitall'
+   cte+=')'
+  else:
+   cte+="FALSE AS hit30,FALSE AS hitall,1 AS seq FROM hits), picked AS (SELECT *,source_benchmark AS matched_benchmarks FROM marked)"
+  outer=clauses[:]
+  if not day and not start and not end:
+   # For mixed mode use last date with qualifying source data, not latest for each arm.
+   outer.append('q.session_date=(SELECT MAX(session_date) FROM picked)')
+  where=' AND '.join(outer) or 'TRUE'
+  total=cn.execute(text(cte+f' SELECT COUNT(*) FROM picked q WHERE {where}'),params).scalar()
+  rows=cn.execute(text(cte+f""" SELECT q.* FROM picked q WHERE {where}
+   ORDER BY q.{sort} DESC NULLS LAST, q.session_date DESC, q.symbol ASC LIMIT :lim"""),params).mappings().all()
   return [dict(x) for x in rows],total
 
 @app.after_request
