@@ -10,6 +10,13 @@ import numpy as np
 import pandas as pd
 from sqlalchemy import create_engine, text
 
+EXCLUDED_FROM_INDEX = {
+ 'AIFI.CA','AMES.CA','ARAB.CA','CCRS.CA','COSG.CA',
+ 'DCCC.CA','FERC.CA','GDWA.CA','HELI.CA','ICFC.CA',
+ 'ICLE.CA','MCRO.CA','MHOT.CA','MPCI.CA','NIPH.CA',
+ 'OCDI.CA','ORHD.CA','POUL.CA','UNIP.CA'
+}
+
 DDL = '''
 CREATE TABLE IF NOT EXISTS public.eg_internal_index_draft (
  session_date DATE PRIMARY KEY,
@@ -48,6 +55,9 @@ def main():
     ) ORDER BY symbol
   '''), cn, params={'start':args.start,'end':args.end})['symbol'].tolist()
   print('EG_SCREENING_UNIVERSE_SIZE',len(universe),flush=True)
+  print('EXCLUDED_INDEX_ONLY',len(EXCLUDED_FROM_INDEX),sorted(EXCLUDED_FROM_INDEX),flush=True)
+  universe=[x for x in universe if x not in EXCLUDED_FROM_INDEX]
+  print('EGXALL_CONSTITUENTS',len(universe),flush=True)
   if len(universe)<150:raise SystemExit('Too few symbols in EG screener universe')
   df=pd.read_sql(text('''
     SELECT symbol, session_date, o, h, l, c, v
@@ -65,6 +75,7 @@ def main():
  print('SOURCE_ROWS',len(df),'UNIVERSE',len(universe),'BAD_DATES',bad_date,'BAD_CLOSES',bad_close,'DUPLICATE_SYMBOL_DATES',dupe,'INVALID_OHLC',invalid_ohlc,flush=True)
  if dupe: raise SystemExit('Duplicate symbol/date detected; no index built')
  # Recognize calendar-wide synthetic no-trading dates without altering source or deleting zero-volume securities.
+ df=df[df.symbol.isin(universe)].copy()
  cal=df.groupby('session_date').agg(stocks=('symbol','nunique'), positive_volume=('v',lambda x:int((x>0).sum())),total_volume=('v','sum'))
  # Require actual trading across the market. One isolated traded share does not establish a market session:
  market_days=cal.index[(cal['positive_volume']>=max(5,int(np.ceil(len(universe)*0.05)))) & (cal['stocks']>=int(np.ceil(len(universe)*args.coverage_min)))]
@@ -94,7 +105,7 @@ def main():
  daily.iloc[0]=0.
  level=args.base*(1+daily).cumprod()
  out=pd.DataFrame({'session_date':wide.index.date,'index_level':level.values,'market_return_pct':daily.values*100,'contributors':contributors.values.astype(int),'eligible_symbols':eligible.values.astype(int),'excluded_invalid':(len(universe)-eligible).values.astype(int),'zero_volume_symbols':df.assign(z=df.v.fillna(0).eq(0)).groupby('session_date').z.sum().reindex(wide.index).values.astype(int),'zero_return_symbols':ret.fillna(999).eq(0).sum(axis=1).values.astype(int)})
- method='equal_weight_cross_sectional_mean_returns_market_sessions_only_v1'
+ method='equal_weight_cross_sectional_mean_returns_excluding_19_extreme_move_symbols_v2'
  out['methodology']=method
  print('INDEX_START',out.iloc[0].to_dict(),'INDEX_END',out.iloc[-1].to_dict(),flush=True)
  print('MIN_CONTRIBUTORS',int(out.contributors.iloc[1:].min()),'MAX',int(out.contributors.max()),flush=True)
