@@ -14,7 +14,8 @@ EXCLUDED_FROM_INDEX = {
  'AIFI.CA','AMES.CA','ARAB.CA','CCRS.CA','COSG.CA',
  'DCCC.CA','FERC.CA','GDWA.CA','HELI.CA','ICFC.CA',
  'ICLE.CA','MCRO.CA','MHOT.CA','MPCI.CA','NIPH.CA',
- 'OCDI.CA','ORHD.CA','POUL.CA','UNIP.CA'
+ 'OCDI.CA','ORHD.CA','POUL.CA','UNIP.CA',
+ 'ADPC.CA','SPHT.CA','RKAZ.CA','ASPI.CA','IBCT.CA','COPR.CA','MFPC.CA'
 }
 
 DDL = '''
@@ -105,7 +106,7 @@ def main():
  daily.iloc[0]=0.
  level=args.base*(1+daily).cumprod()
  out=pd.DataFrame({'session_date':wide.index.date,'index_level':level.values,'market_return_pct':daily.values*100,'contributors':contributors.values.astype(int),'eligible_symbols':eligible.values.astype(int),'excluded_invalid':(len(universe)-eligible).values.astype(int),'zero_volume_symbols':df.assign(z=df.v.fillna(0).eq(0)).groupby('session_date').z.sum().reindex(wide.index).values.astype(int),'zero_return_symbols':ret.fillna(999).eq(0).sum(axis=1).values.astype(int)})
- method='equal_weight_cross_sectional_mean_returns_excluding_19_extreme_move_symbols_v2'
+ method=f'equal_weight_cross_sectional_mean_returns_excluding_{len(EXCLUDED_FROM_INDEX)}_extreme_move_symbols_v3'
  out['methodology']=method
  print('INDEX_START',out.iloc[0].to_dict(),'INDEX_END',out.iloc[-1].to_dict(),flush=True)
  print('MIN_CONTRIBUTORS',int(out.contributors.iloc[1:].min()),'MAX',int(out.contributors.max()),flush=True)
