@@ -1,0 +1,105 @@
+<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Screening – الأسواق الثلاثة</title><style>
+*{box-sizing:border-box}body{font-family:system-ui,Tahoma,Arial;background:#f4f6fa;margin:0;color:#172640}main{max-width:1550px;margin:30px auto;padding:0 22px}h1{margin-bottom:5px}.muted{color:#667085}form,.panel,.stat{background:white;border-radius:13px;padding:18px;margin:15px 0}label{display:flex;flex-direction:column;gap:6px;font-size:14px;font-weight:600}.line{display:flex;flex-wrap:wrap;gap:12px;align-items:end;margin-bottom:14px}input,select{border:1px solid #ccd4e0;border-radius:6px;padding:10px;font:inherit;min-width:110px;max-width:280px}button,.btn{background:#135b7c;color:white;border:0;border-radius:7px;padding:11px 17px;font-weight:700;cursor:pointer;text-decoration:none;display:inline-block}.ghost{background:#edf2f7;color:#173756}.presets{border:1px solid #c6d9e9;background:#f0f7fc;padding:12px;border-radius:10px;margin:15px 0}.presets .line{margin:0}.presets input{min-width:180px}.presets select{min-width:220px}.presets small{color:#667085;display:block;margin-top:7px}.presets #presetStatus{font-weight:600;color:#135b7c}.warn{background:#fff2d9;padding:12px;border-radius:8px;margin:12px 0}.ok{color:#08734d}.condition{display:flex;gap:8px;align-items:end;flex-wrap:wrap;padding:8px;margin:6px 0;background:#f4f7fb;border-radius:9px}.condition select{min-width:205px}.condition .short{min-width:85px;max-width:105px}.stats{display:flex;gap:12px}.stat{min-width:150px;margin:3px 0}.table-wrap{overflow:auto;background:white;border-radius:12px}table{border-collapse:collapse;width:100%;white-space:nowrap}th,td{padding:11px;border-bottom:1px solid #e3e9f0;text-align:right}th{background:#e8eef6;position:sticky;top:0}.num{direction:ltr;text-align:right}#filters{margin-bottom:15px}@media(max-width:720px){main{padding:0 9px}.stats{flex-wrap:wrap}}
+</style></head><body><main><h1>Screening — أمريكا ومصر والسعودية</h1><p class="muted" id="annualVersion">تحديث عرض العائد السنوي: ANNUAL-252-V2</p><p class="muted">بحث فعلي في كل الأسهم والجلسات المخزنة • RS / متوسط RS / ADX / DI / Relative Volume / Volatility • شروط متعددة</p>
+{% if not ready %}<div class="warn">بيانات فحص السوق لم تُبنَ بعد داخل PostgreSQL. شغّلي rs_pg_build.py مرة واحدة؛ لن تحتاجي Volume.</div>{% endif %}
+<form action="/screening" method="get" id="form"><input type="hidden" name="run" value="1"><h3>السوق والمؤشر المرجعي</h3><div class="line"><label>السوق<select name="market" id="marketSelect"><option value="USA" {% if market=='USA' %}selected{% endif %}>أمريكا — S&P 500</option><option value="EG" {% if market=='EG' %}selected{% endif %}>مصر — اختيار المؤشر المرجعي</option><option value="SA" {% if market=='SA' %}selected{% endif %}>السعودية — TASI</option></select></label><label id="benchmarkWrap">مؤشر المقارنة (مصر فقط)<select name="benchmark" id="benchmarkSelect"><option value="EGX30" {% if args.get('benchmark','EGX30')=='EGX30' %}selected{% endif %}>EGX30 فقط</option><option value="EGXALL" {% if args.get('benchmark')=='EGXALL' %}selected{% endif %}>EGXALL فقط</option><option value="OR" {% if args.get('benchmark')=='OR' %}selected{% endif %}>OR — كل الشروط أمام أحد المؤشرين</option><option value="AND" {% if args.get('benchmark')=='AND' %}selected{% endif %}>AND — كل الشروط أمام المؤشرين</option></select></label></div><h3>الفترة</h3><div class="line"><label>يوم محدد<input type="date" name="day" value="{{args.get('day','')}}"></label><span class="muted">أو</span><label>من تاريخ<input type="date" name="start" value="{{args.get('start','')}}"></label><label>إلى تاريخ<input type="date" name="end" value="{{args.get('end','')}}"></label></div><p class="muted">لو ما اختارتيش تاريخ، بيبحث في آخر جلسة متاحة فقط. «يوم محدد» = يوم المقارنة الفعلي للسهم مع المؤشر. RP1 موجب يعني السهم تفوق على مؤشر السوق في اليوم نفسه.</p>
+<div class="presets"><strong>الإعدادات المحفوظة</strong><div class="line" style="margin-top:8px"><label>اختاري إعدادات محفوظة<select id="presetSelect"><option value="__default__">الافتراضي — شروط الصورة</option></select></label><button type="button" class="ghost" id="loadPreset">تحميل وتطبيق الإعدادات</button><label>اسم الإعدادات<input id="presetName" type="text" maxlength="70" placeholder="مثلاً فحص اختراق الحجم"></label><button type="button" id="savePreset">حفظ الإعدادات</button><button type="button" class="ghost" id="deletePreset">حذف المحفوظ</button></div><small>الحفظ الشخصي على هذا المتصفح فقط؛ والقالبان الجاهزان ثابتان. قالب June 5 يستخدم نطاقات تقريبية حول الأسهم الستة، وليس توقعًا للربح. <span id="presetStatus" role="status"></span></small></div><h3>الشروط</h3><div class="line"><label>طريقة الجمع<select name="logic"><option value="AND" {% if args.get('logic','AND')=='AND' %}selected{% endif %}>AND — كل الشروط</option><option value="OR" {% if args.get('logic')=='OR' %}selected{% endif %}>OR — أي شرط</option></select></label><button type="button" class="ghost" onclick="addRow()">+ إضافة شرط</button></div><div id="filters"></div>
+<div class="line"><label>ترتيب النتائج<select name="sort">{% for k,t in fields.items() %}<option value="{{k}}" {% if args.get('sort','rp1')==k %}selected{% endif %}>{{t}}</option>{% endfor %}</select></label><label>عدد النتائج المعروضة<select name="limit"><option>100</option><option {% if args.get('limit','500')=='500' %}selected{% endif %}>500</option><option {% if args.get('limit')=='2000' %}selected{% endif %}>2000</option></select></label><button type="submit">فحص السوق</button></div></form>
+{% if error %}<div class="warn">{{error}}</div>{% endif %}
+{% if ran and not error %}<div class="stats"><div class="stat">مطابقات الشروط <h2>{{total}}</h2></div><div class="stat">المعروض <h2>{{rows|length}}</h2></div></div><a class="btn" id="export" href="#">تصدير CSV لنفس النتائج</a>
+<div class="table-wrap"><table><thead><tr><th>السهم</th><th>التاريخ</th><th>المؤشر الناجح</th><th>الإغلاق</th><th>السهم يوميًا %</th><th>المؤشر يوميًا %</th><th>تفوق اليوم RP1</th><th>RS5</th><th>RS10</th><th>RS20</th><th>RS60</th><th>RS120</th><th>RS252</th><th>متوسط RS5</th><th>متوسط RS20</th><th>أعلى عائد خلال عام % (252 جلسة)</th><th>تاريخ التأكيد</th><th>سعر التأكيد</th><th>انتظار (جلسات)</th><th>حالة التأكيد</th><th>مؤشر التأكيد</th><th>ADX14</th><th>+DI</th><th>−DI</th><th>RVOL20</th><th>RelVol</th></tr></thead><tbody>{% for r in rows %}<tr><td><b>{{r.symbol}}</b></td><td>{{r.session_date}}</td><td>{{r.matched_benchmarks|default("—")}}</td>{% for key in ['close','stock_day_pct','sp500_day_pct','rp1','rp5','rp10','rp20','rp60','rp120','rp252','avg_rp5','avg_rp20'] %}<td class="num">{{'%.3f'|format(r[key]) if r[key] is not none else '—'}}</td>{% endfor %}<td class="num" title="{{r.get('max_gain_1y_sessions',0) }} من 252 جلسة">{{('%.2f%%'|format(r.get('max_gain_1y_pct'))) if r.get('max_gain_1y_pct') is not none else '—'}}{{'' if r.get('max_gain_1y_complete') else ' *'}}</td><td>{{r.get('confirmation_date') or '—'}}</td><td class="num">{{'%.3f'|format(r.get('confirmation_close')) if r.get('confirmation_close') is not none else '—'}}</td><td>{{r.get('confirmation_wait_sessions') if r.get('confirmation_wait_sessions') is not none else '—'}}</td><td>{{'مؤكد' if r.get('confirmation_status')=='CONFIRMED' else ('قيد المتابعة' if r.get('confirmation_status')=='OPEN_NOT_YET_CONFIRMED' else ('غير مؤكد خلال المهلة' if r.get('confirmation_status')=='NOT_CONFIRMED_IN_WINDOW' else '—'))}}</td><td>{{r.get('confirmation_benchmark') or '—'}}</td>{% for key in ['adx14','plus_di14','minus_di14','relative_volume20','relative_volatility14_60'] %}<td class="num">{{'%.3f'|format(r[key]) if r[key] is not none else '—'}}</td>{% endfor %}</tr>{% else %}<tr><td colspan="20">مفيش أسهم مطابقة للشروط والفترة المختارة</td></tr>{% endfor %}</tbody></table></div>{% endif %}
+<p class="muted">التأكيد التاريخي: بعد 15 جلسة تجميع على الأقل، و70% من إغلاقات القاعدة داخل ±20% من سعر الإشارة، ثم إغلاق أعلى من سعر الإشارة وأعلى إغلاقات آخر 10 جلسات بنسبة 1%. التأكيد لا يتنبأ بالمستقبل. RS = عائد السهم − عائد مؤشر السوق بالنقاط المئوية. متوسط RS = المتوسط الحسابي للتفوق اليومي خلال N جلسة. الأسعار محسوبة على إغلاق اليوم المختار، وبالتالي لا تكون معروفة قبل إغلاقه. النتائج ليست توصيات استثمارية.</p></main>
+<script>
+const fields={{fields|tojson}},opLabels={'gt':'>','ge':'≥','lt':'<','le':'≤','eq':'=','between':'من ... إلى'};
+const initial={{ {'field':args.getlist('field'),'op':args.getlist('op'),'value':args.getlist('value'),'value2':args.getlist('value2')}|tojson }};
+function makeSelect(name,obj,val){let s=document.createElement('select');s.name=name;for(let [k,label] of Object.entries(obj)){let o=new Option(label,k);if(k===val)o.selected=true;s.add(o)}return s}
+function addRow(field='rp1',op='gt',value='0',value2='0'){const d=document.createElement('div');d.className='condition';const f=makeSelect('field',fields,field),o=makeSelect('op',opLabels,op),v=document.createElement('input'),v2=document.createElement('input');v.type=v2.type='number';v.step=v2.step='any';v.name='value';v2.name='value2';v.value=value;v2.value=value2;v.className=v2.className='short';const del=document.createElement('button');del.type='button';del.className='ghost';del.textContent='حذف';del.onclick=()=>d.remove();o.onchange=()=>v2.style.display=o.value==='between'?'':'none';d.append(f,o,v,v2,del);o.onchange();document.getElementById('filters').append(d)}
+const DEFAULT_PRESET = Object.freeze({
+  market:'USA', benchmark:'EGX30', day:'2026-06-05', start:'', end:'', logic:'AND', sort:'rp1', limit:'500',
+  conditions:[
+    {field:'avg_rp5',op:'lt',value:'1',value2:'0'},
+    {field:'adx14',op:'gt',value:'11',value2:'0'},
+    {field:'plus_di14',op:'lt',value:'20',value2:'0'},
+    {field:'minus_di14',op:'gt',value:'20',value2:'0'},
+    {field:'stock_day_pct',op:'lt',value:'1.1',value2:'0'}
+  ]
+});
+const JUNE5_PRESET = Object.freeze({
+  market:'USA', benchmark:'EGX30', day:'2026-06-05', start:'', end:'', logic:'AND', sort:'rp1', limit:'500',
+  conditions:[
+    {field:'rp5',op:'between',value:'5.2',value2:'7.6'},
+    {field:'avg_rp5',op:'between',value:'1.0',value2:'1.6'},
+    {field:'avg_rp20',op:'between',value:'-0.4',value2:'0.3'},
+    {field:'rp1',op:'between',value:'3.8',value2:'4.9'},
+    {field:'plus_di14',op:'between',value:'22.8',value2:'27.3'},
+    {field:'minus_di14',op:'between',value:'14.2',value2:'17.8'},
+    {field:'adx14',op:'between',value:'8.7',value2:'10.9'},
+    {field:'stock_day_pct',op:'between',value:'1.1',value2:'2.3'}
+  ]
+});
+const BUILTIN_PRESETS={'__default__':DEFAULT_PRESET,'__june5__':JUNE5_PRESET};
+const STORE_KEY = 'usa_rs_dynamic_screening_presets_v1';
+const fieldNames = new Set(Object.keys(fields));
+const opNames = new Set(Object.keys(opLabels));
+const form=document.getElementById('form');
+function syncBenchmark(){const egypt=form.elements.market.value==='EG';document.getElementById('benchmarkWrap').style.display=egypt?'':'none';form.elements.benchmark.disabled=!egypt}
+form.elements.market.addEventListener('change',syncBenchmark);syncBenchmark();
+const presetSelect=document.getElementById('presetSelect');
+const presetName=document.getElementById('presetName');
+const status=document.getElementById('presetStatus');
+function notify(msg){status.textContent=msg}
+function savedPresets(){try{const o=JSON.parse(localStorage.getItem(STORE_KEY)||'{}');return o&&typeof o==='object'&&!Array.isArray(o)?o:{}}catch{return {}}}
+function persistPresets(p){try{localStorage.setItem(STORE_KEY,JSON.stringify(p));return true}catch{notify('المتصفح منع الحفظ؛ تأكدي من السماح بتخزين بيانات المواقع.');return false}}
+function capture(){return {
+ market:form.elements.market.value,benchmark:form.elements.benchmark.value,day:form.elements.day.value,start:form.elements.start.value,end:form.elements.end.value,
+ logic:form.elements.logic.value,sort:form.elements.sort.value,limit:form.elements.limit.value,
+ conditions:Array.from(document.querySelectorAll('#filters .condition')).map(d=>({
+  field:d.querySelector('[name="field"]').value,op:d.querySelector('[name="op"]').value,
+  value:d.querySelector('[name="value"]').value,value2:d.querySelector('[name="value2"]').value
+ }))
+}}
+function applyPreset(p){if(!p||!Array.isArray(p.conditions))return notify('الإعدادات غير صالحة');
+ form.elements.market.value=['USA','EG','SA'].includes(p.market)?p.market:'USA';
+ form.elements.benchmark.value=['EGX30','EGXALL','OR','AND'].includes(p.benchmark)?p.benchmark:'EGX30';syncBenchmark();
+ form.elements.day.value=p.day||'';form.elements.start.value=p.start||'';form.elements.end.value=p.end||'';
+ form.elements.logic.value=p.logic==='OR'?'OR':'AND';
+ form.elements.sort.value=fieldNames.has(p.sort)?p.sort:'rp1';
+ form.elements.limit.value=['100','500','2000'].includes(String(p.limit))?String(p.limit):'500';
+ document.getElementById('filters').replaceChildren();
+ p.conditions.slice(0,12).forEach(c=>{if(fieldNames.has(c.field)&&opNames.has(c.op))addRow(c.field,c.op,String(c.value??'0'),String(c.value2??'0'))});
+ notify('تم تحميل الإعدادات. اضغطي «فحص السوق» لتطبيقها.');
+}
+function refreshPresets(selected='__default__'){
+ const presets=savedPresets();presetSelect.replaceChildren(new Option('الافتراضي — شروط الصورة','__default__'), new Option('June 5 – Six Stocks | بصمة الأسهم الستة','__june5__'));
+ Object.keys(presets).sort((a,b)=>a.localeCompare(b,'ar')).forEach(name=>presetSelect.add(new Option(name,name)));
+ presetSelect.value=Object.prototype.hasOwnProperty.call(presets,selected)||Object.prototype.hasOwnProperty.call(BUILTIN_PRESETS,selected)?selected:'__default__';
+}
+const hasQuery = new URLSearchParams(location.search).has('run') || initial.field.length>0;
+if(hasQuery){if(initial.field.length){initial.field.forEach((f,i)=>addRow(f,initial.op[i]||'gt',initial.value[i]??'0',initial.value2[i]??'0'))}else addRow()}
+else applyPreset(DEFAULT_PRESET);
+refreshPresets();syncBenchmark();
+document.getElementById('loadPreset').onclick=()=>{
+ const name=presetSelect.value;
+ const preset=BUILTIN_PRESETS[name]||savedPresets()[name];
+ if(!preset||!Array.isArray(preset.conditions)){notify('القالب غير موجود');return;}
+ applyPreset(preset);
+ presetName.value=Object.prototype.hasOwnProperty.call(BUILTIN_PRESETS,name)?'':name;
+ // Submitting after rebuilding the rows prevents stale URL filters from being reused.
+ // The GET form serializes the currently visible controls, not previous search parameters.
+ form.requestSubmit();
+};
+document.getElementById('savePreset').onclick=()=>{
+ const name=presetName.value.trim();
+ if(!name){notify('اكتبي اسم للإعدادات أولًا');presetName.focus();return}
+ if(name.length>70){notify('الاسم طويل جدًا');return}
+ if(Object.prototype.hasOwnProperty.call(BUILTIN_PRESETS,name)){notify('القوالب الجاهزة ثابتة، اختاري اسمًا مختلفًا');return}
+ const p=savedPresets();if(Object.prototype.hasOwnProperty.call(p,name)&&!confirm('الاسم موجود بالفعل. هل تريدين تحديث الإعدادات المحفوظة؟'))return;
+ p[name]=capture();if(persistPresets(p)){refreshPresets(name);notify('تم حفظ «'+name+'» على المتصفح الحالي')}
+};
+document.getElementById('deletePreset').onclick=()=>{
+ const name=presetSelect.value;if(Object.prototype.hasOwnProperty.call(BUILTIN_PRESETS,name)){notify('لا يمكن حذف القوالب الجاهزة');return}
+ if(!confirm('هل تريدين حذف «'+name+'»؟'))return;
+ const p=savedPresets();delete p[name];if(persistPresets(p)){refreshPresets();notify('تم حذف الإعدادات المحفوظة')}
+};
+let exp=document.getElementById('export');if(exp)exp.href='/screening.csv?'+new URLSearchParams(new FormData(document.getElementById('form'))).toString();
+</script></body></html>
